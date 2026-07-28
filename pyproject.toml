@@ -12,7 +12,9 @@ license = { text = "MIT" }
 authors = [{ name = "Frank Romero" }]
 dependencies = [
     "fastapi>=0.110",
-    "uvicorn>=0.29",
+    # Plain uvicorn ships no websocket protocol implementation and silently serves
+    # 404 on every websocket upgrade; the [standard] extra pulls in `websockets`.
+    "uvicorn[standard]>=0.29",
 ]
 
 [project.urls]
