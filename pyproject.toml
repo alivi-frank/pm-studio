@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pm-studio"
-version = "0.1.1"
+version = "0.2.0"
 description = "PM Studio - a local PM/dev-coordination studio driven by the headless Claude Code CLI: chat with a PM agent that specs, dispatches background dev agents into your repo, and merges parallel session worktrees back into main."
 readme = "README.md"
 requires-python = ">=3.11"

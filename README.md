@@ -25,7 +25,7 @@ state is JSON files plus git.
 Install a **pinned tag** into the environment of the project you want to run it in:
 
 ```bash
-pip install "pm-studio @ git+https://github.com/fromerosk/pm-studio@v0.1.0"
+pip install "pm-studio @ git+https://github.com/fromerosk/pm-studio@v0.2.0"
 ```
 
 ## Use

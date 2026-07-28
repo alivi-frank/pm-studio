@@ -6,4 +6,4 @@ the moment each dev task finishes, and merges parallel session worktrees back in
 main. Install into any git repo and run `python -m pm_studio` from the repo root.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
