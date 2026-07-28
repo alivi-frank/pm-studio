@@ -6,10 +6,5 @@ build/
 *.egg-info/
 .DS_Store
 
-# PM Studio runtime/bookkeeping state (per-session, not product content)
-studio_data/workspace/current/chat_history.json
-studio_data/workspace/current/pm_session_id.txt
-studio_data/workspace/current/tasks/
-studio_data/workspace/sessions/
-studio_data/workspace/sessions.json
-studio_data/workspace/roadmap/
+# PM Studio runtime/bookkeeping state from dogfooding (sessions, logs, worktrees)
+studio_data/
