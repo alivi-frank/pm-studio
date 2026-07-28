@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>PM Studio — Sessions</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --surface: #fcfcfb;
+    --page: #f9f9f7;
+    --ink-primary: #0b0b0b;
+    --ink-secondary: #52514e;
+    --ink-muted: #898781;
+    --border: rgba(11, 11, 11, 0.10);
+    --status-active: #0ca30c;
+    --status-merging: #b8860b;
+    --status-merged: #2a78d6;
+    --status-conflict: #d03b3b;
+    --status-archived: #898781;
+    --accent: #2a78d6;
+    --accent-fg: #ffffff;
+    /* Live activity (orthogonal to lifecycle status): working uses the active green;
+       waiting-for-input is the loud "your move" treatment. */
+    --activity-working: #0ca30c;
+    --waiting-accent: #c77700;
+    --waiting-bg: rgba(199, 119, 0, 0.09);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface: #1a1a19;
+      --page: #0d0d0d;
+      --ink-primary: #ffffff;
+      --ink-secondary: #c3c2b7;
+      --ink-muted: #898781;
+      --border: rgba(255, 255, 255, 0.10);
+      --status-active: #0ca30c;
+      --status-merging: #d4a72c;
+      --status-merged: #3987e5;
+      --status-conflict: #e66767;
+      --status-archived: #898781;
+      --accent: #3987e5;
+      --accent-fg: #ffffff;
+      --activity-working: #2fce2f;
+      --waiting-accent: #e0a33c;
+      --waiting-bg: rgba(224, 163, 60, 0.13);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--page);
+    color: var(--ink-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  header {
+    padding: 20px 24px;
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 1.2em; margin: 0; }
+  header p { margin: 4px 0 0; color: var(--ink-muted); font-size: 0.85em; }
+  main {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 24px;
+  }
+  #new-form {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 24px;
+  }
+  #new-form input {
+    flex: 1;
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--ink-primary);
+    font: inherit;
+  }
+  #new-form select {
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--ink-primary);
+    font: inherit;
+  }
+  .card .product-badge {
+    font-size: 0.78em;
+    color: var(--ink-muted);
+    margin-top: 2px;
+  }
+  #new-form button {
+    padding: 10px 18px;
+    border: none;
+    border-radius: 8px;
+    background: var(--accent);
+    color: var(--accent-fg);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #new-form button:disabled { opacity: 0.5; cursor: default; }
+  #list { display: flex; flex-direction: column; gap: 10px; }
+  .card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 18px;
+  }
+  .card:hover { border-color: var(--accent); }
+  .card .link { text-decoration: none; color: inherit; flex: 1; min-width: 0; }
+  .card .name { font-weight: 600; }
+  .card .goal {
+    font-size: 0.82em;
+    color: var(--ink-secondary);
+    margin-top: 3px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+  }
+  .card .branch {
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 0.8em;
+    color: var(--ink-muted);
+    margin-top: 2px;
+  }
+  .card .result-note {
+    font-size: 0.78em;
+    color: var(--ink-muted);
+    margin-top: 4px;
+  }
+  /* Live activity treatment (separate from the lifecycle status badge on the right). */
+  .card.waiting {
+    border-left: 4px solid var(--waiting-accent);
+    background: var(--waiting-bg);
+  }
+  .card .activity {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    margin-top: 6px;
+    font-size: 0.78em;
+    font-weight: 600;
+    max-width: 100%;
+  }
+  .card .activity.working { color: var(--activity-working); }
+  .card .activity.waiting { color: var(--waiting-accent); }
+  .card .activity .dot {
+    flex-shrink: 0;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: currentColor;
+    animation: activity-pulse 1.4s ease-in-out infinite;
+  }
+  .card .activity .activity-detail {
+    color: var(--ink-secondary);
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  @keyframes activity-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.3; transform: scale(0.62); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .card .activity .dot { animation: none; }
+  }
+  .card .actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  .card .actions button {
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--ink-secondary);
+    font: inherit;
+    font-size: 0.8em;
+    cursor: pointer;
+  }
+  .card .actions button:hover { border-color: var(--accent); color: var(--accent); }
+  .card .actions button:disabled { opacity: 0.5; cursor: default; }
+  .card .actions button.terminate:hover { border-color: var(--status-conflict); color: var(--status-conflict); }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.8em;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .badge.active { color: var(--status-active); }
+  .badge.merging { color: var(--status-merging); }
+  .badge.merged { color: var(--status-merged); }
+  .badge.conflict { color: var(--status-conflict); }
+  .badge.archived { color: var(--status-archived); }
+  #toggle-row {
+    display: flex;
+    justify-content: flex-end;
+    margin: -12px 0 16px;
+  }
+  #toggle-row label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.85em;
+    color: var(--ink-secondary);
+    cursor: pointer;
+    user-select: none;
+  }
+  .card.archived-row { opacity: 0.55; }
+  .archived-flag-badge {
+    font-size: 0.72em;
+    font-weight: 600;
+    color: var(--ink-muted);
+    background: var(--border);
+    padding: 2px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>PM Studio — Sessions</h1>
+  <p>Each session is its own PM conversation on its own git branch/worktree - work on several at once, then merge back when ready.</p>
+  <p><a href="/roadmap">View product roadmap &rarr;</a></p>
+</header>
+<main>
+  <form id="new-form">
+    <input id="new-name" type="text" placeholder="Session name (optional — the PM will auto-title this session)" />
+    <select id="new-product"><option value="">General (no specific product)</option></select>
+    <select id="new-model"></select>
+    <button id="new-submit" type="submit">+ New session</button>
+  </form>
+  <div id="toggle-row">
+    <label for="show-archived">
+      <input id="show-archived" type="checkbox" />
+      Show archived
+    </label>
+  </div>
+  <div id="list"></div>
+</main>
+<script>
+  const list = document.getElementById("list");
+  const form = document.getElementById("new-form");
+  const nameInput = document.getElementById("new-name");
+  const productSelect = document.getElementById("new-product");
+  const modelSelect = document.getElementById("new-model");
+  const submitBtn = document.getElementById("new-submit");
+  const showArchivedCheckbox = document.getElementById("show-archived");
+  let showArchived = false;
+  let PRODUCTS = {};
+
+  fetch("/roadmap/data")
+    .then((r) => r.json())
+    .then((data) => {
+      PRODUCTS = data.products || {};
+      for (const [id, label] of Object.entries(PRODUCTS)) {
+        const opt = document.createElement("option");
+        opt.value = id; opt.textContent = label;
+        productSelect.appendChild(opt);
+      }
+      renderList(); // re-render with product labels now known
+    })
+    .catch(() => {});
+
+  fetch("/models")
+    .then((r) => r.json())
+    .then((models) => {
+      for (const m of models) {
+        const opt = document.createElement("option");
+        opt.value = m.id; opt.textContent = m.label;
+        modelSelect.appendChild(opt);
+      }
+    })
+    .catch(() => {});
+
+  const STATUS_LABEL = {
+    active: "● Active",
+    merging: "● Merging…",
+    merged: "✓ Merged",
+    conflict: "✗ Conflict",
+    archived: "○ Archived",
+  };
+
+  const pending = new Map(); // session id -> "sync" | "terminate" | "archive" | "unarchive", while a request is in flight
+
+  function resultNote(session) {
+    // sync_result never affects status, so surface its outcome separately.
+    const sync = session.sync_result;
+    if (!sync) return "";
+    if (sync.outcome === "failed") return `Last sync failed: ${sync.message ?? "unknown error"}`;
+    if (sync.outcome === "auto_resolved") return "Last sync: auto-resolved a conflict from main.";
+    if (sync.outcome === "clean") return "Up to date with main.";
+    return "";
+  }
+
+  // Live activity (working/waiting/idle) is derived server-side and delivered on the
+  // session payload; treat a missing/malformed value as idle.
+  function activityInfo(session) {
+    const a = session.activity;
+    if (a && typeof a === "object" && (a.state === "working" || a.state === "waiting")) return a;
+    return { state: "idle", reason: null, detail: null };
+  }
+
+  function truncate(text, max) {
+    return text.length > max ? text.slice(0, max - 1) + "…" : text;
+  }
+
+  function buildActivityEl(activity) {
+    if (activity.state === "waiting") {
+      const el = document.createElement("div");
+      el.className = "activity waiting";
+      el.innerHTML = `<span aria-hidden="true">⏳</span><span>Waiting for you</span>`;
+      return el;
+    }
+    if (activity.state !== "working") return null;
+    const el = document.createElement("div");
+    el.className = "activity working";
+    const dot = document.createElement("span");
+    dot.className = "dot";
+    el.appendChild(dot);
+    const labelSpan = document.createElement("span");
+    if (activity.reason === "dev_task") {
+      labelSpan.textContent = "Running dev task";
+      el.appendChild(labelSpan);
+      if (activity.detail) {
+        const detail = document.createElement("span");
+        detail.className = "activity-detail";
+        detail.textContent = "· " + truncate(activity.detail, 48);
+        el.appendChild(detail);
+      }
+    } else {
+      labelSpan.textContent = "Thinking…";
+      el.appendChild(labelSpan);
+    }
+    return el;
+  }
+
+  function renderCard(session) {
+    const card = document.createElement("div");
+    const activity = activityInfo(session);
+    const classes = ["card"];
+    if (session.archived) classes.push("archived-row");
+    if (activity.state === "waiting") classes.push("waiting");
+    card.className = classes.join(" ");
+    const label = STATUS_LABEL[session.status] ?? session.status;
+    const note = resultNote(session);
+    const busy = pending.get(session.id);
+
+    // Identity is now the PM-maintained title, falling back to the creation name, then a
+    // placeholder. The manual name is no longer shown once a title differs from it.
+    const heading = session.title || session.name || "Untitled session";
+    const goal = (session.goal || "").trim();
+
+    card.innerHTML = `
+      <a class="link" href="/chat/${session.id}">
+        <div class="name"></div>
+        ${goal ? `<div class="goal"></div>` : ""}
+        <div class="branch"></div>
+        ${session.product ? `<div class="product-badge"></div>` : ""}
+        ${note ? `<div class="result-note"></div>` : ""}
+      </a>
+      <div class="actions"></div>
+      ${session.archived ? `<span class="archived-flag-badge">Archived</span>` : ""}
+      <span class="badge ${session.status}">${label}</span>
+    `;
+    card.querySelector(".name").textContent = session.is_default ? `${heading} (default)` : heading;
+    if (goal) card.querySelector(".goal").textContent = goal;
+    const branchEl = card.querySelector(".branch");
+    branchEl.textContent = session.branch;
+    const activityEl = buildActivityEl(activity);
+    if (activityEl) branchEl.insertAdjacentElement("afterend", activityEl);
+    if (session.product) {
+      card.querySelector(".product-badge").textContent = PRODUCTS[session.product] ?? session.product;
+    }
+    if (note) card.querySelector(".result-note").textContent = note;
+
+    const actions = card.querySelector(".actions");
+    const canAct = !session.is_default && (session.status === "active" || session.status === "conflict");
+    if (canAct) {
+      const syncBtn = document.createElement("button");
+      syncBtn.type = "button";
+      syncBtn.textContent = busy === "sync" ? "Syncing…" : "Sync from main";
+      syncBtn.disabled = Boolean(busy);
+      syncBtn.title = "Merge main into this session so it doesn't drift too far to merge back cleanly later.";
+      syncBtn.addEventListener("click", (e) => { e.preventDefault(); startSync(session.id); });
+      actions.appendChild(syncBtn);
+
+      const termBtn = document.createElement("button");
+      termBtn.type = "button";
+      termBtn.className = "terminate";
+      termBtn.textContent = busy === "terminate" || session.status === "merging" ? "Terminating…" : "Terminate";
+      termBtn.disabled = Boolean(busy) || session.status === "merging";
+      termBtn.title = "Merges this session into main, archives its final spec/chat, then removes the worktree.";
+      termBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        if (!confirm(`Terminate "${heading}"? This merges its work into main (auto-resolving conflicts if needed), archives its final spec/chat, then removes the session. This cannot be undone from the UI.`)) return;
+        startTerminate(session.id);
+      });
+      actions.appendChild(termBtn);
+    }
+
+    const archiveBtn = document.createElement("button");
+    archiveBtn.type = "button";
+    archiveBtn.title = session.archived
+      ? "Show this session in the default list again."
+      : "Hide this session from the default list.";
+    if (session.archived) {
+      archiveBtn.textContent = busy === "unarchive" ? "Unarchiving…" : "Unarchive";
+      archiveBtn.disabled = Boolean(busy);
+      archiveBtn.addEventListener("click", (e) => { e.preventDefault(); startArchiveToggle(session.id, "unarchive"); });
+    } else {
+      archiveBtn.textContent = busy === "archive" ? "Archiving…" : "Archive";
+      archiveBtn.disabled = Boolean(busy);
+      archiveBtn.addEventListener("click", (e) => { e.preventDefault(); startArchiveToggle(session.id, "archive"); });
+    }
+    actions.appendChild(archiveBtn);
+
+    return card;
+  }
+
+  function startSync(sessionId) {
+    pending.set(sessionId, "sync");
+    const session = lastKnown.get(sessionId);
+    if (session) upsert(session);
+    fetch(`/sessions/${sessionId}/sync`, { method: "POST" })
+      .catch(() => {})
+      .finally(() => {
+        pending.delete(sessionId);
+        const current = lastKnown.get(sessionId);
+        if (current) upsert(current);
+      });
+  }
+
+  function startTerminate(sessionId) {
+    pending.set(sessionId, "terminate");
+    const session = lastKnown.get(sessionId);
+    if (session) upsert(session);
+    fetch(`/sessions/${sessionId}/terminate`, { method: "POST" })
+      .then((r) => {
+        if (!r.ok) return r.json().then((body) => { throw new Error(body.detail ?? "terminate failed"); });
+        return r.json();
+      })
+      .then((session) => { lastKnown.set(sessionId, session); upsert(session); })
+      .catch((err) => alert(err.message))
+      .finally(() => {
+        pending.delete(sessionId);
+        const current = lastKnown.get(sessionId);
+        if (current) upsert(current);
+      });
+  }
+
+  function startArchiveToggle(sessionId, action) {
+    pending.set(sessionId, action);
+    const session = lastKnown.get(sessionId);
+    if (session) renderList();
+    fetch(`/sessions/${sessionId}/${action}`, { method: "POST" })
+      .then((r) => {
+        if (!r.ok) return r.json().then((body) => { throw new Error(body.detail ?? `${action} failed`); });
+        return r.json();
+      })
+      .then((updated) => { lastKnown.set(sessionId, updated); })
+      .catch((err) => alert(err.message))
+      .finally(() => {
+        pending.delete(sessionId);
+        renderList();
+      });
+  }
+
+  const lastKnown = new Map(); // session id -> last session object seen
+
+  function upsert(session) {
+    lastKnown.set(session.id, session);
+    renderList();
+  }
+
+  // Waiting-for-input cards float to the top, then working, then the rest - preserving
+  // created_at order within each group so "who needs me" and "what's live" are scannable.
+  function activityRank(session) {
+    const state = activityInfo(session).state;
+    if (state === "waiting") return 0;
+    if (state === "working") return 1;
+    return 2;
+  }
+
+  function renderList() {
+    list.innerHTML = "";
+    const sessionsToShow = [...lastKnown.values()]
+      .filter((s) => showArchived || !s.archived)
+      .sort((a, b) => {
+        const rankDiff = activityRank(a) - activityRank(b);
+        return rankDiff !== 0 ? rankDiff : a.created_at - b.created_at;
+      });
+    for (const session of sessionsToShow) list.appendChild(renderCard(session));
+  }
+
+  showArchivedCheckbox.addEventListener("change", () => {
+    showArchived = showArchivedCheckbox.checked;
+    renderList();
+  });
+
+  function loadSessions() {
+    fetch("/sessions")
+      .then((r) => r.json())
+      .then((allSessions) => {
+        for (const session of allSessions) lastKnown.set(session.id, session);
+        renderList();
+      });
+  }
+
+  loadSessions();
+
+  const ws = new WebSocket(`ws://${location.host}/ws/sessions`);
+  ws.onmessage = (msg) => {
+    const event = JSON.parse(msg.data);
+    if (event.session) upsert(event.session);
+  };
+
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    submitBtn.disabled = true;
+    fetch("/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: nameInput.value.trim(), product: productSelect.value, model: modelSelect.value }),
+    })
+      .then((r) => r.json())
+      .then((session) => {
+        location.href = `/chat/${session.id}`;
+      })
+      .catch(() => { submitBtn.disabled = false; });
+  });
+</script>
+</body>
+</html>

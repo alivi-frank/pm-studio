@@ -1,0 +1,1170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>PM Studio — Chat</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #6b6b6b;
+    --bubble-user: #2563eb;
+    --bubble-user-fg: #ffffff;
+    --bubble-pm: #f1f1f3;
+    --bubble-pm-fg: #1a1a1a;
+    --border: #e3e3e6;
+    --surface: #f7f7f8;
+    --status-running: #2a78d6;
+    --status-done: #0ca30c;
+    --status-error: #d03b3b;
+    --status-auto: #b8860b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17181c;
+      --fg: #ececec;
+      --muted: #9a9a9a;
+      --bubble-user: #3b6fe0;
+      --bubble-user-fg: #ffffff;
+      --bubble-pm: #26272c;
+      --bubble-pm-fg: #ececec;
+      --border: #2c2d33;
+      --surface: #1f2025;
+      --status-running: #3987e5;
+      --status-done: #0ca30c;
+      --status-error: #e66767;
+      --status-auto: #d4a72c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+  #session-goal {
+    display: none;
+    font-weight: 400;
+    font-size: 0.82em;
+    color: var(--muted);
+    margin-top: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  header a, .link-btn {
+    color: var(--bubble-user);
+    text-decoration: none;
+    font-weight: 500;
+    font-size: 0.85em;
+  }
+  header a:hover, .link-btn:hover { text-decoration: underline; }
+  .link-btn {
+    background: none;
+    border: none;
+    font-family: inherit;
+    padding: 0;
+    cursor: pointer;
+  }
+  #product-badge {
+    display: none;
+    font-size: 0.78em;
+    font-weight: 500;
+    color: var(--muted);
+    margin-left: 6px;
+    padding: 2px 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+  }
+  #shell {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+  }
+  #chat-col {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  #model-select {
+    font: inherit;
+    font-size: 0.8em;
+    font-weight: 500;
+    color: var(--muted);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 2px 6px;
+    margin-left: 6px;
+  }
+  #model-select:disabled { opacity: 0.6; }
+  #log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 22px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .row { display: flex; }
+  .row.user { justify-content: flex-end; }
+  .bubble {
+    max-width: 70%;
+    padding: 10px 14px;
+    border-radius: 14px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+  .row.user .bubble { background: var(--bubble-user); color: var(--bubble-user-fg); }
+  .row.pm .bubble { background: var(--bubble-pm); color: var(--bubble-pm-fg); }
+  .row.status .bubble {
+    background: transparent;
+    color: var(--muted);
+    font-size: 0.85em;
+    font-style: italic;
+    border: 1px dashed var(--border);
+  }
+  form {
+    display: flex;
+    gap: 8px;
+    padding: 14px 20px;
+  }
+  textarea {
+    flex: 1;
+    resize: none;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+    font: inherit;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  button {
+    padding: 0 18px;
+    border: none;
+    border-radius: 10px;
+    background: var(--bubble-user);
+    color: var(--bubble-user-fg);
+    font: inherit;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .attach-btn {
+    padding: 0 14px;
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid var(--border);
+  }
+  .bubble .attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 6px;
+  }
+  .bubble .attachments img {
+    max-width: 160px;
+    max-height: 160px;
+    border-radius: 8px;
+    display: block;
+    object-fit: cover;
+  }
+  #composer { display: flex; flex-direction: column; border-top: 1px solid var(--border); flex-shrink: 0; }
+  #preview-strip {
+    display: none;
+    gap: 8px;
+    padding: 10px 20px 0;
+    flex-wrap: wrap;
+  }
+  #preview-strip.has-items { display: flex; }
+  .preview-thumb {
+    position: relative;
+    width: 56px;
+    height: 56px;
+  }
+  .preview-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+  .preview-thumb button {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border-radius: 50%;
+    line-height: 18px;
+    font-size: 12px;
+    background: var(--muted);
+  }
+
+  /* ---- session lifecycle strip (compact, collapsible, under the header) ---- */
+  #session-strip {
+    flex-shrink: 0;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  #strip-summary {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 20px;
+    background: none;
+    border: none;
+    border-radius: 0;
+    color: var(--fg);
+    font: inherit;
+    cursor: pointer;
+  }
+  #strip-summary:hover { background: var(--bubble-pm); }
+  #strip-summary-content {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+  .strip-branch {
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 0.82em;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .strip-chevron {
+    color: var(--muted);
+    font-size: 0.75em;
+    flex-shrink: 0;
+    transition: transform 0.2s ease;
+  }
+  #session-strip.expanded .strip-chevron { transform: rotate(180deg); }
+  #strip-details { padding: 2px 20px 14px; }
+  #session-strip:not(.expanded) #strip-details { display: none; }
+  .strip-name-row { font-weight: 600; font-size: 0.9em; margin-bottom: 10px; }
+  .strip-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  #strip-details .note { margin-top: 10px; font-size: 0.85em; color: var(--fg); }
+
+  /* Dev-task card rendered inline in the chat timeline: a bordered block indented
+     from the bubbles with a status-colored left accent and a little elbow connector
+     up into the gap, so it reads as "spawned by" the surrounding conversation. */
+  .task-card {
+    position: relative;
+    align-self: stretch;
+    margin-left: 30px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--status-running);
+    border-radius: 12px;
+    padding: 12px 14px;
+  }
+  .task-card::before {
+    content: "";
+    position: absolute;
+    left: -18px;
+    top: -14px;
+    width: 14px;
+    bottom: calc(50% - 1px);
+    border-left: 2px solid var(--border);
+    border-bottom: 2px solid var(--border);
+    border-bottom-left-radius: 10px;
+    pointer-events: none;
+  }
+  .task-card.done { border-left-color: var(--status-done); }
+  .task-card.error { border-left-color: var(--status-error); }
+  .task-card.running { animation: card-pulse 2s ease-in-out infinite; }
+  @keyframes card-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(42, 120, 214, 0); }
+    50% { box-shadow: 0 0 0 3px rgba(42, 120, 214, 0.14); }
+  }
+  .task-card .description { font-weight: 500; }
+  .card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 16px;
+  }
+  .card-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.85em;
+    font-weight: 600;
+  }
+  .badge .dot { font-size: 1.1em; line-height: 1; }
+  .badge.running { color: var(--status-running); }
+  .badge.done, .badge.clean, .badge.active { color: var(--status-done); }
+  .badge.error, .badge.failed, .badge.conflict { color: var(--status-error); }
+  .badge.auto_resolved, .badge.merging { color: var(--status-auto); }
+  .badge.running .dot { animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
+  .meta {
+    font-size: 0.8em;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .description {
+    margin-top: 8px;
+    color: var(--fg);
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+  details { margin-top: 10px; }
+  summary {
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 0.85em;
+    user-select: none;
+  }
+  /* Collapsed task description: single truncated one-line preview. */
+  details.desc-disclosure > summary {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .desc-label { font-weight: 600; }
+  pre {
+    margin: 8px 0 0;
+    padding: 10px 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 0.82em;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    color: var(--muted);
+    max-height: 300px;
+    overflow-y: auto;
+  }
+  button.merge-btn {
+    padding: 8px 16px;
+    border: none;
+    border-radius: 8px;
+    background: var(--bubble-user);
+    color: var(--bubble-user-fg);
+    font: inherit;
+    font-size: 0.85em;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button.merge-btn:disabled { opacity: 0.5; cursor: default; }
+
+  /* ---- jump-to-latest pill + unread "New" divider ---- */
+  #log-wrap {
+    flex: 1;
+    min-height: 0;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+  }
+  #jump-btn {
+    position: absolute;
+    right: 20px;
+    bottom: 16px;
+    z-index: 5;
+    display: none;           /* shown (as inline-flex) only when scrolled up or unread */
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    border-radius: 999px;
+    background: var(--bubble-user);
+    color: var(--bubble-user-fg);
+    border: none;
+    font: inherit;
+    font-size: 0.85em;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.22);
+  }
+  #jump-btn.show { display: inline-flex; }
+  #jump-btn .jump-arrow { font-size: 1.05em; line-height: 1; }
+  #jump-btn:focus-visible {
+    outline: 2px solid var(--fg);
+    outline-offset: 2px;
+  }
+  /* Full-width "New" separator inserted before the first unread item. */
+  .new-divider {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 2px 0;
+    color: var(--bubble-user);
+    font-size: 0.72em;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .new-divider::before, .new-divider::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: currentColor;
+    opacity: 0.45;
+  }
+
+  @media (max-width: 700px) {
+    #strip-summary, #strip-details { padding-left: 14px; padding-right: 14px; }
+    #log { padding: 16px; }
+    .bubble { max-width: 85%; }
+    .task-card { margin-left: 22px; }
+  }
+</style>
+</head>
+<body>
+<header><a href="/" style="color:var(--muted);text-decoration:none;font-size:0.85em;">&larr; Sessions</a> &middot; <span id="session-title">PM Chat</span><span id="product-badge"></span> <select id="model-select" title="Claude model for this session's PM turns and dev tasks"></select> &middot; <button id="reset-btn" type="button" style="background:none;border:none;color:var(--muted);font:inherit;font-size:0.85em;cursor:pointer;padding:0;text-decoration:underline;">Reset chat</button><div id="session-goal"></div></header>
+<div id="session-strip">
+  <button id="strip-summary" type="button" aria-expanded="false" title="Session lifecycle">
+    <span id="strip-summary-content"></span>
+    <span class="strip-chevron" aria-hidden="true">&#9662;</span>
+  </button>
+  <div id="strip-details"></div>
+</div>
+<div id="shell">
+  <div id="chat-col">
+    <div id="log-wrap">
+      <div id="log"></div>
+      <button id="jump-btn" type="button" aria-label="Jump to latest">
+        <span class="jump-arrow" aria-hidden="true">&#8595;</span>
+        <span class="jump-label">Jump to latest</span>
+      </button>
+    </div>
+    <div id="composer">
+      <div id="preview-strip"></div>
+      <form id="form">
+        <button id="attach-btn" class="attach-btn" type="button" title="Attach image(s)">&#128206;</button>
+        <input id="file-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden />
+        <textarea id="input" rows="1" placeholder="Talk to your PM... (paste or attach images too)"></textarea>
+        <button id="send" type="submit">Send</button>
+      </form>
+    </div>
+  </div>
+</div>
+<script>
+  const log = document.getElementById("log");
+  const form = document.getElementById("form");
+  const input = document.getElementById("input");
+  const sendBtn = document.getElementById("send");
+  const attachBtn = document.getElementById("attach-btn");
+  const fileInput = document.getElementById("file-input");
+  const previewStrip = document.getElementById("preview-strip");
+
+  // URL is /chat/{session_id}
+  const sessionId = location.pathname.split("/").filter(Boolean).pop();
+
+  const sessionTitleEl = document.getElementById("session-title");
+  const sessionGoalEl = document.getElementById("session-goal");
+  const productBadgeEl = document.getElementById("product-badge");
+  const modelSelectEl = document.getElementById("model-select");
+  let availableModels = null; // [{id, label}], once /models resolves
+
+  function applySessionMeta(session) {
+    // Prefer the PM-maintained title, falling back to the creation name (consistent with
+    // the sessions list); show the goal as a muted subtitle when present.
+    const heading = (session && (session.title || session.name)) || "PM Chat";
+    sessionTitleEl.textContent = heading;
+    document.title = heading;
+    const goal = session && (session.goal || "").trim();
+    if (goal) {
+      sessionGoalEl.textContent = goal;
+      sessionGoalEl.style.display = "block";
+    } else {
+      sessionGoalEl.style.display = "none";
+    }
+    if (session && session.product) {
+      fetch("/roadmap/data")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          const label = (data && data.products && data.products[session.product]) || session.product;
+          productBadgeEl.textContent = label;
+          productBadgeEl.style.display = "inline-block";
+        })
+        .catch(() => {});
+    }
+    if (session) renderSessionStrip(session);
+    if (session && session.model) {
+      modelSelectEl.dataset.pendingModel = session.model;
+      populateModelSelect(session.model);
+    }
+  }
+
+  function populateModelSelect(currentModel) {
+    if (!availableModels) return; // /models hasn't resolved yet - the /models .then() re-calls this once it has
+    modelSelectEl.innerHTML = "";
+    for (const m of availableModels) {
+      const opt = document.createElement("option");
+      opt.value = m.id; opt.textContent = m.label;
+      modelSelectEl.appendChild(opt);
+    }
+    modelSelectEl.value = currentModel;
+  }
+
+  fetch(`/sessions/${sessionId}`)
+    .then((r) => (r.ok ? r.json() : null))
+    .then(applySessionMeta)
+    .catch(() => applySessionMeta(null));
+
+  // ---- session lifecycle strip (compact, collapsible, under the header) ----
+
+  const sessionStrip = document.getElementById("session-strip");
+  const stripSummary = document.getElementById("strip-summary");
+  const stripSummaryContent = document.getElementById("strip-summary-content");
+  const stripDetails = document.getElementById("strip-details");
+
+  // Collapsed by default; the summary (branch + status) stays visible, expanding
+  // reveals the Merge / Clean up buttons and merge_result details.
+  stripSummary.addEventListener("click", () => {
+    const expanded = sessionStrip.classList.toggle("expanded");
+    stripSummary.setAttribute("aria-expanded", expanded ? "true" : "false");
+  });
+
+  const BADGE = {
+    running: { dot: "●", label: "Running" },
+    done: { dot: "✓", label: "Done" },
+    error: { dot: "✗", label: "Error" },
+  };
+
+  const SESSION_BADGE = {
+    active: { dot: "●", label: "Active" },
+    merging: { dot: "●", label: "Merging…" },
+    merged: { dot: "✓", label: "Merged" },
+    conflict: { dot: "✗", label: "Conflict" },
+    archived: { dot: "○", label: "Archived" },
+  };
+
+  const OUTCOME_BADGE = {
+    clean: { dot: "✓", label: "Clean merge" },
+    auto_resolved: { dot: "⚠", label: "Auto-resolved merge" },
+    failed: { dot: "✗", label: "Merge failed" },
+  };
+
+  function relativeTime(seconds) {
+    const diff = Date.now() / 1000 - seconds;
+    if (diff < 60) return "just now";
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    return `${Math.floor(diff / 86400)}d ago`;
+  }
+
+  function duration(startedAt, finishedAt) {
+    const secs = Math.max(0, Math.round(finishedAt - startedAt));
+    if (secs < 60) return `${secs}s`;
+    return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+  }
+
+  const taskCards = new Map(); // task id -> inline card element in the timeline
+
+  function isNearBottom() {
+    return log.scrollHeight - log.scrollTop - log.clientHeight < 120;
+  }
+  function scrollToBottom() {
+    log.scrollTop = log.scrollHeight;
+  }
+
+  // ---- jump-to-latest + unread / last-read awareness (frontend only) ----
+  // A per-session last-read watermark (localStorage) lets us surface which items the
+  // user hasn't seen yet across reloads and while scrolled up / tabbed away.
+  const jumpBtn = document.getElementById("jump-btn");
+  const jumpLabel = jumpBtn.querySelector(".jump-label");
+  const LASTREAD_KEY = `pm-chat-lastread-${sessionId}`;
+
+  // Newest unread-worthy timestamp seen so far (chat bubbles + task cards). Connection/
+  // system status rows are never unread-worthy, so they never advance this.
+  let newestItemTs = -Infinity;
+  let dividerEl = null;
+  // Auto-marking read on "reaching bottom" stays disarmed until just after the initial
+  // hydrate + socket connect settle, so the programmatic jump-to-bottom and the
+  // "Connected." status row don't wipe a divider restored from a stored watermark.
+  let autoReadArmed = false;
+
+  function readLastRead() {
+    try {
+      const raw = localStorage.getItem(LASTREAD_KEY);
+      if (raw === null) return null;          // first visit: no watermark yet
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : null;   // legacy / garbage -> treat as first visit
+    } catch { return null; }
+  }
+  function writeLastRead(ts) {
+    if (!Number.isFinite(ts)) return;
+    try { localStorage.setItem(LASTREAD_KEY, String(ts)); } catch {}
+  }
+  // null means "everything read" (first visit or nothing newer than the watermark).
+  let lastReadTs = readLastRead();
+
+  // Tag an unread-worthy node with its timestamp so unread detection can compare it to
+  // the watermark. A non-finite ts (legacy entries with no ts) is treated as
+  // minus-infinity: the node is left untagged, so it never counts as new.
+  function tagItemTs(node, ts) {
+    if (Number.isFinite(ts)) {
+      node.dataset.unreadTs = String(ts);
+      if (ts > newestItemTs) newestItemTs = ts;
+    }
+    return node;
+  }
+  // Task cards use the newest of started_at / finished_at, so a task finishing while the
+  // user is away counts as new.
+  function taskTs(task) {
+    const s = Number.isFinite(task.started_at) ? task.started_at : -Infinity;
+    const f = Number.isFinite(task.finished_at) ? task.finished_at : -Infinity;
+    return Math.max(s, f);
+  }
+
+  // First unread node (ts > watermark) and the total unread count, in DOM order.
+  function computeUnread() {
+    if (lastReadTs === null) return { first: null, count: 0 };
+    let first = null, count = 0;
+    for (const n of log.querySelectorAll("[data-unread-ts]")) {
+      if (Number(n.dataset.unreadTs) > lastReadTs) {
+        if (!first) first = n;
+        count++;
+      }
+    }
+    return { first, count };
+  }
+
+  function removeDivider() {
+    if (dividerEl) { dividerEl.remove(); dividerEl = null; }
+  }
+  // Keep a single "New" divider immediately before the first unread item.
+  function placeDivider(firstUnread) {
+    if (!firstUnread) { removeDivider(); return; }
+    if (!dividerEl) {
+      dividerEl = document.createElement("div");
+      dividerEl.className = "new-divider";
+      dividerEl.setAttribute("role", "separator");
+      dividerEl.innerHTML = `<span>New</span>`;
+    }
+    if (firstUnread.previousElementSibling !== dividerEl) {
+      log.insertBefore(dividerEl, firstUnread);
+    }
+  }
+
+  // Recompute unread -> (re)place the divider and set the button's label + visibility.
+  // The button shows whenever the user is scrolled up (Feature 1) OR there are unread
+  // items to surface (e.g. the reload case, where we jumped to the bottom but there is
+  // unread above); it hides only when at/near bottom with nothing unread.
+  function refreshUnread() {
+    const { first, count } = computeUnread();
+    placeDivider(first);
+    const scrolledUp = !isNearBottom();
+    jumpBtn.classList.toggle("show", scrolledUp || count > 0);
+    if (count > 0) {
+      jumpLabel.textContent = `${count} new`;
+      jumpBtn.setAttribute("aria-label", `Jump to ${count} unread message${count === 1 ? "" : "s"}`);
+    } else {
+      jumpLabel.textContent = "Jump to latest";
+      jumpBtn.setAttribute("aria-label", "Jump to latest");
+    }
+  }
+
+  function atBottomAndVisible() {
+    return document.visibilityState === "visible" && isNearBottom();
+  }
+  // Advance the read watermark to the newest item and clear unread state.
+  function markReadAdvance() {
+    if (Number.isFinite(newestItemTs) && (lastReadTs === null || newestItemTs > lastReadTs)) {
+      lastReadTs = newestItemTs;
+      writeLastRead(lastReadTs);
+    }
+  }
+  // Auto-read path (append + scroll): only marks read once armed and truly caught up.
+  function syncReadState() {
+    if (autoReadArmed && atBottomAndVisible()) markReadAdvance();
+    refreshUnread();
+  }
+  // Returning to the tab is a genuine user action, so it may mark read even before the
+  // auto-read arm delay elapses.
+  function onVisibilityChange() {
+    if (atBottomAndVisible()) markReadAdvance();
+    refreshUnread();
+  }
+
+  function smoothScrollTo(top) {
+    const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    log.scrollTo({ top, behavior: reduce ? "auto" : "smooth" });
+  }
+
+  jumpBtn.addEventListener("click", () => {
+    // Jump to the FIRST UNREAD item (the "New" divider) rather than straight to the
+    // bottom, so the user reads what they missed in order. With nothing unread, fall
+    // back to the bottom. Either way, reaching the bottom (via the scroll handler)
+    // advances the watermark and clears the divider, so we don't mark read here.
+    const { first } = computeUnread();
+    if (first) {
+      const target = dividerEl && dividerEl.parentNode ? dividerEl : first;
+      const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+      target.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+    } else {
+      smoothScrollTo(log.scrollHeight);
+    }
+  });
+
+  log.addEventListener("scroll", syncReadState);
+  document.addEventListener("visibilitychange", onVisibilityChange);
+
+  function renderTaskCard(task) {
+    const badge = BADGE[task.status] ?? BADGE.running;
+    const card = document.createElement("div");
+    card.className = `task-card ${task.status}`;
+
+    const metaText = task.finished_at
+      ? `${relativeTime(task.started_at)} &middot; took ${duration(task.started_at, task.finished_at)}`
+      : relativeTime(task.started_at);
+
+    card.innerHTML = `
+      <div class="card-top">
+        <span class="badge ${task.status}"><span class="dot">${badge.dot}</span>${badge.label}</span>
+        <span class="meta">${metaText}</span>
+      </div>
+      <details class="desc-disclosure">
+        <summary><span class="desc-label">Task</span>&nbsp;<span class="desc-preview"></span></summary>
+        <div class="description"></div>
+      </details>
+      ${task.result ? `<details><summary>Result</summary><pre></pre></details>` : ""}
+    `;
+    const desc = (task.description ?? "").trim();
+    // Collapsed preview: first line, truncated to a short one-line snippet.
+    const firstLine = desc.split("\n")[0];
+    const preview = firstLine.length > 90 ? firstLine.slice(0, 90) + "…" : firstLine;
+    card.querySelector(".desc-preview").textContent = preview;
+    card.querySelector(".description").textContent = task.description;
+    if (task.result) {
+      card.querySelector("pre").textContent = task.result;
+    }
+    return card;
+  }
+
+  // Upsert a task's inline card. A task seen for the first time appends its card at the
+  // current bottom of the timeline (it's happening now); a known task replaces its
+  // existing card in place, keeping its chronological position in the stream.
+  function upsertTaskCard(task) {
+    const near = isNearBottom();
+    const rendered = renderTaskCard(task);
+    tagItemTs(rendered, taskTs(task));
+    const existing = taskCards.get(task.id);
+    if (existing) existing.replaceWith(rendered);
+    else log.appendChild(rendered);
+    taskCards.set(task.id, rendered);
+    if (near) scrollToBottom();
+    syncReadState();
+  }
+
+  // Render the compact lifecycle strip: the always-visible summary (branch + status
+  // badge) plus the expandable details (name, Merge / Clean up buttons, merge_result).
+  // Re-run on every /ws/sessions update; the expanded/collapsed state lives as a class
+  // on #session-strip (which this never rebuilds), so it survives re-renders.
+  function renderSessionStrip(session) {
+    const statusBadge = SESSION_BADGE[session.status] ?? SESSION_BADGE.active;
+    const canMerge = !session.is_default && (session.status === "active" || session.status === "conflict");
+    const canCleanup = !session.is_default && session.status === "merged";
+
+    stripSummaryContent.innerHTML = `
+      <span class="strip-branch"></span>
+      <span class="badge ${session.status}"><span class="dot">${statusBadge.dot}</span>${statusBadge.label}</span>
+    `;
+    stripSummaryContent.querySelector(".strip-branch").textContent = session.branch;
+
+    let resultHtml = "";
+    if (session.merge_result) {
+      const r = session.merge_result;
+      const outcomeBadge = OUTCOME_BADGE[r.outcome] ?? OUTCOME_BADGE.failed;
+      resultHtml = `
+        <div class="note">
+          <span class="badge ${r.outcome}"><span class="dot">${outcomeBadge.dot}</span>${outcomeBadge.label}</span>
+          ${r.message ? `<details><summary>Details</summary><pre></pre></details>` : ""}
+        </div>
+      `;
+    }
+
+    stripDetails.innerHTML = `
+      <div class="strip-name-row"><span class="name"></span></div>
+      <div class="strip-actions">
+        ${canMerge ? `<button class="merge-btn" id="merge-btn">Merge to main</button>` : ""}
+        ${canCleanup ? `<button class="merge-btn" id="cleanup-btn">Clean up worktree</button>` : ""}
+      </div>
+      ${resultHtml}
+    `;
+    stripDetails.querySelector(".name").textContent = session.name;
+    if (session.merge_result && session.merge_result.message) {
+      stripDetails.querySelector("pre").textContent = session.merge_result.message;
+    }
+
+    const mergeBtn = document.getElementById("merge-btn");
+    if (mergeBtn) {
+      mergeBtn.addEventListener("click", () => {
+        mergeBtn.disabled = true;
+        mergeBtn.textContent = "Merging…";
+        fetch(`/sessions/${sessionId}/merge`, { method: "POST" })
+          .then((r) => r.json())
+          .then(renderSessionStrip)
+          .catch(() => { mergeBtn.disabled = false; mergeBtn.textContent = "Merge to main"; });
+      });
+    }
+    const cleanupBtn = document.getElementById("cleanup-btn");
+    if (cleanupBtn) {
+      cleanupBtn.addEventListener("click", () => {
+        cleanupBtn.disabled = true;
+        fetch(`/sessions/${sessionId}/cleanup`, { method: "POST" })
+          .then((r) => r.json())
+          .then(renderSessionStrip);
+      });
+    }
+  }
+
+  function connectSessions() {
+    const sessionsSocket = new WebSocket(`ws://${location.host}/ws/sessions`);
+    sessionsSocket.onclose = () => setTimeout(connectSessions, RECONNECT_DELAY_MS);
+    sessionsSocket.onmessage = (msg) => {
+      const event = JSON.parse(msg.data);
+      if (event.session && event.session.id === sessionId) renderSessionStrip(event.session);
+    };
+  }
+
+  // ---- chat ----
+
+  fetch("/models")
+    .then((r) => (r.ok ? r.json() : []))
+    .then((models) => {
+      availableModels = models;
+      if (modelSelectEl.dataset.pendingModel) populateModelSelect(modelSelectEl.dataset.pendingModel);
+    })
+    .catch(() => { availableModels = []; });
+
+  modelSelectEl.addEventListener("change", () => {
+    const chosen = modelSelectEl.value;
+    const previous = modelSelectEl.dataset.pendingModel || chosen;
+    modelSelectEl.disabled = true;
+    fetch(`/sessions/${sessionId}/model`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: chosen }),
+    })
+      .then((r) => {
+        if (!r.ok) return r.json().then((body) => { throw new Error(body.detail ?? "model change failed"); });
+        return r.json();
+      })
+      .then((session) => { modelSelectEl.dataset.pendingModel = session.model; modelSelectEl.value = session.model; })
+      .catch((err) => { alert(err.message); modelSelectEl.value = previous; })
+      .finally(() => { modelSelectEl.disabled = false; });
+  });
+
+  let chatSocket = null;
+  let tasksSocket = null;
+  const RECONNECT_DELAY_MS = 1500;
+  const ACCEPTED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
+  // Images staged for the next send: {filename, mime, data (base64), dataUrl (for preview)}.
+  let pendingAttachments = [];
+
+  function buildRow(kind, text, imageSrcs) {
+    const row = document.createElement("div");
+    row.className = `row ${kind}`;
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    if (imageSrcs && imageSrcs.length) {
+      const wrap = document.createElement("div");
+      wrap.className = "attachments";
+      for (const src of imageSrcs) {
+        const img = document.createElement("img");
+        img.src = src;
+        wrap.appendChild(img);
+      }
+      bubble.appendChild(wrap);
+    }
+    if (text) {
+      const textEl = document.createElement("div");
+      textEl.textContent = text;
+      bubble.appendChild(textEl);
+    }
+    row.appendChild(bubble);
+    return row;
+  }
+
+  // Append a chat row at the bottom of the timeline, auto-scrolling only when the user
+  // is already near the bottom so we don't yank them down while they read history.
+  function addRow(kind, text, imageSrcs, ts) {
+    const near = isNearBottom();
+    const row = buildRow(kind, text, imageSrcs);
+    // Chat bubbles (pm/user) are unread-worthy; status/system rows never are. Live rows
+    // without an explicit ts are timestamped "now" (they are arriving now).
+    if (kind === "pm" || kind === "user") tagItemTs(row, Number.isFinite(ts) ? ts : Date.now() / 1000);
+    log.appendChild(row);
+    if (near) scrollToBottom();
+    syncReadState();
+    return row.querySelector(".bubble");
+  }
+
+  function renderPendingPreviews() {
+    previewStrip.innerHTML = "";
+    previewStrip.classList.toggle("has-items", pendingAttachments.length > 0);
+    pendingAttachments.forEach((attachment, index) => {
+      const thumb = document.createElement("div");
+      thumb.className = "preview-thumb";
+      const img = document.createElement("img");
+      img.src = attachment.dataUrl;
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.textContent = "×";
+      removeBtn.addEventListener("click", () => {
+        pendingAttachments.splice(index, 1);
+        renderPendingPreviews();
+      });
+      thumb.appendChild(img);
+      thumb.appendChild(removeBtn);
+      previewStrip.appendChild(thumb);
+    });
+  }
+
+  function addImageFiles(files) {
+    for (const file of files) {
+      if (!ACCEPTED_IMAGE_TYPES.has(file.type)) continue;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result;
+        pendingAttachments.push({
+          filename: file.name,
+          mime: file.type,
+          data: dataUrl.slice(dataUrl.indexOf(",") + 1),
+          dataUrl,
+        });
+        renderPendingPreviews();
+      };
+      reader.readAsDataURL(file);
+    }
+  }
+
+  attachBtn.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", () => {
+    addImageFiles(fileInput.files);
+    fileInput.value = "";
+  });
+
+  input.addEventListener("paste", (e) => {
+    const files = Array.from(e.clipboardData?.items || [])
+      .filter((item) => item.kind === "file")
+      .map((item) => item.getAsFile())
+      .filter(Boolean);
+    if (files.length) addImageFiles(files);
+  });
+
+  for (const target of [input, log]) {
+    target.addEventListener("dragover", (e) => e.preventDefault());
+    target.addEventListener("drop", (e) => {
+      e.preventDefault();
+      if (e.dataTransfer?.files?.length) addImageFiles(e.dataTransfer.files);
+    });
+  }
+
+  function setBusy(busy) {
+    sendBtn.disabled = busy;
+    input.disabled = busy;
+  }
+
+  let sessionGone = false; // set when the server tells us this session no longer exists
+
+  function connectChat() {
+    chatSocket = new WebSocket(`ws://${location.host}/ws/chat/${sessionId}`);
+    chatSocket.onopen = () => addRow("status", "Connected.");
+    chatSocket.onclose = () => {
+      if (sessionGone) return; // don't loop forever reconnecting to a session that's archived/gone
+      addRow("status", "Disconnected - reconnecting...");
+      setBusy(false);
+      setTimeout(connectChat, RECONNECT_DELAY_MS);
+    };
+    chatSocket.onmessage = (msg) => {
+      const event = JSON.parse(msg.data);
+      // event.auto marks a turn the PM ran on its own after a dev task finished, not one
+      // this tab asked for - it must never touch setBusy, which tracks whether THIS tab's
+      // own in-flight request (if any) is still running.
+      switch (event.type) {
+        case "pm_working":
+          addRow("status", event.auto ? "PM is checking a finished task..." : "PM is thinking...");
+          break;
+        case "pm_reply":
+          addRow("pm", event.text);
+          if (!event.auto) setBusy(false);
+          break;
+        case "pm_error":
+          addRow("status", `Error: ${event.message}`);
+          if (!event.auto) setBusy(false);
+          break;
+        case "error":
+          sessionGone = true;
+          addRow("status", `${event.message} - this session may have been merged and cleaned up.`);
+          setBusy(true);
+          break;
+      }
+    };
+  }
+
+  // Drives the inline dev-task cards from the one /ws/tasks connection - do not open a
+  // second tasks socket. The live card (running -> done/error, updating in place) fully
+  // replaces the old ephemeral start/done/fail status rows; only connection/system rows
+  // remain in the stream.
+  function connectTasks() {
+    tasksSocket = new WebSocket(`ws://${location.host}/ws/tasks/${sessionId}`);
+    tasksSocket.onclose = () => setTimeout(connectTasks, RECONNECT_DELAY_MS);
+    tasksSocket.onmessage = (msg) => {
+      const { task } = JSON.parse(msg.data);
+      upsertTaskCard(task);
+    };
+  }
+
+  function buildChatNode(entry) {
+    if (entry.role === "user") {
+      const imageSrcs = (entry.attachments || []).map(
+        (filename) => `/chat/${sessionId}/uploads/${filename}`
+      );
+      return buildRow("user", entry.text, imageSrcs);
+    }
+    if (entry.role === "pm") return buildRow("pm", entry.text);
+    if (entry.role === "system") return buildRow("status", entry.text);
+    return buildRow("status", `Error: ${entry.text}`);
+  }
+
+  // Build the initial timeline by merging chat history with dev-task cards in true
+  // chronological order. Chat entries keep their array order (ts is monotonic as
+  // appended); each task card is inserted just before the first chat entry whose ts is
+  // at/after the task's started_at - i.e. between the PM turn that dispatched it and the
+  // PM's follow-up. Legacy entries lacking ts are left in place, and any task that can't
+  // be positioned against a timestamped entry falls after the chat block. Never crashes
+  // on a missing timestamp.
+  function hydrateTimeline(entries, tasks) {
+    const orderedTasks = tasks
+      .slice()
+      .sort((a, b) => (a.started_at || 0) - (b.started_at || 0));
+    let ti = 0;
+    const emitTask = (task) => {
+      const card = renderTaskCard(task);
+      taskCards.set(task.id, card);
+      tagItemTs(card, taskTs(task));
+      log.appendChild(card);
+    };
+    for (const entry of entries) {
+      const ts = typeof entry.ts === "number" ? entry.ts : undefined;
+      if (ts !== undefined) {
+        while (ti < orderedTasks.length && (orderedTasks[ti].started_at || 0) <= ts) {
+          emitTask(orderedTasks[ti]);
+          ti++;
+        }
+      }
+      const node = buildChatNode(entry);
+      // Only chat bubbles with a real ts are unread-worthy; legacy/system entries stay
+      // untagged (minus-infinity) so they never trigger the divider or count.
+      if ((entry.role === "pm" || entry.role === "user") && ts !== undefined) tagItemTs(node, ts);
+      log.appendChild(node);
+    }
+    while (ti < orderedTasks.length) {
+      emitTask(orderedTasks[ti]);
+      ti++;
+    }
+  }
+
+  function hydrate() {
+    return Promise.all([
+      fetch(`/history/${sessionId}`).then((r) => r.json()).catch(() => []),
+      fetch(`/tasks/${sessionId}`).then((r) => r.json()).catch(() => []),
+      // Live activity so a mid-turn reload can tell the PM turn is still in flight.
+      fetch(`/sessions/${sessionId}`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    ]).then(([entries, tasks, session]) => {
+      hydrateTimeline(entries || [], tasks || []);
+      // First visit (no stored watermark): treat everything present as read, so no
+      // divider appears. On later visits, keep the stored watermark so unread that
+      // arrived while away is surfaced (divider + count) below.
+      if (lastReadTs === null && Number.isFinite(newestItemTs)) {
+        lastReadTs = newestItemTs;
+        writeLastRead(lastReadTs);
+      }
+      scrollToBottom(); // first hydration always jumps to bottom
+      refreshUnread();  // surface the divider + count when there is unread above
+      // If the reload landed mid-turn, the just-sent message is now shown (it's persisted
+      // before the turn runs) but the live "PM is thinking..." row is gone. Re-surface it
+      // when the PM's own turn is in flight - activity working/thinking, NOT a background
+      // dev task (working/dev_task), which isn't the PM composing a reply. Appended after
+      // the unread pass and as a non-unread status row, so it never disturbs the divider.
+      const activity = session && session.activity;
+      if (activity && activity.state === "working" && activity.reason === "thinking") {
+        addRow("status", "PM is thinking...");
+      }
+    });
+  }
+
+  hydrate().then(() => {
+    connectChat();
+    connectTasks();
+    connectSessions();
+    // Arm auto-read only after the initial hydrate + connect burst settles, so the
+    // programmatic scroll-to-bottom and "Connected." status row don't clear a divider
+    // restored from the stored watermark.
+    setTimeout(() => { autoReadArmed = true; }, 700);
+  });
+
+  document.getElementById("reset-btn").addEventListener("click", () => {
+    if (!confirm("Archive and clear this session's chat + spec? The PM will start a fresh conversation with no memory of prior turns. PROJECT_STATUS.md and docs/ are untouched, and nothing is lost - the prior spec/chat is archived first.")) {
+      return;
+    }
+    fetch(`/chat/${sessionId}/reset`, { method: "POST" })
+      .then((r) => {
+        if (!r.ok) throw new Error("reset failed");
+        log.innerHTML = "";
+        taskCards.clear();
+        dividerEl = null;          // log.innerHTML wipe already detached it
+        newestItemTs = -Infinity;  // no unread-worthy items remain
+        addRow("status", "Chat reset - archived prior spec/chat and started a fresh conversation.");
+      })
+      .catch(() => addRow("status", "Reset failed - see server logs."));
+  });
+
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if ((!text && !pendingAttachments.length) || !chatSocket || chatSocket.readyState !== WebSocket.OPEN) return;
+    addRow("user", text, pendingAttachments.map((a) => a.dataUrl));
+    chatSocket.send(JSON.stringify({
+      text,
+      attachments: pendingAttachments.map(({ filename, mime, data }) => ({ filename, mime, data })),
+    }));
+    input.value = "";
+    pendingAttachments = [];
+    renderPendingPreviews();
+    setBusy(true);
+  });
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      form.requestEvent && form.requestEvent();
+      form.dispatchEvent(new Event("submit", { cancelable: true }));
+    }
+  });
+</script>
+</body>
+</html>

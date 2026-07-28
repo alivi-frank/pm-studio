@@ -1,0 +1,611 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>PM Studio — Roadmap</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --surface: #fcfcfb;
+    --page: #f9f9f7;
+    --column: #f3f2ef;
+    --ink-primary: #0b0b0b;
+    --ink-secondary: #52514e;
+    --ink-muted: #898781;
+    --border: rgba(11, 11, 11, 0.10);
+    --status-pending: #898781;
+    --status-in-progress: #2a78d6;
+    --status-done: #0ca30c;
+    --suggestion-bg: rgba(184, 134, 11, 0.12);
+    --suggestion-border: #b8860b;
+    --accent: #2a78d6;
+    --accent-fg: #ffffff;
+    --danger: #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface: #1a1a19;
+      --page: #0d0d0d;
+      --column: #161615;
+      --ink-primary: #ffffff;
+      --ink-secondary: #c3c2b7;
+      --ink-muted: #898781;
+      --border: rgba(255, 255, 255, 0.10);
+      --status-pending: #898781;
+      --status-in-progress: #3987e5;
+      --status-done: #0ca30c;
+      --suggestion-bg: rgba(212, 167, 44, 0.12);
+      --suggestion-border: #d4a72c;
+      --accent: #3987e5;
+      --accent-fg: #ffffff;
+      --danger: #e66767;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--page);
+    color: var(--ink-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  header {
+    padding: 20px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  header h1 { font-size: 1.2em; margin: 0; }
+  header p { margin: 4px 0 0; color: var(--ink-muted); font-size: 0.85em; }
+  header a { color: var(--ink-secondary); font-size: 0.85em; text-decoration: none; }
+  header a:hover { text-decoration: underline; }
+  main {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+  }
+  section.product {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 18px 20px;
+  }
+  .product-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .product-head h2 {
+    margin: 0;
+    font-size: 1.05em;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .product-head .chevron {
+    display: inline-block;
+    font-size: 0.8em;
+    color: var(--ink-muted);
+    transition: transform 0.15s ease;
+  }
+  section.product.collapsed .product-head .chevron { transform: rotate(-90deg); }
+  .product-head .count { color: var(--ink-muted); font-size: 0.8em; }
+  .product-head .inprogress-badge {
+    color: var(--status-done);
+    font-size: 0.75em;
+    font-weight: 600;
+  }
+  section.product.collapsed .suggestions,
+  section.product.collapsed .columns,
+  section.product.collapsed details.shipped {
+    display: none;
+  }
+  .suggestions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 14px;
+  }
+  .suggestion-card {
+    background: var(--suggestion-bg);
+    border: 1px solid var(--suggestion-border);
+    border-radius: 10px;
+    padding: 10px 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .suggestion-card .body { min-width: 0; }
+  .suggestion-card .title { font-weight: 600; }
+  .suggestion-card .from { font-size: 0.78em; color: var(--ink-muted); }
+  .suggestion-card .desc { font-size: 0.82em; color: var(--ink-secondary); margin-top: 2px; }
+  .suggestion-card .actions { display: flex; gap: 6px; flex-shrink: 0; }
+  .columns {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+  }
+  @media (max-width: 900px) {
+    .columns { grid-template-columns: 1fr; }
+  }
+  .column {
+    background: var(--column);
+    border-radius: 10px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 60px;
+  }
+  .column-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .column-head h3 {
+    margin: 0;
+    font-size: 0.85em;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--ink-secondary);
+  }
+  .add-btn {
+    border: none;
+    background: transparent;
+    color: var(--ink-muted);
+    font: inherit;
+    font-size: 1.1em;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 4px;
+  }
+  .add-btn:hover { color: var(--accent); }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+  }
+  .card .title { font-weight: 600; font-size: 0.92em; }
+  .card .desc {
+    margin-top: 4px;
+    font-size: 0.82em;
+    color: var(--ink-secondary);
+    line-height: 1.35;
+    white-space: pre-wrap;
+  }
+  .card .row {
+    margin-top: 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .dot { font-size: 0.9em; line-height: 1; }
+  .status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.78em;
+    font-weight: 600;
+  }
+  .status-badge.pending { color: var(--status-pending); }
+  .status-badge.in_progress { color: var(--status-in-progress); }
+  .status-badge.in_progress .dot { animation: pulse 1.4s ease-in-out infinite; }
+  .status-badge.done { color: var(--status-done); }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  select.mini, .card select {
+    font: inherit;
+    font-size: 0.78em;
+    background: var(--page);
+    color: var(--ink-primary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 4px;
+  }
+  .card .del {
+    margin-left: auto;
+    border: none;
+    background: transparent;
+    color: var(--ink-muted);
+    cursor: pointer;
+    font-size: 0.78em;
+  }
+  .card .del:hover { color: var(--danger); }
+  .card .owner-badge {
+    display: inline-block;
+    font-size: 0.72em;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--ink-muted);
+    border: 1px solid var(--ink-muted);
+    border-radius: 4px;
+    padding: 0 5px;
+    margin-top: 2px;
+    align-self: flex-start;
+  }
+  .card .owner-btn {
+    background: none;
+    border: none;
+    font: inherit;
+    font-size: 0.78em;
+    color: var(--ink-muted);
+    cursor: pointer;
+    padding: 0;
+  }
+  .card .owner-btn:hover { color: var(--ink-secondary); }
+  .empty-col { color: var(--ink-muted); font-size: 0.8em; font-style: italic; }
+  details.shipped { margin-top: 14px; }
+  details.shipped summary {
+    cursor: pointer;
+    font-size: 0.82em;
+    color: var(--ink-secondary);
+    user-select: none;
+  }
+  .shipped-list { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .shipped-item {
+    font-size: 0.82em;
+    color: var(--ink-secondary);
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+  }
+  .shipped-item .when { color: var(--ink-muted); font-size: 0.85em; white-space: nowrap; }
+  .add-form {
+    display: none;
+    flex-direction: column;
+    gap: 6px;
+    background: var(--surface);
+    border: 1px dashed var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+  }
+  .add-form.open { display: flex; }
+  .add-form input, .add-form textarea {
+    font: inherit;
+    font-size: 0.82em;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--page);
+    color: var(--ink-primary);
+    resize: vertical;
+  }
+  .add-form .buttons { display: flex; gap: 6px; justify-content: flex-end; }
+  .add-form button {
+    font: inherit;
+    font-size: 0.8em;
+    padding: 5px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--ink-secondary);
+    cursor: pointer;
+  }
+  .add-form button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <a href="/">&larr; Sessions</a>
+  <h1>Product Roadmap</h1>
+  <p>Now / Next / Later per product &middot; status tracked independently &middot; cross-product suggestions flagged for triage</p>
+</header>
+<main id="main"></main>
+<script>
+  const main = document.getElementById("main");
+
+  const BUCKETS = [["now", "Now"], ["next", "Next"], ["later", "Later"]];
+  const STATUS_BADGE = {
+    pending: { dot: "○", label: "Pending" },
+    in_progress: { dot: "●", label: "In progress" },
+    done: { dot: "✓", label: "Done" },
+  };
+
+  let PRODUCTS = {};
+  let itemsByProduct = {}; // product -> [item]
+
+  // Which product sections are collapsed - kept outside the DOM (and in
+  // localStorage) because renderAll() rebuilds every section from scratch on
+  // every websocket event; without this, a fold would reset the instant anyone
+  // else touched the board.
+  const collapsedProducts = new Set(JSON.parse(localStorage.getItem("roadmapCollapsed") || "[]"));
+
+  function persistCollapsed() {
+    localStorage.setItem("roadmapCollapsed", JSON.stringify([...collapsedProducts]));
+  }
+
+  function relativeTime(seconds) {
+    if (!seconds) return "";
+    const diff = Date.now() / 1000 - seconds;
+    if (diff < 60) return "just now";
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    if (diff < 86400 * 30) return `${Math.floor(diff / 86400)}d ago`;
+    return new Date(seconds * 1000).toLocaleDateString();
+  }
+
+  function itemCard(item) {
+    const card = document.createElement("div");
+    card.className = "card";
+    const badge = STATUS_BADGE[item.status] ?? STATUS_BADGE.pending;
+    card.innerHTML = `
+      <div class="title"></div>
+      ${item.owner ? `<span class="owner-badge"></span>` : ""}
+      ${item.description ? `<div class="desc"></div>` : ""}
+      <div class="row">
+        <span class="status-badge ${item.status}"><span class="dot">${badge.dot}</span>${badge.label}</span>
+        <select class="mini status-select"></select>
+        <select class="mini bucket-select"></select>
+        <select class="mini move-select"></select>
+        <button type="button" class="owner-btn" title="Track work done by another person or team">Owner…</button>
+        <button type="button" class="del" title="Delete">Delete</button>
+      </div>
+    `;
+    card.querySelector(".title").textContent = item.title;
+    // External work: done by another person/team, tracked on this board for
+    // visibility - PM agents keep its status current but never dispatch dev
+    // tasks for it.
+    if (item.owner) card.querySelector(".owner-badge").textContent = `External — ${item.owner}`;
+    if (item.description) card.querySelector(".desc").textContent = item.description;
+
+    card.querySelector(".owner-btn").addEventListener("click", () => {
+      const owner = prompt(
+        "Who is doing this work outside PM Studio (person or team)?\nLeave blank to mark it as built here.",
+        item.owner || ""
+      );
+      if (owner === null) return;
+      patchItem(item, { owner: owner.trim() });
+    });
+
+    const statusSelect = card.querySelector(".status-select");
+    for (const [value, label] of Object.entries({ pending: "Pending", in_progress: "In progress", done: "Done" })) {
+      const opt = document.createElement("option");
+      opt.value = value; opt.textContent = label; opt.selected = value === item.status;
+      statusSelect.appendChild(opt);
+    }
+    statusSelect.addEventListener("change", () => patchItem(item, { status: statusSelect.value }));
+
+    const bucketSelect = card.querySelector(".bucket-select");
+    for (const [value, label] of BUCKETS) {
+      const opt = document.createElement("option");
+      opt.value = value; opt.textContent = label; opt.selected = value === item.bucket;
+      bucketSelect.appendChild(opt);
+    }
+    bucketSelect.addEventListener("change", () => patchItem(item, { bucket: bucketSelect.value }));
+
+    const moveSelect = card.querySelector(".move-select");
+    const placeholder = document.createElement("option");
+    placeholder.value = ""; placeholder.textContent = "Move to…";
+    moveSelect.appendChild(placeholder);
+    for (const [id, label] of Object.entries(PRODUCTS)) {
+      if (id === item.product) continue;
+      const opt = document.createElement("option");
+      opt.value = id; opt.textContent = label;
+      moveSelect.appendChild(opt);
+    }
+    moveSelect.addEventListener("change", () => {
+      const target = moveSelect.value;
+      if (!target) return;
+      if (!confirm(`Move "${item.title}" to ${PRODUCTS[target]}? It keeps its history and lands accepted on their board.`)) {
+        moveSelect.value = "";
+        return;
+      }
+      // A stakeholder acting on the board picked the destination directly, so it
+      // lands already triaged - no extra accept step. A PM's own curl-based move
+      // (see agent.py) omits this and lands untriaged for the destination to review.
+      patchItem(item, { move_to_product: target, triaged: true });
+    });
+
+    card.querySelector(".del").addEventListener("click", () => {
+      if (!confirm(`Delete "${item.title}"?`)) return;
+      fetch(`/roadmap/${item.product}/items/${item.id}`, { method: "DELETE" }).catch(() => {});
+    });
+
+    return card;
+  }
+
+  function suggestionCard(item) {
+    const card = document.createElement("div");
+    card.className = "suggestion-card";
+    card.innerHTML = `
+      <div class="body">
+        <div class="title"></div>
+        <div class="from"></div>
+        ${item.description ? `<div class="desc"></div>` : ""}
+      </div>
+      <div class="actions">
+        <button type="button" class="accept">Accept</button>
+        <button type="button" class="dismiss">Dismiss</button>
+      </div>
+    `;
+    card.querySelector(".title").textContent = item.title;
+    card.querySelector(".from").textContent = `Suggested by ${PRODUCTS[item.origin_product] ?? item.origin_product}`;
+    if (item.description) card.querySelector(".desc").textContent = item.description;
+    card.querySelector(".accept").addEventListener("click", () => patchItem(item, { triaged: true }));
+    card.querySelector(".dismiss").addEventListener("click", () => {
+      fetch(`/roadmap/${item.product}/items/${item.id}`, { method: "DELETE" }).catch(() => {});
+    });
+    return card;
+  }
+
+  function patchItem(item, fields) {
+    fetch(`/roadmap/${item.product}/items/${item.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(fields),
+    }).catch(() => {});
+  }
+
+  function addForm(product, bucket) {
+    const form = document.createElement("form");
+    form.className = "add-form";
+    form.innerHTML = `
+      <input type="text" placeholder="Title" class="title" required />
+      <textarea placeholder="Description (optional)" class="desc" rows="2"></textarea>
+      <input type="text" placeholder="External owner (optional — person/team doing this outside PM Studio)" class="owner" />
+      <div class="buttons">
+        <button type="button" class="cancel">Cancel</button>
+        <button type="submit" class="primary">Add</button>
+      </div>
+    `;
+    form.querySelector(".cancel").addEventListener("click", () => form.classList.remove("open"));
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const title = form.querySelector(".title").value.trim();
+      if (!title) return;
+      const description = form.querySelector(".desc").value.trim();
+      const owner = form.querySelector(".owner").value.trim();
+      fetch(`/roadmap/${product}/items`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title, description, bucket, status: "pending", owner }),
+      }).then(() => {
+        form.querySelector(".title").value = "";
+        form.querySelector(".desc").value = "";
+        form.querySelector(".owner").value = "";
+        form.classList.remove("open");
+      }).catch(() => {});
+    });
+    return form;
+  }
+
+  function renderProduct(product) {
+    const items = itemsByProduct[product] ?? [];
+    const open = items.filter((i) => i.status !== "done");
+    const shipped = items
+      .filter((i) => i.status === "done")
+      .sort((a, b) => (b.shipped_at ?? b.updated_at) - (a.shipped_at ?? a.updated_at))
+      .slice(0, 8);
+    const suggestions = open.filter((i) => i.origin_product !== product && !i.triaged);
+
+    const section = document.createElement("section");
+    section.className = "product";
+    section.dataset.product = product;
+    if (collapsedProducts.has(product)) section.classList.add("collapsed");
+    section.innerHTML = `
+      <div class="product-head">
+        <h2><span class="chevron">&#9662;</span><span class="name"></span><span class="inprogress-badge"></span></h2>
+        <span class="count"></span>
+      </div>
+      <div class="suggestions"></div>
+      <div class="columns"></div>
+    `;
+    const nowCount = open.filter((i) => i.bucket === "now").length;
+    const inProgressCount = open.filter((i) => i.status === "in_progress").length;
+    const nextCount = open.filter((i) => i.bucket === "next").length;
+
+    section.querySelector(".name").textContent = PRODUCTS[product] ?? product;
+    const inprogressBadge = section.querySelector(".inprogress-badge");
+    if (inProgressCount > 0) {
+      inprogressBadge.textContent = `${inProgressCount} in progress`;
+      inprogressBadge.style.display = "";
+    } else {
+      inprogressBadge.style.display = "none";
+    }
+    section.querySelector(".count").textContent =
+      `${open.length} open — ${nowCount} now · ${inProgressCount} in progress · ${nextCount} next`;
+    section.querySelector(".product-head").addEventListener("click", () => {
+      const nowCollapsed = section.classList.toggle("collapsed");
+      if (nowCollapsed) collapsedProducts.add(product); else collapsedProducts.delete(product);
+      persistCollapsed();
+    });
+
+    const suggestionsEl = section.querySelector(".suggestions");
+    for (const item of suggestions) suggestionsEl.appendChild(suggestionCard(item));
+
+    const columnsEl = section.querySelector(".columns");
+    for (const [bucketValue, bucketLabel] of BUCKETS) {
+      const bucketItems = open.filter((i) => i.bucket === bucketValue && !suggestions.includes(i));
+      const col = document.createElement("div");
+      col.className = "column";
+      col.innerHTML = `
+        <div class="column-head">
+          <h3>${bucketLabel}</h3>
+          <button type="button" class="add-btn" title="Add item">+</button>
+        </div>
+      `;
+      const form = addForm(product, bucketValue);
+      col.appendChild(form);
+      col.querySelector(".add-btn").addEventListener("click", () => form.classList.toggle("open"));
+
+      if (bucketItems.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "empty-col";
+        empty.textContent = "Nothing here.";
+        col.appendChild(empty);
+      } else {
+        for (const item of bucketItems) col.appendChild(itemCard(item));
+      }
+      columnsEl.appendChild(col);
+    }
+
+    if (shipped.length > 0) {
+      const details = document.createElement("details");
+      details.className = "shipped";
+      details.innerHTML = `<summary>Recently shipped (${shipped.length})</summary><div class="shipped-list"></div>`;
+      const list = details.querySelector(".shipped-list");
+      for (const item of shipped) {
+        const row = document.createElement("div");
+        row.className = "shipped-item";
+        row.innerHTML = `<span class="when"></span><span class="title"></span>`;
+        row.querySelector(".when").textContent = relativeTime(item.shipped_at ?? item.updated_at);
+        row.querySelector(".title").textContent = item.title;
+        list.appendChild(row);
+      }
+      section.appendChild(details);
+    }
+
+    return section;
+  }
+
+  function renderAll() {
+    main.innerHTML = "";
+    for (const product of Object.keys(PRODUCTS)) {
+      main.appendChild(renderProduct(product));
+    }
+  }
+
+  function upsertItem(item) {
+    const list = itemsByProduct[item.product] ?? (itemsByProduct[item.product] = []);
+    const idx = list.findIndex((i) => i.id === item.id);
+    if (idx >= 0) list[idx] = item; else list.push(item);
+    renderAll();
+  }
+
+  function removeItem(product, id) {
+    const list = itemsByProduct[product];
+    if (!list) return;
+    itemsByProduct[product] = list.filter((i) => i.id !== id);
+    renderAll();
+  }
+
+  fetch("/roadmap/data")
+    .then((r) => r.json())
+    .then((data) => {
+      PRODUCTS = data.products;
+      itemsByProduct = data.items;
+      renderAll();
+    });
+
+  const ws = new WebSocket(`ws://${location.host}/ws/roadmap`);
+  ws.onmessage = (msg) => {
+    const event = JSON.parse(msg.data);
+    if (event.type === "roadmap_item_upserted") upsertItem(event.item);
+    if (event.type === "roadmap_item_deleted") removeItem(event.product, event.id);
+  };
+</script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pm-studio"
+version = "0.1.0"
+description = "PM Studio - a local PM/dev-coordination studio driven by the headless Claude Code CLI: chat with a PM agent that specs, dispatches background dev agents into your repo, and merges parallel session worktrees back into main."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Frank Romero" }]
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
+
+[project.urls]
+Repository = "https://github.com/fromerosk/pm-studio"
+
+[project.scripts]
+pm-studio = "pm_studio.__main__:main"
+
+[tool.setuptools]
+packages = ["pm_studio"]
+
+[tool.setuptools.package-data]
+pm_studio = ["static/*.html"]
