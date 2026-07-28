@@ -1,0 +1,24 @@
+# PM Studio dogfood config: this repo develops PM Studio, coordinated BY PM Studio.
+# The running server is the INSTALLED published version in .venv (stable), never the
+# local source - start it with `.venv/bin/pm-studio` (the console script; running
+# `python -m pm_studio` from this repo would shadow the installed copy with the
+# local source on sys.path).
+
+[project]
+name = "PM Studio"
+default_session_name = "Main"
+# NOT the default "pm_studio" - that is the package source directory in this repo.
+workspace_root = "studio_data"
+layout = '''
+- `pm_studio/` - the package source: server.py (FastAPI + websockets), agent.py (PM prompts + turn execution), tasks.py (dev-agent dispatch), sessions.py (worktree lifecycle + merge/sync/terminate), roadmap.py (board + external owners), config.py (pm_studio_local loading), scaffold.py (init), models.py, gitsnapshot.py, static/ (the four UI pages)
+- `tests/` - unittest suite (python3 -m unittest discover -s tests)
+- `docs/` - ARCHITECTURE.md, WAY_OF_WORKING.md, CONFIGURATION.md, MIGRATION.md
+'''
+
+[server]
+host = "127.0.0.1"
+port = 8002
+
+[products]
+package = "Package (engine + UI)"
+docs = "Docs & Methodology"
