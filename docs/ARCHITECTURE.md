@@ -99,6 +99,62 @@ hiccup must never break a PM turn or dev task. Snapshots are repo-wide; `.gitign
   - `describe_other_products(exclude)` — one line per product:
     `- <Label>: [bucket/status] Title; [bucket/status] Title; ...`, open items only.
 
+## 3b. `portfolio.py` — the work model above the roadmap
+
+Optional layer that gives roadmap items a strategy chain. A deployment that ignores it
+behaves exactly as before: every field is additive and defaults to "unset".
+
+```
+Goals  ⇄  Initiative  →  Project  →  Change
+                                       └─ belongs to exactly ONE Product
+```
+
+- A **Change** is the existing `RoadmapItem` — no new concept. It gains a single
+  `project_id: str|None`, additive with default None so pre-existing boards load
+  unchanged.
+- A **Project** belongs to exactly one Initiative. `initiative_id = None` is the
+  **unaligned** state: permitted (nobody is blocked mid-work) but reported.
+- An **Initiative** has many Projects and may serve **several Goals** — the only
+  many-to-many relationship in the model.
+- **Products are not a level.** Product hangs off the Change. That is what makes the
+  cross-cutting relationships free: an initiative spans products because its projects'
+  changes each carry their own product, and a product appears in many initiatives for
+  the same reason. No association records exist or are needed.
+- Goals, Initiatives and Projects each carry a `status` of `"open"|"closed"` plus a
+  `closed_at` stamp. Products are persistent (they come from config); everything in
+  the chain is temporary.
+
+### Why single-parent below the initiative
+
+It makes cost attribution unambiguous. `Change → Project → Initiative` is a unique
+path, so those totals are exact and additive. **The additive tree stops at
+Initiative**: because an initiative can serve several goals, the same spend
+legitimately contributes to more than one goal, so goal-level figures overlap and must
+never be summed into a grand total. The API reflects this — `rollup_path(project_id)`
+returns only project + initiative, and `goal_ids_for_initiative()` is a deliberately
+separate call so goals cannot be folded in by accident.
+
+### The maintenance scaffold
+
+Two rules interact: goals and initiatives are never auto-created, but the catch-all
+project needs a parent. So `ensure_maintenance_scaffold()` (exposed as
+`POST /portfolio/bootstrap`, and prompted for on the portfolio page when no catch-all
+exists) declares the trio once, explicitly, with deployment-chosen names. From then on
+a change created with no `project_id` lands in the catch-all instead of floating. The
+catch-all project and its maintenance initiative cannot be closed or deleted.
+
+`PortfolioStore` mirrors `RoadmapStore`'s conventions: one server-owned JSON file at
+`<workspace_root>/workspace/portfolio.json`, single lock around mutations, subscriber
+fan-out. Its events ride the roadmap websocket, since anything watching the board
+cares when a project is re-parented. Writes go through a temp file and `replace()`.
+
+### Referential guards
+
+Deleting is refused rather than silently cascading: a goal an initiative still serves,
+an initiative that still has projects, a project that still has changes. The change
+count is passed *in* by the server (`roadmap_store.count_by_project`) so this module
+never reaches across into the roadmap store.
+
 ## 4. `tasks.py` — dev-task registry (one per session)
 
 ```python

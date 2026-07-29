@@ -1,0 +1,569 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PM Studio — Portfolio</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --surface: #fcfcfb;
+    --page: #f9f9f7;
+    --ink-primary: #0b0b0b;
+    --ink-secondary: #52514e;
+    --ink-muted: #898781;
+    --border: rgba(11, 11, 11, 0.10);
+    --accent: #2a78d6;
+    --accent-fg: #ffffff;
+    --error: #d03b3b;
+    --warn: #c77700;
+    --warn-bg: rgba(199, 119, 0, 0.09);
+    --note-bg: rgba(42, 120, 214, 0.07);
+    --closed: #898781;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface: #1a1a19;
+      --page: #0d0d0d;
+      --ink-primary: #ffffff;
+      --ink-secondary: #c3c2b7;
+      --ink-muted: #898781;
+      --border: rgba(255, 255, 255, 0.10);
+      --accent: #3987e5;
+      --error: #e66767;
+      --warn: #e0a33c;
+      --warn-bg: rgba(224, 163, 60, 0.13);
+      --note-bg: rgba(57, 135, 229, 0.12);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--page);
+    color: var(--ink-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  header { padding: 20px 24px; border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 1.2em; margin: 0; }
+  header p { margin: 4px 0 0; color: var(--ink-muted); font-size: 0.85em; }
+  header nav { margin-top: 8px; font-size: 0.85em; display: flex; gap: 14px; }
+  header nav a { color: var(--accent); text-decoration: none; }
+  main { padding: 24px; }
+  .chain {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    margin-bottom: 18px;
+    padding: 8px 12px;
+    font-size: 0.8em;
+    color: var(--ink-secondary);
+    background: var(--note-bg);
+    border-radius: 8px;
+  }
+  .chain code { font-family: ui-monospace, SFMono-Regular, monospace; }
+  .columns {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 18px;
+    align-items: start;
+  }
+  section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px;
+  }
+  h2 { font-size: 0.95em; margin: 0 0 3px; }
+  .hint { margin: 0 0 14px; font-size: 0.8em; color: var(--ink-muted); line-height: 1.5; }
+  form { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+  input[type="text"], select {
+    flex: 1 1 140px;
+    min-width: 0;
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 0.9em;
+    color: var(--ink-primary);
+    background: var(--page);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+  }
+  button {
+    padding: 8px 12px;
+    font: inherit;
+    font-size: 0.88em;
+    color: var(--accent-fg);
+    background: var(--accent);
+    border: 0;
+    border-radius: 7px;
+    cursor: pointer;
+  }
+  button.ghost {
+    color: var(--ink-secondary);
+    background: transparent;
+    border: 1px solid var(--border);
+    padding: 4px 9px;
+    font-size: 0.8em;
+  }
+  button.ghost:hover { border-color: var(--accent); color: var(--accent); }
+  ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  li {
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+  }
+  li.closed { opacity: 0.55; }
+  li.unaligned { border-left: 3px solid var(--warn); }
+  .row { display: flex; align-items: baseline; gap: 8px; justify-content: space-between; }
+  .title { font-weight: 600; font-size: 0.92em; }
+  .meta { margin-top: 4px; font-size: 0.78em; color: var(--ink-muted); }
+  .actions { display: flex; gap: 5px; flex-shrink: 0; }
+  .flag {
+    display: inline-block;
+    padding: 1px 7px;
+    font-size: 0.72em;
+    font-weight: 600;
+    border-radius: 999px;
+    color: var(--warn);
+    background: var(--warn-bg);
+  }
+  .flag.catch-all { color: var(--accent); background: var(--note-bg); }
+  .empty { font-size: 0.85em; color: var(--ink-muted); }
+  .banner {
+    margin-bottom: 18px;
+    padding: 14px 16px;
+    border-radius: 10px;
+    background: var(--warn-bg);
+    border: 1px solid var(--warn);
+    font-size: 0.87em;
+    line-height: 1.55;
+    color: var(--ink-secondary);
+  }
+  .banner strong { color: var(--ink-primary); }
+  .banner form { margin: 12px 0 0; }
+  .error {
+    margin-bottom: 16px;
+    padding: 9px 11px;
+    font-size: 0.85em;
+    color: var(--error);
+    border: 1px solid var(--error);
+    border-radius: 7px;
+    display: none;
+  }
+  .goal-links { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 5px; }
+  .goal-links label {
+    font-size: 0.78em;
+    color: var(--ink-secondary);
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
+    padding: 2px 7px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>PM Studio — Portfolio</h1>
+  <p>Goals, initiatives and projects. Changes on the roadmap board hang off a project.</p>
+  <nav>
+    <a href="/">← Sessions</a>
+    <a href="/roadmap">Roadmap board</a>
+  </nav>
+</header>
+<main>
+  <div class="chain">
+    <span>Goals</span><code>⇄</code><span>Initiative</span><code>→</code><span>Project</span><code>→</code><span>Change</span>
+    <span style="color: var(--ink-muted);">(a change also belongs to exactly one product)</span>
+  </div>
+
+  <p class="error" id="error"></p>
+  <div id="bootstrap"></div>
+  <div id="unaligned"></div>
+
+  <div class="columns">
+    <section>
+      <h2>Goals</h2>
+      <p class="hint">The outcomes you're trying to reach. Always declared explicitly — never auto-created.</p>
+      <form id="goal-form">
+        <input id="goal-title" type="text" placeholder="New goal" required />
+        <button type="submit">Add</button>
+      </form>
+      <ul id="goals"></ul>
+    </section>
+
+    <section>
+      <h2>Initiatives</h2>
+      <p class="hint">Each one may serve <strong>several goals</strong> — the only many-to-many link in the model.</p>
+      <form id="initiative-form">
+        <input id="initiative-title" type="text" placeholder="New initiative" required />
+        <button type="submit">Add</button>
+      </form>
+      <ul id="initiatives"></ul>
+    </section>
+
+    <section>
+      <h2>Projects</h2>
+      <p class="hint">Exactly one parent initiative. A project without one is <em>unaligned</em> — allowed, but flagged.</p>
+      <form id="project-form">
+        <input id="project-title" type="text" placeholder="New project" required />
+        <select id="project-initiative"></select>
+        <button type="submit">Add</button>
+      </form>
+      <ul id="projects"></ul>
+    </section>
+  </div>
+</main>
+<script>
+  let data = { goals: [], initiatives: [], projects: [], unaligned: { projects: [], initiatives: [] } };
+  const errorBox = document.getElementById("error");
+
+  function showError(message) {
+    errorBox.textContent = message;
+    errorBox.style.display = "block";
+    setTimeout(() => { errorBox.style.display = "none"; }, 8000);
+  }
+
+  async function api(path, options) {
+    const response = await fetch(path, options);
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || `Request failed (${response.status})`);
+    }
+    return response.json();
+  }
+
+  const json = (method, body) => ({
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  async function act(fn) {
+    try {
+      await fn();
+      await load();
+    } catch (err) {
+      showError(err.message);
+    }
+  }
+
+  function lifecycleButton(entity, record) {
+    const button = document.createElement("button");
+    button.className = "ghost";
+    const closing = record.status === "open";
+    button.textContent = closing ? "Close" : "Reopen";
+    button.addEventListener("click", () => act(() =>
+      api(`/portfolio/${entity}/${record.id}`, json("PATCH", { status: closing ? "closed" : "open" }))));
+    return button;
+  }
+
+  function deleteButton(entity, record) {
+    const button = document.createElement("button");
+    button.className = "ghost";
+    button.textContent = "Delete";
+    button.addEventListener("click", () => act(() =>
+      api(`/portfolio/${entity}/${record.id}`, { method: "DELETE" })));
+    return button;
+  }
+
+  function renderGoals() {
+    const list = document.getElementById("goals");
+    list.innerHTML = "";
+    if (!data.goals.length) {
+      list.innerHTML = '<li class="empty">No goals yet.</li>';
+      return;
+    }
+    data.goals.forEach((goal) => {
+      const item = document.createElement("li");
+      if (goal.status === "closed") item.classList.add("closed");
+      const row = document.createElement("div");
+      row.className = "row";
+      const title = document.createElement("span");
+      title.className = "title";
+      title.textContent = goal.title;
+      const actions = document.createElement("span");
+      actions.className = "actions";
+      actions.append(lifecycleButton("goals", goal), deleteButton("goals", goal));
+      row.append(title, actions);
+      item.appendChild(row);
+
+      const serving = data.initiatives.filter((i) => (i.goal_ids || []).includes(goal.id));
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      meta.textContent = serving.length
+        ? `${serving.length} initiative${serving.length === 1 ? "" : "s"} serving this`
+        : "no initiatives yet";
+      item.appendChild(meta);
+      list.appendChild(item);
+    });
+  }
+
+  function renderInitiatives() {
+    const list = document.getElementById("initiatives");
+    list.innerHTML = "";
+    if (!data.initiatives.length) {
+      list.innerHTML = '<li class="empty">No initiatives yet.</li>';
+      return;
+    }
+    data.initiatives.forEach((initiative) => {
+      const item = document.createElement("li");
+      if (initiative.status === "closed") item.classList.add("closed");
+      if (initiative.is_unaligned) item.classList.add("unaligned");
+
+      const row = document.createElement("div");
+      row.className = "row";
+      const title = document.createElement("span");
+      title.className = "title";
+      title.textContent = initiative.title;
+      if (initiative.is_maintenance) {
+        const flag = document.createElement("span");
+        flag.className = "flag catch-all";
+        flag.textContent = "always open";
+        title.appendChild(document.createTextNode(" "));
+        title.appendChild(flag);
+      }
+      if (initiative.is_unaligned) {
+        const flag = document.createElement("span");
+        flag.className = "flag";
+        flag.textContent = "no goal";
+        title.appendChild(document.createTextNode(" "));
+        title.appendChild(flag);
+      }
+      const actions = document.createElement("span");
+      actions.className = "actions";
+      if (!initiative.is_maintenance) {
+        actions.append(lifecycleButton("initiatives", initiative), deleteButton("initiatives", initiative));
+      }
+      row.append(title, actions);
+      item.appendChild(row);
+
+      const owned = data.projects.filter((p) => p.initiative_id === initiative.id);
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      meta.textContent = `${owned.length} project${owned.length === 1 ? "" : "s"}`;
+      item.appendChild(meta);
+
+      // Goal links: an initiative may serve several, so this is a checkbox set.
+      if (data.goals.length) {
+        const links = document.createElement("div");
+        links.className = "goal-links";
+        data.goals.forEach((goal) => {
+          const label = document.createElement("label");
+          const box = document.createElement("input");
+          box.type = "checkbox";
+          box.checked = (initiative.goal_ids || []).includes(goal.id);
+          box.addEventListener("change", () => {
+            const next = new Set(initiative.goal_ids || []);
+            if (box.checked) next.add(goal.id); else next.delete(goal.id);
+            act(() => api(`/portfolio/initiatives/${initiative.id}`,
+              json("PATCH", { goal_ids: Array.from(next) })));
+          });
+          label.append(box, document.createTextNode(goal.title));
+          links.appendChild(label);
+        });
+        item.appendChild(links);
+      }
+      list.appendChild(item);
+    });
+  }
+
+  function renderProjects() {
+    const list = document.getElementById("projects");
+    list.innerHTML = "";
+    const byId = Object.fromEntries(data.initiatives.map((i) => [i.id, i.title]));
+    if (!data.projects.length) {
+      list.innerHTML = '<li class="empty">No projects yet.</li>';
+    }
+    data.projects.forEach((project) => {
+      const item = document.createElement("li");
+      if (project.status === "closed") item.classList.add("closed");
+      if (project.is_unaligned) item.classList.add("unaligned");
+
+      const row = document.createElement("div");
+      row.className = "row";
+      const title = document.createElement("span");
+      title.className = "title";
+      title.textContent = project.title;
+      if (project.is_catch_all) {
+        const flag = document.createElement("span");
+        flag.className = "flag catch-all";
+        flag.textContent = "catch-all";
+        title.appendChild(document.createTextNode(" "));
+        title.appendChild(flag);
+      }
+      if (project.is_unaligned) {
+        const flag = document.createElement("span");
+        flag.className = "flag";
+        flag.textContent = "unaligned";
+        title.appendChild(document.createTextNode(" "));
+        title.appendChild(flag);
+      }
+      const actions = document.createElement("span");
+      actions.className = "actions";
+      if (!project.is_catch_all) {
+        actions.append(lifecycleButton("projects", project), deleteButton("projects", project));
+      }
+      row.append(title, actions);
+      item.appendChild(row);
+
+      // Re-parenting: the empty option deliberately makes the project unaligned.
+      const picker = document.createElement("select");
+      const none = document.createElement("option");
+      none.value = "";
+      none.textContent = "— no initiative (unaligned) —";
+      picker.appendChild(none);
+      data.initiatives.forEach((initiative) => {
+        const option = document.createElement("option");
+        option.value = initiative.id;
+        option.textContent = initiative.title;
+        if (initiative.id === project.initiative_id) option.selected = true;
+        picker.appendChild(option);
+      });
+      picker.addEventListener("change", () => act(() =>
+        api(`/portfolio/projects/${project.id}`, json("PATCH", { initiative_id: picker.value }))));
+      const wrap = document.createElement("div");
+      wrap.className = "meta";
+      wrap.appendChild(picker);
+      item.appendChild(wrap);
+
+      if (project.initiative_id && byId[project.initiative_id]) {
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.textContent = `rolls up to ${byId[project.initiative_id]}`;
+        item.appendChild(meta);
+      }
+      list.appendChild(item);
+    });
+
+    const picker = document.getElementById("project-initiative");
+    const chosen = picker.value;
+    picker.innerHTML = "";
+    const none = document.createElement("option");
+    none.value = "";
+    none.textContent = "— no initiative —";
+    picker.appendChild(none);
+    data.initiatives.filter((i) => i.status === "open").forEach((initiative) => {
+      const option = document.createElement("option");
+      option.value = initiative.id;
+      option.textContent = initiative.title;
+      if (initiative.id === chosen) option.selected = true;
+      picker.appendChild(option);
+    });
+  }
+
+  function renderBootstrap() {
+    const host = document.getElementById("bootstrap");
+    host.innerHTML = "";
+    if (data.catch_all_project_id) return;
+    // Goals and initiatives are never auto-created, but the catch-all project needs a
+    // parent - so the trio is declared once, here, on purpose.
+    const banner = document.createElement("div");
+    banner.className = "banner";
+    banner.innerHTML =
+      "<strong>Declare where unplanned work goes.</strong> A bug fix should still roll up " +
+      "somewhere, so PM Studio needs one always-open initiative and a catch-all project " +
+      "beneath it. Name them however your organization talks about this work — nothing is " +
+      "created until you do.";
+    const form = document.createElement("form");
+    const goal = document.createElement("input");
+    goal.type = "text";
+    goal.placeholder = "Goal, e.g. Keep the product healthy";
+    const initiative = document.createElement("input");
+    initiative.type = "text";
+    initiative.placeholder = "Initiative, e.g. Maintenance & operations";
+    const project = document.createElement("input");
+    project.type = "text";
+    project.placeholder = "Catch-all project, e.g. Unplanned work";
+    const submit = document.createElement("button");
+    submit.type = "submit";
+    submit.textContent = "Create";
+    form.append(goal, initiative, project, submit);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      act(() => api("/portfolio/bootstrap", json("POST", {
+        goal_title: goal.value,
+        initiative_title: initiative.value,
+        project_title: project.value,
+      })));
+    });
+    banner.appendChild(form);
+    host.appendChild(banner);
+  }
+
+  function renderUnaligned() {
+    const host = document.getElementById("unaligned");
+    host.innerHTML = "";
+    const projects = data.unaligned?.projects || [];
+    const initiatives = data.unaligned?.initiatives || [];
+    const changes = data.unassigned_changes || [];
+    if (!projects.length && !initiatives.length && !changes.length) return;
+    const parts = [];
+    if (projects.length) parts.push(`${projects.length} project(s) with no initiative`);
+    if (initiatives.length) parts.push(`${initiatives.length} initiative(s) serving no goal`);
+    if (changes.length) parts.push(`${changes.length} change(s) with no project`);
+    const banner = document.createElement("div");
+    banner.className = "banner";
+    banner.innerHTML =
+      `<strong>Unaligned work:</strong> ${parts.join(", ")}. ` +
+      "Nothing is blocked — this is surfaced so it can be linked up, since anything " +
+      "unaligned has nowhere to attribute its cost.";
+    host.appendChild(banner);
+  }
+
+  async function load() {
+    data = await api("/portfolio/data");
+    renderBootstrap();
+    renderUnaligned();
+    renderGoals();
+    renderInitiatives();
+    renderProjects();
+  }
+
+  document.getElementById("goal-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const input = document.getElementById("goal-title");
+    act(async () => {
+      await api("/portfolio/goals", json("POST", { title: input.value }));
+      input.value = "";
+    });
+  });
+
+  document.getElementById("initiative-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const input = document.getElementById("initiative-title");
+    act(async () => {
+      await api("/portfolio/initiatives", json("POST", { title: input.value }));
+      input.value = "";
+    });
+  });
+
+  document.getElementById("project-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const input = document.getElementById("project-title");
+    const picker = document.getElementById("project-initiative");
+    act(async () => {
+      await api("/portfolio/projects", json("POST", {
+        title: input.value,
+        initiative_id: picker.value,
+      }));
+      input.value = "";
+    });
+  });
+
+  // Portfolio edits ride the roadmap socket (see server.py), so the page stays live
+  // when another session re-parents a project.
+  try {
+    const socket = new WebSocket(`ws://${location.host}/ws/roadmap`);
+    socket.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      if (message.type === "portfolio_changed") load();
+    };
+  } catch (err) { /* polling-free fallback: the page still works, just not live */ }
+
+  load().catch((err) => showError(err.message));
+</script>
+</body>
+</html>
