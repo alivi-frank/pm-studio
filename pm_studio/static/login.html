@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PM Studio — Sign in</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --surface: #fcfcfb;
+    --page: #f9f9f7;
+    --ink-primary: #0b0b0b;
+    --ink-secondary: #52514e;
+    --ink-muted: #898781;
+    --border: rgba(11, 11, 11, 0.10);
+    --accent: #2a78d6;
+    --accent-fg: #ffffff;
+    --error: #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface: #1a1a19;
+      --page: #0d0d0d;
+      --ink-primary: #ffffff;
+      --ink-secondary: #c3c2b7;
+      --ink-muted: #898781;
+      --border: rgba(255, 255, 255, 0.10);
+      --accent: #3987e5;
+      --error: #e66767;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    background: var(--page);
+    color: var(--ink-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  main {
+    width: 100%;
+    max-width: 380px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 28px;
+  }
+  h1 { font-size: 1.15em; margin: 0 0 4px; }
+  p.sub { margin: 0 0 22px; color: var(--ink-muted); font-size: 0.88em; }
+  label { display: block; font-size: 0.82em; color: var(--ink-secondary); margin-bottom: 6px; }
+  input {
+    width: 100%;
+    padding: 9px 11px;
+    margin-bottom: 16px;
+    font-size: 0.95em;
+    font-family: inherit;
+    color: var(--ink-primary);
+    background: var(--page);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+  }
+  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button {
+    width: 100%;
+    padding: 10px;
+    font-size: 0.95em;
+    font-family: inherit;
+    font-weight: 500;
+    color: var(--accent-fg);
+    background: var(--accent);
+    border: 0;
+    border-radius: 7px;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.6; cursor: default; }
+  .error {
+    margin: 0 0 16px;
+    padding: 9px 11px;
+    font-size: 0.85em;
+    color: var(--error);
+    border: 1px solid var(--error);
+    border-radius: 7px;
+    display: none;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>PM Studio</h1>
+  <p class="sub">Sign in to continue.</p>
+  <p class="error" id="error"></p>
+  <form id="form">
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" autocomplete="username" required autofocus />
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required />
+    <button type="submit" id="submit">Sign in</button>
+  </form>
+</main>
+<script>
+  const form = document.getElementById("form");
+  const errorBox = document.getElementById("error");
+  const submit = document.getElementById("submit");
+
+  function showError(message) {
+    errorBox.textContent = message;
+    errorBox.style.display = "block";
+  }
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    errorBox.style.display = "none";
+    submit.disabled = true;
+    try {
+      const response = await fetch("/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: document.getElementById("email").value,
+          password: document.getElementById("password").value,
+        }),
+      });
+      if (response.ok) {
+        window.location.href = "/";
+        return;
+      }
+      const data = await response.json().catch(() => ({}));
+      showError(data.detail || "Sign-in failed.");
+    } catch (err) {
+      showError("Could not reach the server.");
+    }
+    submit.disabled = false;
+  });
+</script>
+</body>
+</html>

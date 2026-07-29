@@ -5,9 +5,22 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
-from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi import Body, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 
+from . import mailer
+from .accounts import (
+    AGENT_HEADER_NAME,
+    LOGIN_TTL_SECONDS,
+    ROLE_LABELS,
+    SESSION_COOKIE_NAME,
+    AccountError,
+    AccountStore,
+    User,
+    agent_principal,
+    is_agent_token,
+)
+from .config import CONFIG
 from .models import list_models
 from .roadmap import PRODUCTS, RoadmapStore
 from .sessions import DEFAULT_SESSION_ID, SessionManager, SessionRuntime
@@ -27,6 +40,25 @@ _main_loop: asyncio.AbstractEventLoop | None = None
 
 sessions = SessionManager()
 roadmap_store = RoadmapStore()
+# Constructed in both modes (it is empty and untouched in personal mode) so nothing
+# has to branch on mode just to reach the store.
+account_store = AccountStore()
+
+# Reachable without a session cookie. Everything else needs one when enterprise mode
+# is on; in personal mode this set is irrelevant because auth is skipped entirely.
+_PUBLIC_PATHS = frozenset(
+    {
+        "/login",
+        "/setup",
+        "/accept-invite",
+        "/auth/login",
+        "/auth/setup",
+        "/auth/invite",
+        "/auth/accept-invite",
+        "/auth/me",
+        "/favicon.ico",
+    }
+)
 
 
 def _roadmap_context_for(session_id: str) -> str:
@@ -203,6 +235,282 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(lifespan=lifespan)
 
 
+# ---- authentication (enterprise mode only) ----
+#
+# Personal mode short-circuits every check below, so a deployment that never sets
+# `[enterprise] mode` keeps the exact request path it has always had: no cookie, no
+# login page, no roster. Enterprise mode is opt-in precisely because turning it on
+# changes who may reach the dev agents.
+
+
+def _wants_html(request: Request) -> bool:
+    """A browser navigating to a page should be redirected to the login screen; an
+    XHR or a curl call from a PM agent should get a 401 it can act on."""
+    return "text/html" in request.headers.get("accept", "")
+
+
+def _current_user(request: Request) -> User | None:
+    return getattr(request.state, "user", None)
+
+
+def _require_user(request: Request) -> User:
+    """In personal mode there is no user object at all - callers that need an identity
+    (invites, the roster) are enterprise-only endpoints and say so."""
+    user = _current_user(request)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return user
+
+
+def _require_admin(request: Request) -> User:
+    user = _require_user(request)
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admins only")
+    return user
+
+
+def _require_enterprise() -> None:
+    if not CONFIG.is_enterprise:
+        raise HTTPException(
+            status_code=404,
+            detail="This instance runs in personal mode; enterprise features are off.",
+        )
+
+
+def _set_login_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        token,
+        max_age=LOGIN_TTL_SECONDS,
+        httponly=True,
+        samesite="lax",
+        path="/",
+    )
+
+
+@app.middleware("http")
+async def authenticate(request: Request, call_next):
+    if not CONFIG.is_enterprise:
+        return await call_next(request)
+
+    path = request.url.path
+    # A PM agent's curl calls carry the process's agent token instead of a cookie -
+    # without this the core loop (dispatch a dev task, update the board) would 401 the
+    # moment enterprise mode was switched on.
+    if is_agent_token(request.headers.get(AGENT_HEADER_NAME)):
+        request.state.user = agent_principal()
+    else:
+        request.state.user = account_store.resolve_login(
+            request.cookies.get(SESSION_COOKIE_NAME)
+        )
+
+    # First run: an enterprise instance with no admin yet can only go to setup.
+    # Without this an operator who flips the mode flag would be locked out of their
+    # own server with no way in.
+    if account_store.needs_setup and path not in ("/setup", "/auth/setup", "/auth/me"):
+        if _wants_html(request):
+            return RedirectResponse("/setup")
+        return JSONResponse({"detail": "This instance has not been set up yet."}, status_code=503)
+
+    if path in _PUBLIC_PATHS or request.state.user is not None:
+        return await call_next(request)
+
+    if _wants_html(request):
+        return RedirectResponse("/login")
+    return JSONResponse({"detail": "Authentication required"}, status_code=401)
+
+
+async def _ws_reject_unauthenticated(websocket: WebSocket) -> bool:
+    """HTTP middleware never sees a websocket handshake, so every socket checks the
+    cookie itself. Returns True when the connection was refused. 1008 is the policy
+    violation close code; the page treats it as "reload and you'll get the login
+    screen"."""
+    if not CONFIG.is_enterprise:
+        return False
+    if account_store.resolve_login(websocket.cookies.get(SESSION_COOKIE_NAME)) is not None:
+        return False
+    await websocket.close(code=1008)
+    return True
+
+
+@app.get("/login")
+def login_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "login.html")
+
+
+@app.get("/setup")
+def setup_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "setup.html")
+
+
+@app.get("/accept-invite")
+def accept_invite_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "accept-invite.html")
+
+
+@app.get("/auth/me")
+def auth_me(request: Request) -> dict:
+    """The one endpoint every page calls to learn what mode it is in and who it is.
+    Deliberately public: in personal mode it answers `{"mode": "personal"}` and the
+    pages hide all account UI."""
+    user = _current_user(request)
+    return {
+        "mode": CONFIG.mode,
+        "enterprise": CONFIG.is_enterprise,
+        "needs_setup": CONFIG.is_enterprise and account_store.needs_setup,
+        "user": user.to_public_dict() if user is not None else None,
+        "roles": ROLE_LABELS,
+        "smtp_configured": bool(CONFIG.smtp and CONFIG.smtp.is_usable),
+    }
+
+
+@app.post("/auth/setup")
+def auth_setup(response: Response, payload: dict = Body(...)) -> dict:
+    """First-run owner creation. The account that converts a personal instance to
+    enterprise becomes its admin - see the `[enterprise]` docs."""
+    _require_enterprise()
+    try:
+        user = account_store.create_owner(
+            email=(payload.get("email") or ""),
+            name=(payload.get("name") or ""),
+            password=(payload.get("password") or ""),
+        )
+    except AccountError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _set_login_cookie(response, account_store.start_login(user.id))
+    return user.to_public_dict()
+
+
+@app.post("/auth/login")
+def auth_login(response: Response, payload: dict = Body(...)) -> dict:
+    _require_enterprise()
+    try:
+        user = account_store.authenticate(
+            email=(payload.get("email") or ""), password=(payload.get("password") or "")
+        )
+    except AccountError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    _set_login_cookie(response, account_store.start_login(user.id))
+    return user.to_public_dict()
+
+
+@app.post("/auth/logout")
+def auth_logout(request: Request, response: Response) -> dict:
+    account_store.end_login(request.cookies.get(SESSION_COOKIE_NAME))
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    return {"status": "logged_out"}
+
+
+@app.get("/auth/invite")
+def auth_peek_invite(token: str) -> dict:
+    """Lets the accept-invite page show who the invite is for before a password is
+    typed. Consumes nothing."""
+    _require_enterprise()
+    try:
+        invite = account_store.peek_invite(token)
+    except AccountError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"email": invite.email, "role": invite.role, "role_label": ROLE_LABELS.get(invite.role, invite.role)}
+
+
+@app.post("/auth/accept-invite")
+def auth_accept_invite(response: Response, payload: dict = Body(...)) -> dict:
+    _require_enterprise()
+    try:
+        user = account_store.accept_invite(
+            token=(payload.get("token") or ""),
+            name=(payload.get("name") or ""),
+            password=(payload.get("password") or ""),
+        )
+    except AccountError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _set_login_cookie(response, account_store.start_login(user.id))
+    return user.to_public_dict()
+
+
+# ---- roster + invites (admin) ----
+
+
+@app.get("/users")
+def list_users(request: Request) -> list[dict]:
+    _require_enterprise()
+    _require_admin(request)
+    return account_store.list_users()
+
+
+@app.post("/users/{user_id}/role")
+def set_user_role(user_id: str, request: Request, payload: dict = Body(...)) -> dict:
+    _require_enterprise()
+    _require_admin(request)
+    try:
+        return account_store.set_role(user_id, (payload.get("role") or "")).to_public_dict()
+    except AccountError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/users/{user_id}/status")
+def set_user_status(user_id: str, request: Request, payload: dict = Body(...)) -> dict:
+    _require_enterprise()
+    _require_admin(request)
+    status = (payload.get("status") or "").strip()
+    if status not in ("active", "disabled"):
+        raise HTTPException(status_code=400, detail="status must be 'active' or 'disabled'")
+    try:
+        return account_store.set_status(user_id, status).to_public_dict()
+    except AccountError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/invites")
+def list_invites(request: Request) -> list[dict]:
+    _require_enterprise()
+    _require_admin(request)
+    return account_store.list_invites()
+
+
+@app.post("/invites")
+def create_invite(request: Request, payload: dict = Body(...)) -> dict:
+    """Invites one address at a given role. Always returns the accept URL - if SMTP is
+    configured we also mail it, but the link is what makes the flow work on a machine
+    with no mail server (see mailer.send_invite)."""
+    _require_enterprise()
+    admin = _require_admin(request)
+    try:
+        new_invite = account_store.invite(
+            email=(payload.get("email") or ""),
+            role=(payload.get("role") or "viewer"),
+            invited_by=admin.id,
+        )
+    except AccountError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    accept_url = new_invite.accept_url(CONFIG.base_url)
+    emailed = mailer.send_invite(
+        CONFIG, new_invite.invite.email, admin.name, accept_url
+    )
+    return {
+        "invite": new_invite.invite.to_public_dict(),
+        "accept_url": accept_url,
+        "emailed": emailed,
+    }
+
+
+@app.delete("/invites/{invite_id}")
+def revoke_invite(invite_id: str, request: Request) -> dict:
+    _require_enterprise()
+    _require_admin(request)
+    try:
+        account_store.revoke_invite(invite_id)
+    except AccountError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "revoked"}
+
+
+@app.get("/people")
+def people_page() -> FileResponse:
+    """The admin roster screen: users, roles, invites."""
+    return FileResponse(STATIC_DIR / "people.html")
+
+
 # ---- session picker / lifecycle ----
 
 @app.get("/")
@@ -342,6 +650,8 @@ def terminate_session(session_id: str) -> dict:
 
 @app.websocket("/ws/sessions")
 async def sessions_ws(websocket: WebSocket) -> None:
+    if await _ws_reject_unauthenticated(websocket):
+        return
     await websocket.accept()
     session_ws_clients.add(websocket)
     try:
@@ -468,6 +778,8 @@ def delete_roadmap_item(product: str, item_id: str) -> dict:
 
 @app.websocket("/ws/roadmap")
 async def roadmap_ws(websocket: WebSocket) -> None:
+    if await _ws_reject_unauthenticated(websocket):
+        return
     await websocket.accept()
     roadmap_ws_clients.add(websocket)
     try:
@@ -523,6 +835,8 @@ def get_task(session_id: str, task_id: str) -> dict:
 
 
 async def _run_tasks_ws(websocket: WebSocket, session_id: str) -> None:
+    if await _ws_reject_unauthenticated(websocket):
+        return
     await websocket.accept()
     task_ws_clients.setdefault(session_id, set()).add(websocket)
     try:
@@ -540,6 +854,8 @@ async def tasks_ws(websocket: WebSocket, session_id: str) -> None:
 
 
 async def _run_chat_ws(websocket: WebSocket, session_id: str) -> None:
+    if await _ws_reject_unauthenticated(websocket):
+        return
     await websocket.accept()
     runtime = sessions.get_runtime(session_id)
     if runtime is None:

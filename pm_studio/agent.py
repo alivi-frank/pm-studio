@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Iterator, TYPE_CHECKING
 
 from . import gitsnapshot
+from .accounts import AGENT_HEADER_NAME, AGENT_TOKEN
 from .config import CONFIG, LOCAL_DIR_NAME
 from .roadmap import PRODUCTS
 
@@ -41,6 +42,20 @@ _EXTENSION_BY_MIME = {
 
 ROADMAP_BASE_URL = f"{CONFIG.base_url}/roadmap"
 
+
+def agent_auth_header() -> str:
+    """The auth header spliced into every curl example in the prompts below - empty in
+    personal mode, so those prompts stay byte-identical to what they have always been.
+
+    It is appended AFTER the URL in each example on purpose. A PM's Bash allowlist
+    matches its curl commands as literal prefixes (`curl -s -X POST <url>`), so a
+    header inserted before the URL would stop matching and the call would be held for
+    an approval that a headless session can never grant.
+    """
+    if not CONFIG.is_enterprise:
+        return ""
+    return f' -H "{AGENT_HEADER_NAME}: {AGENT_TOKEN}"'
+
 # Injected into a product-pinned session's system prompt (see PMAgent.__init__). Every
 # turn opens with that product's full roadmap plus a shallow one-line-per-item digest
 # of every other product (see server.py's _roadmap_context_for) - this is the part that
@@ -54,7 +69,7 @@ followed by a one-line digest of every OTHER product's roadmap - that digest is 
 awareness only, not something to act on directly. If work on {product_label} implies another \
 product should do something too (e.g. a feature here that mobile should mirror), hand it off \
 instead of building it yourself:
-  curl -s -X POST {roadmap_base_url}/<other_product>/items -H "Content-Type: application/json" \
+  curl -s -X POST {roadmap_base_url}/<other_product>/items{auth_header} -H "Content-Type: application/json" \
 -d '{{"title": "<short title>", "description": "<why + what>", "bucket": "later", \
 "origin_product": "{product}"}}'
   (valid product ids: {product_ids}). It lands on their board flagged as an untriaged \
@@ -63,15 +78,15 @@ your own work.
 - Keep {product_label}'s OWN roadmap current as work happens - create an item when you commit \
 to something new, move it between buckets, update its status, or triage (accept/reject) an \
 incoming suggestion:
-  curl -s -X POST {roadmap_base_url}/{product}/items -H "Content-Type: application/json" \
+  curl -s -X POST {roadmap_base_url}/{product}/items{auth_header} -H "Content-Type: application/json" \
 -d '{{"title": "...", "description": "...", "bucket": "now|next|later", "status": \
 "pending|in_progress|done"}}'
-  curl -s -X PATCH {roadmap_base_url}/{product}/items/<item_id> -H "Content-Type: application/json" \
+  curl -s -X PATCH {roadmap_base_url}/{product}/items/<item_id>{auth_header} -H "Content-Type: application/json" \
 -d '{{"bucket": "now", "status": "in_progress", "triaged": true}}'
 - If a whole feature area should genuinely belong to another product outright (not just a \
 suggestion - a real reassignment), you can move one of YOUR OWN items there directly, keeping \
 its id/history instead of recreating it from scratch:
-  curl -s -X PATCH {roadmap_base_url}/{product}/items/<item_id> -H "Content-Type: application/json" \
+  curl -s -X PATCH {roadmap_base_url}/{product}/items/<item_id>{auth_header} -H "Content-Type: application/json" \
 -d '{{"move_to_product": "<other_product>"}}'
   It lands on their board untriaged, same as any cross-product suggestion - their PM still \
 decides whether to accept it, since ownership moving doesn't skip their review. You can only \
@@ -165,16 +180,16 @@ there, and dev tasks should never be told to create it there.
 
 {roadmap_guidance}
 - Start a dev task (returns immediately - does not wait for it to finish):
-  curl -s -X POST {tasks_base_url} -H "Content-Type: application/json" -d '{{"task": "<specific, actionable task description - what to build/fix and what done looks like>"}}'
+  curl -s -X POST {tasks_base_url}{auth_header} -H "Content-Type: application/json" -d '{{"task": "<specific, actionable task description - what to build/fix and what done looks like>"}}'
   This returns JSON like {{"id": "...", "status": "running", ...}}. Remember the id.
 - Check one task's status/result:
-  curl -s {tasks_base_url}/<id>
+  curl -s {tasks_base_url}/<id>{auth_header}
 - Check all tasks (e.g. if the stakeholder asks for status, or to catch up on anything that \
 finished since you last checked):
-  curl -s {tasks_base_url}
+  curl -s {tasks_base_url}{auth_header}
 - Set or update this session's title + goal (the short label shown for it in the sessions list - \
 keep it current as the work evolves):
-  curl -s -X POST {session_meta_url} -H "Content-Type: application/json" -d '{{"title": "<≈2-5 word abbreviation>", "goal": "<one short sentence>"}}'
+  curl -s -X POST {session_meta_url}{auth_header} -H "Content-Type: application/json" -d '{{"title": "<≈2-5 word abbreviation>", "goal": "<one short sentence>"}}'
 
 Run each of those commands exactly as shown, as a single plain command - no ; && | or \
 appended echo/status-check, no wrapping in a subshell, nothing else added. This is a hard \
@@ -306,6 +321,7 @@ class PMAgent:
                 product_label=PRODUCTS.get(self.product, self.product),
                 product_ids=", ".join(PRODUCTS),
                 roadmap_base_url=ROADMAP_BASE_URL,
+                auth_header=agent_auth_header(),
             )
             # POST is deliberately broad (any product) - suggesting work for another
             # product is the intended cross-product handoff. PATCH is scoped to this
@@ -330,6 +346,7 @@ class PMAgent:
             workspace_rel=CONFIG.workspace_rel,
             default_session_name=CONFIG.default_session_name,
             local_instructions=_local_instructions_block(),
+            auth_header=agent_auth_header(),
         )
         self.allowed_tools = (
             f"Bash(curl -s -X POST {tasks_base_url}*) "
