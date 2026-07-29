@@ -55,6 +55,23 @@ port = 8000
 # default = "claude-opus-4-8"
 # "claude-opus-4-8" = "Opus"
 # sonnet = "Sonnet"
+
+# Operating mode. The default is "personal": one trusted user, no accounts, no
+# login - exactly what you get by leaving this commented out. Switch to
+# "enterprise" for user accounts, email invites and roles; the first visit then
+# walks you through creating the owner account, and no existing data is migrated.
+# [enterprise]
+# mode = "enterprise"
+
+# Optional outbound mail for enterprise invites. With no [smtp] table, every
+# invite instead produces a copyable link - no mail server needed. Prefer
+# password_env (the NAME of an env var) so the secret stays out of this file.
+# [smtp]
+# host = "smtp.example.com"
+# port = 587
+# from_address = "pm-studio@example.com"
+# username = "pm-studio"
+# password_env = "PM_STUDIO_SMTP_PASSWORD"
 """
 
 PM_INSTRUCTIONS_TEMPLATE = """\

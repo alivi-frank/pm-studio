@@ -236,7 +236,12 @@
 <header>
   <h1>PM Studio — Sessions</h1>
   <p>Each session is its own PM conversation on its own git branch/worktree - work on several at once, then merge back when ready.</p>
-  <p><a href="/roadmap">View product roadmap &rarr;</a></p>
+  <p>
+    <a href="/roadmap">View product roadmap &rarr;</a>
+    <!-- Populated only in enterprise mode; personal mode leaves this empty, so the
+         header looks exactly as it always has. -->
+    <span id="account-bar"></span>
+  </p>
 </header>
 <main>
   <form id="new-form">
@@ -544,6 +549,27 @@
       })
       .catch(() => { submitBtn.disabled = false; });
   });
+
+  // Account bar: who you are, the roster (admins only), and sign out. In personal
+  // mode /auth/me reports mode "personal" and this renders nothing at all.
+  fetch("/auth/me")
+    .then((r) => r.json())
+    .then((info) => {
+      if (!info.enterprise || !info.user) return;
+      const bar = document.getElementById("account-bar");
+      const parts = [];
+      if (info.user.role === "admin") parts.push('<a href="/people">People</a>');
+      parts.push('<a href="#" id="sign-out">Sign out</a>');
+      bar.innerHTML =
+        ` &nbsp;·&nbsp; ${info.user.name} (${info.user.role_label}) &nbsp;·&nbsp; ` +
+        parts.join(" &nbsp;·&nbsp; ");
+      document.getElementById("sign-out").addEventListener("click", async (event) => {
+        event.preventDefault();
+        await fetch("/auth/logout", { method: "POST" });
+        location.href = "/login";
+      });
+    })
+    .catch(() => {});
 </script>
 </body>
 </html>
