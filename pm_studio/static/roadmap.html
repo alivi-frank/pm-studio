@@ -295,13 +295,81 @@
     cursor: pointer;
   }
   .add-form button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+
+  /* ---- pivot toggle + the initiative lens ---- */
+  #pivot-toggle { display: inline-flex; gap: 0; margin-top: 10px; }
+  #pivot-toggle button {
+    padding: 6px 13px;
+    font: inherit;
+    font-size: 0.82em;
+    color: var(--ink-secondary);
+    background: transparent;
+    border: 1px solid var(--border);
+    cursor: pointer;
+  }
+  #pivot-toggle button:first-child { border-radius: 7px 0 0 7px; }
+  #pivot-toggle button:last-child { border-radius: 0 7px 7px 0; border-left: 0; }
+  #pivot-toggle button.active {
+    color: var(--accent-fg);
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  .initiative-group { margin-bottom: 26px; }
+  .initiative-head {
+    display: flex;
+    align-items: baseline;
+    gap: 9px;
+    padding-bottom: 7px;
+    border-bottom: 1px solid var(--border);
+  }
+  .initiative-head h2 { font-size: 1em; margin: 0; }
+  .initiative-head .count { font-size: 0.78em; color: var(--ink-muted); }
+  .initiative-goals { margin-top: 5px; font-size: 0.78em; color: var(--ink-muted); }
+  .project-block { margin: 14px 0 0 14px; }
+  .project-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 7px;
+    font-size: 0.88em;
+    font-weight: 600;
+  }
+  .project-head .count { font-weight: 400; font-size: 0.85em; color: var(--ink-muted); }
+  .project-changes {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 9px;
+  }
+  .lens-flag {
+    display: inline-block;
+    padding: 1px 7px;
+    font-size: 0.72em;
+    font-weight: 600;
+    border-radius: 999px;
+    color: var(--ink-muted);
+    border: 1px solid var(--border);
+  }
+  .lens-flag.warn { color: var(--waiting-accent, #c77700); border-color: currentColor; }
+  .card .product-tag {
+    display: inline-block;
+    margin-bottom: 5px;
+    font-size: 0.72em;
+    color: var(--ink-muted);
+  }
+  .lens-empty { font-size: 0.85em; color: var(--ink-muted); margin: 6px 0 0 14px; }
 </style>
 </head>
 <body>
 <header>
   <a href="/">&larr; Sessions</a>
+  <a href="/portfolio">Portfolio</a>
   <h1>Product Roadmap</h1>
-  <p>Now / Next / Later per product &middot; status tracked independently &middot; cross-product suggestions flagged for triage</p>
+  <p id="subtitle">Now / Next / Later per product &middot; status tracked independently &middot; cross-product suggestions flagged for triage</p>
+  <!-- Two lenses on one dataset: group by product, or walk the work model. -->
+  <div id="pivot-toggle">
+    <button type="button" data-lens="product" class="active">By product</button>
+    <button type="button" data-lens="initiative">By initiative</button>
+  </div>
 </header>
 <main id="main"></main>
 <script>
@@ -316,6 +384,12 @@
 
   let PRODUCTS = {};
   let itemsByProduct = {}; // product -> [item]
+  // The work model, used only by the initiative lens. Empty on a deployment that
+  // doesn't use /portfolio, in which case that lens shows everything as unassigned.
+  let PORTFOLIO = { initiatives: [], projects: [], catch_all_project_id: null };
+
+  // Which lens is showing. Persisted so switching pages doesn't reset it.
+  let lens = localStorage.getItem("roadmapLens") === "initiative" ? "initiative" : "product";
 
   // Which product sections are collapsed - kept outside the DOM (and in
   // localStorage) because renderAll() rebuilds every section from scratch on
@@ -337,7 +411,7 @@
     return new Date(seconds * 1000).toLocaleDateString();
   }
 
-  function itemCard(item) {
+  function itemCard(item, opts = {}) {
     const card = document.createElement("div");
     card.className = "card";
     const badge = STATUS_BADGE[item.status] ?? STATUS_BADGE.pending;
@@ -355,6 +429,15 @@
       </div>
     `;
     card.querySelector(".title").textContent = item.title;
+    // In the initiative lens a group spans products, so each card says which product
+    // it belongs to. In the product lens that would just repeat the section heading.
+    // Inserted after innerHTML above, which would otherwise overwrite it.
+    if (opts.showProduct) {
+      const tag = document.createElement("span");
+      tag.className = "product-tag";
+      tag.textContent = PRODUCTS[item.product] || item.product;
+      card.prepend(tag);
+    }
     // External work: done by another person/team, tracked on this board for
     // visibility - PM agents keep its status current but never dispatch dev
     // tasks for it.
@@ -571,11 +654,156 @@
     return section;
   }
 
+  // ---- the initiative lens ----
+
+  function allChanges() {
+    return Object.values(itemsByProduct).flat();
+  }
+
+  /* Mirrors portfolio.group_changes_by_initiative on the server (see
+     /roadmap/by-initiative). Done client-side so the lens re-groups instantly on
+     websocket events instead of refetching the whole board on every change made
+     anywhere. Every change appears exactly once, and anything the tree doesn't reach
+     lands in one trailing group rather than disappearing. */
+  function groupByInitiative() {
+    const projectsById = Object.fromEntries(PORTFOLIO.projects.map((p) => [p.id, p]));
+    const byProject = new Map();
+    for (const change of allChanges()) {
+      const key = projectsById[change.project_id] ? change.project_id : null;
+      if (!byProject.has(key)) byProject.set(key, []);
+      byProject.get(key).push(change);
+    }
+    const entry = (project) => ({ project, changes: byProject.get(project.id) || [] });
+
+    const groups = PORTFOLIO.initiatives.map((initiative) => ({
+      initiative,
+      projects: PORTFOLIO.projects
+        .filter((p) => p.initiative_id === initiative.id)
+        .map(entry),
+    }));
+
+    const loose = PORTFOLIO.projects.filter((p) => !p.initiative_id).map(entry);
+    const unassigned = byProject.get(null) || [];
+    if (unassigned.length) loose.push({ project: null, changes: unassigned });
+    if (loose.length) groups.push({ initiative: null, projects: loose });
+    return groups;
+  }
+
+  function flag(text, warn) {
+    const span = document.createElement("span");
+    span.className = warn ? "lens-flag warn" : "lens-flag";
+    span.textContent = text;
+    return span;
+  }
+
+  function renderProjectBlock(entry) {
+    const block = document.createElement("div");
+    block.className = "project-block";
+
+    const head = document.createElement("div");
+    head.className = "project-head";
+    const name = document.createElement("span");
+    name.textContent = entry.project ? entry.project.title : "No project";
+    head.appendChild(name);
+    if (entry.project?.is_catch_all) head.appendChild(flag("catch-all"));
+    if (!entry.project) head.appendChild(flag("unassigned", true));
+    if (entry.project?.status === "closed") head.appendChild(flag("closed"));
+    const count = document.createElement("span");
+    count.className = "count";
+    const open = entry.changes.filter((c) => c.status !== "done").length;
+    count.textContent = `${entry.changes.length} change${entry.changes.length === 1 ? "" : "s"}`
+      + (open === entry.changes.length ? "" : ` · ${open} open`);
+    head.appendChild(count);
+    block.appendChild(head);
+
+    if (!entry.changes.length) {
+      const empty = document.createElement("div");
+      empty.className = "lens-empty";
+      empty.textContent = "Nothing here yet.";
+      block.appendChild(empty);
+      return block;
+    }
+    const grid = document.createElement("div");
+    grid.className = "project-changes";
+    for (const change of entry.changes) grid.appendChild(itemCard(change, { showProduct: true }));
+    block.appendChild(grid);
+    return block;
+  }
+
+  function renderInitiativeGroup(group) {
+    const section = document.createElement("section");
+    section.className = "initiative-group";
+
+    const head = document.createElement("div");
+    head.className = "initiative-head";
+    const title = document.createElement("h2");
+    title.textContent = group.initiative ? group.initiative.title : "Unaligned";
+    head.appendChild(title);
+    if (group.initiative?.is_maintenance) head.appendChild(flag("always open"));
+    if (group.initiative?.status === "closed") head.appendChild(flag("closed"));
+    if (!group.initiative) head.appendChild(flag("no initiative", true));
+    const total = group.projects.reduce((sum, p) => sum + p.changes.length, 0);
+    const count = document.createElement("span");
+    count.className = "count";
+    const productCount = new Set(
+      group.projects.flatMap((p) => p.changes.map((c) => c.product))
+    ).size;
+    count.textContent = `${total} change${total === 1 ? "" : "s"}`
+      // Spelling out the product spread is the point of this lens: it's what the
+      // per-product board structurally cannot show.
+      + (productCount > 1 ? ` across ${productCount} products` : "");
+    head.appendChild(count);
+    section.appendChild(head);
+
+    if (group.initiative && !group.initiative.is_unaligned) {
+      const goals = document.createElement("div");
+      goals.className = "initiative-goals";
+      goals.textContent = `serves ${group.initiative.goal_ids.length} goal`
+        + (group.initiative.goal_ids.length === 1 ? "" : "s");
+      section.appendChild(goals);
+    }
+
+    for (const entry of group.projects) section.appendChild(renderProjectBlock(entry));
+    return section;
+  }
+
+  function renderByInitiative() {
+    const groups = groupByInitiative();
+    if (!groups.length) {
+      const empty = document.createElement("p");
+      empty.className = "lens-empty";
+      empty.innerHTML =
+        'No goals, initiatives or projects yet — set them up on the '
+        + '<a href="/portfolio">portfolio page</a>, and changes will group here.';
+      main.appendChild(empty);
+      return;
+    }
+    for (const group of groups) main.appendChild(renderInitiativeGroup(group));
+  }
+
   function renderAll() {
     main.innerHTML = "";
+    document.getElementById("subtitle").textContent = lens === "initiative"
+      ? "Initiative → project → change · one initiative can span several products"
+      : "Now / Next / Later per product · status tracked independently · cross-product suggestions flagged for triage";
+    for (const button of document.querySelectorAll("#pivot-toggle button")) {
+      button.classList.toggle("active", button.dataset.lens === lens);
+    }
+    if (lens === "initiative") {
+      renderByInitiative();
+      return;
+    }
     for (const product of Object.keys(PRODUCTS)) {
       main.appendChild(renderProduct(product));
     }
+  }
+
+  for (const button of document.querySelectorAll("#pivot-toggle button")) {
+    button.addEventListener("click", () => {
+      lens = button.dataset.lens;
+      localStorage.setItem("roadmapLens", lens);
+      renderAll();
+    });
   }
 
   function upsertItem(item) {
@@ -592,19 +820,28 @@
     renderAll();
   }
 
-  fetch("/roadmap/data")
-    .then((r) => r.json())
-    .then((data) => {
-      PRODUCTS = data.products;
-      itemsByProduct = data.items;
-      renderAll();
-    });
+  function loadBoard() {
+    return fetch("/roadmap/data")
+      .then((r) => r.json())
+      .then((data) => {
+        PRODUCTS = data.products;
+        itemsByProduct = data.items;
+        PORTFOLIO = data.portfolio || PORTFOLIO;
+        renderAll();
+      });
+  }
+
+  loadBoard();
 
   const ws = new WebSocket(`ws://${location.host}/ws/roadmap`);
   ws.onmessage = (msg) => {
     const event = JSON.parse(msg.data);
     if (event.type === "roadmap_item_upserted") upsertItem(event.item);
     if (event.type === "roadmap_item_deleted") removeItem(event.product, event.id);
+    // A project being re-parented or an initiative closing changes how this board
+    // groups, but says nothing about the items themselves - so refetch rather than
+    // trying to patch the work model incrementally.
+    if (event.type === "portfolio_changed") loadBoard();
   };
 </script>
 </body>
