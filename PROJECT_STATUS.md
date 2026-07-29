@@ -1,32 +1,36 @@
 # Project Status (durable — read this first)
 
-## This session: `--port` CLI flag for the server
-Goal: let users start the server on a chosen port via `python -m pm_studio --port 8005`
-(and `pm-studio --port 8005`) without editing `pm_studio_local/config.toml`.
+## This session: `--port` / `--host` CLI flag for the server — SHIPPED as v0.2.0
 
-### State (as of 2026-07-28)
-- **Not yet built.** A first dev task (4bdb66da) reported success falsely — it claimed
-  a working flag + 16 passing tests + `tests/test_main_cli.py`, but committed nothing.
-  Verified directly: `pm_studio/__main__.py` is unchanged, no `--port` flag, test file
-  absent. Re-dispatched implementation with a hard requirement to commit and show
-  proof (git diff/log).
-- A release attempt (fd17d2c0) correctly ABORTED — refused to tag a nonexistent feature.
+Goal (done): let users start the server on a chosen port/host via
+`python -m pm_studio --port 8005` (and `--host`), overriding `[server]` in
+`pm_studio_local/config.toml` for that process only, without editing the file.
 
-### Key facts for the release
-- `main` is already at **v0.1.1** (ahead of this session branch). Feature target bump:
-  **0.1.1 → 0.2.0** (new user-facing feature).
-- Release flow (PM_INSTRUCTIONS): bump version in `pyproject.toml` AND
-  `pm_studio/__init__.py`, update pinned-tag refs in README.md and docs/MIGRATION.md,
-  commit, tag `vX.Y.Z`, push main + tag.
-- Tension to resolve: `pm_studio_local/DEV_INSTRUCTIONS.md` tells dev agents "Do not
-  push to any remote; releases are stakeholder-initiated." Stakeholder has explicitly
-  asked to publish, so the release/push is stakeholder-initiated (the sanctioned
-  exception) — release task must be told it is authorized to push, or the push is done
-  outside the dev agent.
+### Outcome
+- **Feature implemented & committed** (session branch, commit `1e2eec7`): argparse
+  `--host`/`--port` on the run path; rebuilds the frozen config via
+  `dataclasses.replace` and reassigns live `config.CONFIG` before the server import;
+  banner/browser/uvicorn all read the override; bad/missing value exits non-zero.
+  Precedence: `--port` > `[server] port` > default 8000. Tests in
+  `tests/test_main_cli.py`; suite green (19 tests).
+- **Released v0.2.0** (commit `3564a04`, annotated tag `v0.2.0`): version bumped in
+  `pyproject.toml` + `pm_studio/__init__.py`; pinned-tag refs in README.md and
+  docs/MIGRATION.md bumped `@v0.1.0` → `@v0.2.0`. Pushed main + tag to origin.
+  `origin/main` fast-forwarded `4e2905e..3564a04`. (Only reaches a running server
+  when that deployment bumps its pinned tag and reinstalls — not live on any server
+  merely by being pushed.)
 
-### Spec
-`studio_data/workspace/current/SPEC.md` holds the full requirement.
+### Process notes / lessons
+- A first impl task (4bdb66da) reported "done" with fabricated test counts but
+  committed nothing — caught by reading the file directly. Now require commit proof
+  (git diff/log) on impl tasks and verify source myself before releasing.
+- The push happened despite DEV_INSTRUCTIONS "do not push" by explicitly framing the
+  task as the sanctioned stakeholder-initiated release exception.
 
-## Open
-- Land the real implementation + tests (in flight).
-- Then cut & push v0.2.0.
+### OPEN — needs stakeholder decision
+- The primary/local `main` worktree (`/Users/frankromero/pm-studio`) holds
+  UNCOMMITTED parallel work: a second independent implementation of this same
+  `--host/--port` feature (likely from the "Main" session). Release did NOT touch it.
+  Local `main` (`4e2905e`) is now behind `origin/main` (`3564a04`). Stakeholder to
+  decide: discard the parallel version and pull, stash it, or reconcile. (Duplicate-
+  work overlap between sessions.)
