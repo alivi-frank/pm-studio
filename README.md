@@ -101,6 +101,11 @@ PM Studio runs in one of two modes, set by `[enterprise]` in
   mailed when `[smtp]` is configured and always produce a copyable link, so no mail
   server is required. Converting from personal to enterprise migrates no data.
 
+  Reads are open to every role — the whole roadmap is visible to everyone, by design.
+  Roles restrict what you can *do*: only `admin` and `pm` may work sessions, change
+  the roadmap, or dispatch dev agents; only `admin` manages people. Consequential
+  actions are recorded in an audit log with the actor who performed them.
+
 ## Security model
 
 In `personal` mode this is a single-trusted-user, local-only tool: everything binds to

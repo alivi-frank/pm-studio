@@ -556,6 +556,13 @@
     .then((r) => r.json())
     .then((info) => {
       if (!info.enterprise || !info.user) return;
+      // Hide the controls this role can't use. Cosmetic only - the server enforces
+      // every capability independently, so a hidden form is not the protection.
+      const can = info.capabilities || [];
+      if (!can.includes("manage_session_lifecycle")) {
+        const newForm = document.getElementById("new-form");
+        if (newForm) newForm.style.display = "none";
+      }
       const bar = document.getElementById("account-bar");
       const parts = [];
       if (info.user.role === "admin") parts.push('<a href="/people">People</a>');
