@@ -40,6 +40,7 @@ Capability = Literal[
     "dispatch_dev_task",
     "manage_roadmap",
     "manage_users",
+    "view_cost",
 ]
 
 # role -> the capabilities it holds. Admin deliberately holds everything: the owner is
@@ -58,6 +59,10 @@ CAPABILITIES: dict[Capability, tuple[Role, ...]] = {
     "manage_roadmap": ("admin", "pm"),
     # The roster: invites, roles, enabling and disabling people.
     "manage_users": ("admin",),
+    # Rates, capacities and the cost report. Admin-only: this is compensation data,
+    # and it stays the narrowest grant in the matrix even though the roadmap it hangs
+    # off is visible to everyone.
+    "view_cost": ("admin",),
 }
 
 # A human explanation per capability, used in 403 bodies so a viewer who pokes at an
@@ -69,6 +74,7 @@ CAPABILITY_LABELS: dict[Capability, str] = {
     "dispatch_dev_task": "dispatch dev agents",
     "manage_roadmap": "change the roadmap",
     "manage_users": "manage people",
+    "view_cost": "see cost data",
 }
 
 

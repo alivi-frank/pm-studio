@@ -47,6 +47,11 @@ MODES = (MODE_PERSONAL, MODE_ENTERPRISE)
 
 DEFAULT_SMTP_PORT = 587
 
+# Cost attribution defaults. A deployment sets its own in [costing]; rates are that
+# deployment's own compensation data and never ship in this package.
+DEFAULT_CAPACITY_HOURS = 40.0
+DEFAULT_CURRENCY = "USD"
+
 # Shown in the PM system prompt when the target repo hasn't described its own source
 # layout yet - honest about not knowing, and points at the fix.
 DEFAULT_REPO_LAYOUT = (
@@ -73,6 +78,21 @@ class SmtpConfig:
     @property
     def is_usable(self) -> bool:
         return bool(self.host and self.from_address)
+
+
+@dataclass(frozen=True)
+class CostingConfig:
+    """Cost-attribution inputs. Optional: with no [costing] table hours are still
+    distributed and reported, and only the money columns are unknown."""
+
+    # Fallback hourly rate for anyone with no individual rate. Supporting this is the
+    # point of "blended": an org that will not put individual salaries in a tool can
+    # still get project cost out.
+    blended_rate: float | None = None
+    default_capacity_hours: float = DEFAULT_CAPACITY_HOURS
+    currency: str = DEFAULT_CURRENCY
+    # Relative weight per signal kind, for tuning the split.
+    weights: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -103,6 +123,7 @@ class Config:
     mode: str = MODE_PERSONAL
     # None unless the deployment configured [smtp].
     smtp: SmtpConfig | None = None
+    costing: CostingConfig = field(default_factory=CostingConfig)
 
     @property
     def is_enterprise(self) -> bool:
@@ -155,6 +176,23 @@ def _parse_mode(raw: dict, config_path: Path) -> str:
         )
         raise SystemExit(2)
     return mode
+
+
+def _parse_costing(raw: dict) -> CostingConfig:
+    """Reads the optional [costing] table."""
+    costing = raw.get("costing")
+    if not isinstance(costing, dict):
+        return CostingConfig()
+    blended = costing.get("blended_rate")
+    weights = costing.get("weights")
+    return CostingConfig(
+        blended_rate=float(blended) if blended is not None else None,
+        default_capacity_hours=float(
+            costing.get("default_capacity_hours", DEFAULT_CAPACITY_HOURS)
+        ),
+        currency=str(costing.get("currency", DEFAULT_CURRENCY)).strip() or DEFAULT_CURRENCY,
+        weights={str(k): float(v) for k, v in (weights or {}).items()},
+    )
 
 
 def _parse_smtp(raw: dict) -> SmtpConfig | None:
@@ -232,6 +270,7 @@ def load_config(repo_root: Path | None = None) -> Config:
         knowledge_files=knowledge_files,
         mode=_parse_mode(raw, config_path),
         smtp=_parse_smtp(raw),
+        costing=_parse_costing(raw),
     )
 
 

@@ -567,6 +567,7 @@
       }
       const bar = document.getElementById("account-bar");
       const parts = [];
+      if (can.includes("view_cost")) parts.push('<a href="/costing">Time &amp; cost</a>');
       if (info.user.role === "admin") parts.push('<a href="/people">People</a>');
       parts.push('<a href="#" id="sign-out">Sign out</a>');
       bar.innerHTML =

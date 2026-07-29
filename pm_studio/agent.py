@@ -12,6 +12,7 @@ from typing import Callable, Iterator, TYPE_CHECKING
 from . import gitsnapshot
 from .accounts import AGENT_HEADER_NAME, AGENT_TOKEN
 from .config import CONFIG, LOCAL_DIR_NAME
+from .costing import agent_usage
 from .roadmap import PRODUCTS
 
 if TYPE_CHECKING:
@@ -722,6 +723,17 @@ class PMAgent:
             self._save_state()
 
         if data.get("is_error") or proc.returncode != 0:
-            return {"type": "pm_error", "message": data.get("result") or f"exit code {proc.returncode}"}
+            return {
+                "type": "pm_error",
+                "message": data.get("result") or f"exit code {proc.returncode}",
+                # Carried even on failure: a turn that errored still cost tokens.
+                "agent_usage": agent_usage(data),
+            }
 
-        return {"type": "pm_reply", "text": data.get("result", "")}
+        return {
+            "type": "pm_reply",
+            "text": data.get("result", ""),
+            # Measured spend for this turn, for cost attribution (see costing.py).
+            # Previously discarded.
+            "agent_usage": agent_usage(data),
+        }

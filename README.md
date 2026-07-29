@@ -125,8 +125,29 @@ PM Studio runs in one of two modes, set by `[enterprise]` in
 
   Reads are open to every role — the whole roadmap is visible to everyone, by design.
   Roles restrict what you can *do*: only `admin` and `pm` may work sessions, change
-  the roadmap, or dispatch dev agents; only `admin` manages people. Consequential
-  actions are recorded in an audit log with the actor who performed them.
+  the roadmap, or dispatch dev agents; only `admin` manages people or sees cost.
+  Consequential actions are recorded in an audit log with the actor who performed them.
+
+## Time & cost (optional, admin-only)
+
+At `/costing`, a week looks like this:
+
+> Dana, 2026-W31: 28.4h Signup rewrite, 11.6h Billing — 40h total
+
+It is a **distribution, not a stopwatch**. Nothing times anybody's screen. Each person's
+declared capacity is split across projects in proportion to the activity they generated,
+which is why the total is always a real week — capacity is the input and signals only
+decide the proportions. Any week can be overridden by an admin, and the derived figures
+are kept alongside, so an approximation is never the only record.
+
+**Labour and agent cost are kept apart.** Labour is an estimate (hours × individual or
+blended rate). Agent cost is measured from the model's own reported token spend. An agent
+running for twenty minutes while nobody is at the keyboard is machine time, not somebody's
+afternoon.
+
+Cost is additive up to **initiative**; because an initiative can serve several goals,
+goal-level figures overlap and are never summed. Rates are your deployment's own data —
+they live in your workspace, never in this package.
 
 ## Security model
 

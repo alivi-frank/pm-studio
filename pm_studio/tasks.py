@@ -8,6 +8,7 @@ from typing import Callable
 
 from . import gitsnapshot
 from .config import CONFIG, DEV_INSTRUCTIONS_NAME, LOCAL_DIR_NAME
+from .costing import agent_usage
 from .models import DEFAULT_MODEL
 
 DEV_AGENT_TIMEOUT_SECONDS = 1800
@@ -128,7 +129,7 @@ class TaskRegistry:
             "id": task_id, "kind": "merge_resolution", "description": description, "status": "running",
             "started_at": started_at, "finished_at": None, "result": None,
         })
-        is_error, result_text = self._execute(description)
+        is_error, result_text, usage = self._execute(description)
         final = {
             "id": task_id,
             "kind": "merge_resolution",
@@ -137,12 +138,13 @@ class TaskRegistry:
             "started_at": started_at,
             "finished_at": time.time(),
             "result": result_text,
+            "agent_usage": usage,
         }
         self._write_task(final)
         return final
 
     def _run_and_record(self, task_id: str, description: str, started_at: float) -> None:
-        is_error, result_text = self._execute(description)
+        is_error, result_text, usage = self._execute(description)
         final = {
             "id": task_id,
             "kind": "dev",
@@ -151,16 +153,22 @@ class TaskRegistry:
             "started_at": started_at,
             "finished_at": time.time(),
             "result": result_text,
+            # Measured token spend for this run, for cost attribution.
+            "agent_usage": usage,
         }
         self._write_task(final)
         status_label = "error" if is_error else "done"
         with self.git_lock:
             gitsnapshot.snapshot(f"Dev task {task_id} ({status_label}): {description[:72]}", self.repo_root)
 
-    def _execute(self, description: str) -> tuple[bool, str]:
+    def _execute(self, description: str) -> tuple[bool, str, dict]:
         """Runs a single headless dev-agent turn in this registry's workspace.
-        Returns (is_error, result_text). Shared by the backgrounded start_task
-        path and the synchronous conflict-resolution path.
+        Returns (is_error, result_text, agent_usage). The usage figures come straight
+        from the CLI's own JSON and are MEASURED, not estimated - they are kept apart
+        from any labour estimate downstream (see costing.py).
+
+        Shared by the backgrounded start_task path and the synchronous
+        conflict-resolution path.
 
         The deployment's DEV_INSTRUCTIONS.md (enterprise restrictions, local
         conventions) is appended to the prompt here, at dispatch time, rather than
@@ -196,18 +204,18 @@ class TaskRegistry:
                 timeout=DEV_AGENT_TIMEOUT_SECONDS,
             )
         except subprocess.TimeoutExpired:
-            return True, f"Dev agent timed out after {DEV_AGENT_TIMEOUT_SECONDS}s."
+            return True, f"Dev agent timed out after {DEV_AGENT_TIMEOUT_SECONDS}s.", {}
         except FileNotFoundError:
-            return True, "The `claude` CLI is not installed or not on PATH."
+            return True, "The `claude` CLI is not installed or not on PATH.", {}
 
         stdout = proc.stdout.strip()
         if not stdout:
-            return True, f"No output (exit {proc.returncode}). stderr: {proc.stderr.strip()[:2000]}"
+            return True, f"No output (exit {proc.returncode}). stderr: {proc.stderr.strip()[:2000]}", {}
         try:
             data = json.loads(stdout)
         except json.JSONDecodeError:
-            return proc.returncode != 0, stdout[:4000]
+            return proc.returncode != 0, stdout[:4000], {}
 
         result_text = data.get("result") or json.dumps(data)[:4000]
         is_error = bool(data.get("is_error")) or proc.returncode != 0
-        return is_error, result_text
+        return is_error, result_text, agent_usage(data)
