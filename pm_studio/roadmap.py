@@ -43,6 +43,11 @@ class RoadmapItem:
     # An externally-owned item is tracked on the board - the PM keeps its status
     # current from stakeholder reports but never dispatches dev work for it.
     owner: str | None = None
+    # The single parent Project in the work model (see portfolio.py). A change has
+    # exactly one, which is what keeps cost attribution unambiguous. None means the
+    # change predates the work model or the deployment isn't using it - so existing
+    # boards keep loading untouched, and this stays additive rather than a migration.
+    project_id: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -114,6 +119,25 @@ class RoadmapStore:
     def get(self, item_id: str) -> RoadmapItem | None:
         return self._items.get(item_id)
 
+    def list_by_project(self, project_id: str) -> list[dict]:
+        return sorted(
+            (i.to_dict() for i in self._items.values() if i.project_id == project_id),
+            key=lambda i: i["created_at"],
+        )
+
+    def count_by_project(self, project_id: str) -> int:
+        """How many changes hang off one project - what the server checks before
+        allowing that project to be deleted."""
+        return sum(1 for i in self._items.values() if i.project_id == project_id)
+
+    def unassigned_items(self) -> list[dict]:
+        """Changes with no parent project. Reported, not blocked: alignment is a
+        practice the board surfaces rather than a validation that stops work."""
+        return sorted(
+            (i.to_dict() for i in self._items.values() if i.project_id is None),
+            key=lambda i: i["created_at"],
+        )
+
     # ---- writes ----
 
     def create(
@@ -125,6 +149,7 @@ class RoadmapStore:
         status: Status = "pending",
         origin_product: str | None = None,
         owner: str | None = None,
+        project_id: str | None = None,
     ) -> RoadmapItem:
         if product not in PRODUCTS:
             raise ValueError(f"Unknown product: {product}")
@@ -149,6 +174,7 @@ class RoadmapStore:
             updated_at=now,
             shipped_at=now if status == "done" else None,
             owner=(owner or "").strip() or None,
+            project_id=(project_id or "").strip() or None,
         )
         with self._lock:
             self._items[item.id] = item
@@ -165,6 +191,7 @@ class RoadmapStore:
         title: str | None = None,
         description: str | None = None,
         owner: str | None = None,
+        project_id: str | None = None,
     ) -> RoadmapItem:
         with self._lock:
             item = self._items.get(item_id)
@@ -185,6 +212,10 @@ class RoadmapStore:
                 # "" (an explicit empty string) clears external ownership back to
                 # "built here"; None means "no change", like every other field.
                 item.owner = owner.strip() or None
+            if project_id is not None:
+                # Same convention: "" detaches the change from its project (making it
+                # unaligned), None leaves it alone.
+                item.project_id = project_id.strip() or None
             item.updated_at = time.time()
             self._save_product(item.product)
         self._notify({"type": "roadmap_item_upserted", "item": item.to_dict()})
