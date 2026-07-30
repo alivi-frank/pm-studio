@@ -30,6 +30,13 @@ from .authz import (
 )
 from .config import CONFIG
 from .models import list_models
+from .portfolio import (
+    DEFAULT_CATCH_ALL_PROJECT,
+    DEFAULT_MAINTENANCE_GOAL,
+    DEFAULT_MAINTENANCE_INITIATIVE,
+    PortfolioError,
+    PortfolioStore,
+)
 from .roadmap import PRODUCTS, RoadmapStore
 from .sessions import DEFAULT_SESSION_ID, SessionManager, SessionRuntime
 
@@ -48,6 +55,7 @@ _main_loop: asyncio.AbstractEventLoop | None = None
 
 sessions = SessionManager()
 roadmap_store = RoadmapStore()
+portfolio_store = PortfolioStore()
 # Constructed in both modes (it is empty and untouched in personal mode) so nothing
 # has to branch on mode just to reach the store.
 account_store = AccountStore()
@@ -238,6 +246,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         _wire_task_broadcast(session_id)
     sessions.subscribe(_on_session_update)
     roadmap_store.subscribe(_on_roadmap_update)
+    # Portfolio edits ride the roadmap socket: anything watching the board already
+    # cares when a project is re-parented or an initiative closes.
+    portfolio_store.subscribe(_on_roadmap_update)
     yield
 
 
@@ -745,6 +756,195 @@ def dashboard_page(session_id: str) -> FileResponse:
 
 # ---- roadmap board (cross-session, cross-product - not scoped to one session) ----
 
+def _validated_project_id(raw) -> str | None:
+    """Passes through None ("no change") and "" ("detach"), but rejects an unknown id -
+    a change pointing at a project that doesn't exist would silently fall out of every
+    rollup."""
+    if raw is None:
+        return None
+    project_id = str(raw).strip()
+    if project_id and not portfolio_store.project_exists(project_id):
+        raise HTTPException(status_code=400, detail=f"Unknown project: {project_id}")
+    return project_id
+
+
+def _resolve_project_id(payload: dict) -> str | None:
+    """The parent project for a new change.
+
+    When the caller names one, it is validated. When it doesn't, the change lands in
+    the catch-all project if the deployment has declared one - that is what keeps
+    unplanned work aligned without making every creation path ask about strategy
+    first. A deployment not using the work model has no catch-all, and changes simply
+    carry no project, exactly as before.
+    """
+    explicit = _validated_project_id(payload.get("project_id"))
+    if explicit:
+        return explicit
+    return portfolio_store.catch_all_project_id
+
+
+# ---- work model: goals, initiatives, projects ----
+
+
+@app.get("/portfolio")
+def portfolio_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "portfolio.html")
+
+
+@app.get("/portfolio/data")
+def portfolio_data() -> dict:
+    """Goals, initiatives, projects, the catch-all id, and the unaligned report."""
+    return {
+        **portfolio_store.snapshot(),
+        "unassigned_changes": roadmap_store.unassigned_items(),
+    }
+
+
+@app.post("/portfolio/bootstrap")
+def portfolio_bootstrap(request: Request, payload: dict = Body(default={})) -> dict:
+    """Declares the maintenance goal + always-open initiative + catch-all project.
+
+    Goals and initiatives are never auto-created, but the catch-all project needs a
+    parent - so this trio is declared once, explicitly, by whoever sets the instance
+    up. Idempotent."""
+    actor = _require(request, "manage_roadmap")
+    result = portfolio_store.ensure_maintenance_scaffold(
+        goal_title=(payload.get("goal_title") or "").strip() or DEFAULT_MAINTENANCE_GOAL,
+        initiative_title=(payload.get("initiative_title") or "").strip()
+        or DEFAULT_MAINTENANCE_INITIATIVE,
+        project_title=(payload.get("project_title") or "").strip()
+        or DEFAULT_CATCH_ALL_PROJECT,
+    )
+    if result.get("created"):
+        _audit(actor, "portfolio.bootstrapped", result["project_id"])
+    return result
+
+
+@app.post("/portfolio/goals")
+def create_goal(request: Request, payload: dict = Body(...)) -> dict:
+    _require(request, "manage_roadmap")
+    try:
+        goal = portfolio_store.create_goal(
+            title=payload.get("title") or "", description=payload.get("description") or ""
+        )
+    except PortfolioError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return goal.to_dict()
+
+
+@app.patch("/portfolio/goals/{goal_id}")
+def update_goal(goal_id: str, request: Request, payload: dict = Body(default={})) -> dict:
+    _require(request, "manage_roadmap")
+    try:
+        goal = portfolio_store.update_goal(
+            goal_id,
+            title=payload.get("title"),
+            description=payload.get("description"),
+            status=payload.get("status"),
+        )
+    except PortfolioError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return goal.to_dict()
+
+
+@app.delete("/portfolio/goals/{goal_id}")
+def delete_goal(goal_id: str, request: Request) -> dict:
+    _require(request, "manage_roadmap")
+    try:
+        portfolio_store.delete_goal(goal_id)
+    except PortfolioError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "deleted"}
+
+
+@app.post("/portfolio/initiatives")
+def create_initiative(request: Request, payload: dict = Body(...)) -> dict:
+    _require(request, "manage_roadmap")
+    try:
+        initiative = portfolio_store.create_initiative(
+            title=payload.get("title") or "",
+            description=payload.get("description") or "",
+            goal_ids=payload.get("goal_ids"),
+        )
+    except PortfolioError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return initiative.to_public_dict()
+
+
+@app.patch("/portfolio/initiatives/{initiative_id}")
+def update_initiative(initiative_id: str, request: Request, payload: dict = Body(default={})) -> dict:
+    _require(request, "manage_roadmap")
+    try:
+        initiative = portfolio_store.update_initiative(
+            initiative_id,
+            title=payload.get("title"),
+            description=payload.get("description"),
+            status=payload.get("status"),
+            goal_ids=payload.get("goal_ids"),
+        )
+    except PortfolioError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return initiative.to_public_dict()
+
+
+@app.delete("/portfolio/initiatives/{initiative_id}")
+def delete_initiative(initiative_id: str, request: Request) -> dict:
+    _require(request, "manage_roadmap")
+    try:
+        portfolio_store.delete_initiative(initiative_id)
+    except PortfolioError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "deleted"}
+
+
+@app.post("/portfolio/projects")
+def create_project(request: Request, payload: dict = Body(...)) -> dict:
+    _require(request, "manage_roadmap")
+    try:
+        project = portfolio_store.create_project(
+            title=payload.get("title") or "",
+            description=payload.get("description") or "",
+            initiative_id=(payload.get("initiative_id") or "").strip() or None,
+        )
+    except PortfolioError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return project.to_public_dict()
+
+
+@app.patch("/portfolio/projects/{project_id}")
+def update_project(project_id: str, request: Request, payload: dict = Body(default={})) -> dict:
+    """`initiative_id: ""` deliberately makes the project unaligned; omitting the key
+    leaves its parent alone."""
+    _require(request, "manage_roadmap")
+    raw_initiative = payload.get("initiative_id")
+    try:
+        project = portfolio_store.update_project(
+            project_id,
+            title=payload.get("title"),
+            description=payload.get("description"),
+            status=payload.get("status"),
+            initiative_id=(raw_initiative or "").strip() or None,
+            clear_initiative=raw_initiative is not None and not str(raw_initiative).strip(),
+        )
+    except PortfolioError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return project.to_public_dict()
+
+
+@app.delete("/portfolio/projects/{project_id}")
+def delete_project(project_id: str, request: Request) -> dict:
+    _require(request, "manage_roadmap")
+    try:
+        # The roadmap store owns changes, so the count is passed in rather than having
+        # portfolio.py reach across into it.
+        portfolio_store.delete_project(
+            project_id, change_count=roadmap_store.count_by_project(project_id)
+        )
+    except PortfolioError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "deleted"}
+
+
 @app.get("/roadmap")
 def roadmap_page() -> FileResponse:
     return FileResponse(STATIC_DIR / "roadmap.html")
@@ -779,6 +979,7 @@ def create_roadmap_item(product: str, request: Request, payload: dict = Body(...
             status=payload.get("status") or "pending",
             origin_product=(payload.get("origin_product") or "").strip() or None,
             owner=(payload.get("owner") or "").strip() or None,
+            project_id=_resolve_project_id(payload),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -830,6 +1031,8 @@ def update_roadmap_item(product: str, item_id: str, request: Request, payload: d
         description=payload.get("description"),
         # None = no change; "" = clear external ownership (see RoadmapStore.update).
         owner=payload.get("owner"),
+        # Same convention: "" detaches the change from its project.
+        project_id=_validated_project_id(payload.get("project_id")),
     )
     _audit(actor, "roadmap.item_updated", f"{product}/{item_id}")
     return item.to_dict()

@@ -68,6 +68,28 @@ restrictions stay in your (possibly private) repo, never in this public package.
 source. If `pm_studio_local/` can't express what you need, open an issue on this
 repo instead.
 
+## Work model (optional)
+
+Roadmap items can optionally hang off a strategy chain, visible at `/portfolio`:
+
+```
+Goals  ⇄  Initiative  →  Project  →  Change
+                                       └─ belongs to exactly one Product
+```
+
+A **Change** is just the roadmap item you already have — it gains one parent project.
+A project belongs to exactly one initiative, and an initiative may serve **several
+goals**. Products aren't a level in the chain; a product hangs off the change, which is
+what lets an initiative span several products without any extra bookkeeping.
+
+A project with no initiative is **unaligned** — allowed, so nobody is blocked
+mid-work, but reported so it gets linked up. Declare a maintenance goal + always-open
+initiative + catch-all project once (the page prompts you, with names you choose), and
+from then on unplanned work like a bug fix rolls up somewhere instead of floating.
+
+Entirely optional and entirely additive: existing boards load unchanged, and a
+deployment that ignores `/portfolio` behaves exactly as before.
+
 ## Migrating an existing locally-built pm_agent
 
 Systems that built the earlier `pm_agent/` module from the reproduction pack can move
