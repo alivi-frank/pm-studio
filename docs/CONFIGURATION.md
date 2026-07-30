@@ -60,7 +60,97 @@ default = "claude-opus-4-8"
 "claude-opus-4-8" = "Opus"
 sonnet = "Sonnet"
 haiku = "Haiku"
+
+# Operating mode. Omit this table entirely for the default, `personal` - the
+# historical single-trusted-user tool with no accounts and no login.
+# `enterprise` turns on user accounts, email invites and roles. Turning it on
+# changes who can reach the dev agents, so it is always opt-in.
+# `enabled = true` is accepted as shorthand for mode = "enterprise".
+# A value that is neither `personal` nor `enterprise` is a hard startup error -
+# a typo here must never silently leave an instance open.
+[enterprise]
+mode = "personal"
+
+# Optional outbound mail for enterprise invites. Omit the whole table and each
+# invite instead gives the admin a copyable link, which needs no mail server.
+# Prefer `password_env` (the NAME of an environment variable) over `password`
+# so the secret never has to sit in a file you might commit.
+[smtp]
+host = "smtp.example.com"
+port = 587
+from_address = "pm-studio@example.com"
+username = "pm-studio"
+password_env = "PM_STUDIO_SMTP_PASSWORD"
+use_tls = true
 ```
+
+## Operating modes
+
+`personal` (the default) is the tool as it has always been: one trusted user, no
+accounts, everything bound to localhost.
+
+`enterprise` adds a roster on top of exactly the same core loop. Nothing about
+sessions, dispatch, the roadmap or git behavior changes — what changes is that
+requests need an identity.
+
+Turning it on:
+
+1. Set `mode = "enterprise"` under `[enterprise]` and restart the server.
+2. Open the server. With no accounts yet, every page redirects to `/setup`, which
+   creates the **owner** account — full access, manages the roster. This is the
+   personal-to-enterprise conversion step, and it migrates no data: sessions, chat
+   history, tasks and roadmap files stay exactly where they are.
+3. Invite people from `/people` (admins only). Each invite is mailed if `[smtp]` is
+   configured, and always yields a copyable `/accept-invite?token=…` link. Invites
+   expire after 7 days, are single-use, and re-inviting someone supersedes their old
+   link.
+
+### Roles
+
+| Capability | admin | pm | reviewer | viewer |
+| --- | :-: | :-: | :-: | :-: |
+| View sessions and the whole roadmap | ✅ | ✅ | ✅ | ✅ |
+| Work in PM sessions (send turns, retitle, reset) | ✅ | ✅ | — | — |
+| Create / merge / sync / end sessions | ✅ | ✅ | — | — |
+| **Dispatch dev agents** | ✅ | ✅ | — | — |
+| Change the roadmap | ✅ | ✅ | — | — |
+| Manage people (invites, roles, disable) | ✅ | — | — | — |
+
+Reads are open to every role on purpose: transparency is the deployment default, so
+there is no per-user filtering of the board. What a role changes is what you may *do*,
+not what you may see.
+
+**`dispatch_dev_task` is a code-execution boundary, not a UI affordance.** Dev agents
+run with bypassed permissions inside the repo, so granting `pm` is granting the ability
+to run arbitrary code on the host. It is enforced on the HTTP path and on the chat
+websocket, and every dispatch is recorded in the audit log with the actor who asked
+for it.
+
+`reviewer` is read-only today. The role exists so it can be assigned now, but the
+reviewer workflow itself is not implemented yet.
+
+The matrix lives in one table in `pm_studio/authz.py` — that is the single place to
+read or change what a role can do.
+
+### Audit log
+
+Consequential actions (dispatches, session lifecycle changes, roadmap writes, role and
+invite changes) append one JSON line to
+`<workspace_root>/workspace/audit.jsonl`, recording who did it. Admins can read it at
+`GET /audit`. It only ever grows and is never rewritten, so a crash cannot corrupt
+earlier entries. Nothing is written in personal mode — with one trusted user, the git
+snapshot history already answers the question.
+
+State lives in `<workspace_root>/workspace/accounts.json`, written `0600` and never
+git-tracked, so password hashes and session tokens stay out of the repo. Passwords are
+PBKDF2-HMAC-SHA256; login tokens and invite tokens are stored only as hashes, which
+also means an invite link cannot be re-read later — revoke and re-invite instead.
+
+**The PM agents keep working.** They reach the server over `curl` and have no browser
+cookie, so the process mints a per-run agent token and splices it into the prompts'
+curl examples. It is never persisted, holds the `pm` role (never `admin`, so it can't
+reach the roster or cost data), and grants nothing beyond the endpoints an agent's
+Bash allowlist already matched in personal mode.
 
 ## `PM_INSTRUCTIONS.md`
 
