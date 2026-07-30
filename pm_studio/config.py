@@ -206,6 +206,18 @@ def _parse_smtp(raw: dict) -> SmtpConfig | None:
     password_env = str(smtp.get("password_env", "")).strip()
     if password_env:
         password = os.environ.get(password_env, "")
+    elif password:
+        # CONFIGURATION.md tells operators to commit pm_studio_local/ (session worktrees
+        # need it), so an inline password is a password in git. Warn rather than refuse:
+        # a deployment that has already done it should still boot, but nobody should be
+        # able to do it without being told.
+        print(
+            "[pm_studio] WARNING: [smtp] password is set inline in "
+            f"{LOCAL_DIR_NAME}/{CONFIG_FILE_NAME}, which is normally committed to your "
+            "repo - that puts the password in git history. Use `password_env = "
+            '"YOUR_ENV_VAR_NAME"` instead and unset `password`.',
+            file=sys.stderr,
+        )
     return SmtpConfig(
         host=str(smtp.get("host", "")).strip(),
         port=int(smtp.get("port", DEFAULT_SMTP_PORT)),

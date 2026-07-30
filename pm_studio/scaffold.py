@@ -139,16 +139,82 @@ PROJECT_STATUS_TEMPLATE = """\
 No project history yet. This is a brand-new project - proceed to discovery.
 """
 
-GITIGNORE_BLOCK_TEMPLATE = """\
+# Runtime-state entries `init` ensures are present in the target repo's .gitignore.
+# Kept as a list rather than one text block so an EXISTING .gitignore can have only the
+# lines it is missing appended - a deployment that ran `init` before some of these files
+# existed must still end up ignoring them (see _ensure_gitignore).
+GITIGNORE_ENTRIES: tuple[str, ...] = (
+    "{workspace_rel}/current/chat_history.json",
+    "{workspace_rel}/current/pm_session_id.txt",
+    "{workspace_rel}/current/tasks/",
+    "{workspace_rel}/sessions/",
+    "{workspace_rel}/sessions.json",
+    "{workspace_rel}/roadmap/",
+    "{workspace_rel}/portfolio.json",
+    "{workspace_rel}/accounts.json",
+    "{workspace_rel}/costing.json",
+    "{workspace_rel}/audit.jsonl",
+    "{workspace_rel}/activity.jsonl",
+    # The stores write `<name>.tmp` then atomically replace; a snapshot landing inside
+    # that window would otherwise catch one.
+    "{workspace_rel}/*.tmp",
+)
 
-# PM Studio runtime/bookkeeping state (per-session, not product content)
-{workspace_rel}/current/chat_history.json
-{workspace_rel}/current/pm_session_id.txt
-{workspace_rel}/current/tasks/
-{workspace_rel}/sessions/
-{workspace_rel}/sessions.json
-{workspace_rel}/roadmap/
-"""
+GITIGNORE_HEADER = "# PM Studio runtime/bookkeeping state (per-session, not product content)"
+
+# Appended above the credential-bearing entries so the reason is visible in the file
+# itself, where an operator tidying their .gitignore will actually read it.
+GITIGNORE_SENSITIVE_NOTE = (
+    "# Keep these ignored: accounts.json holds password hashes and live login tokens,\n"
+    "# costing.json holds pay rates, audit/activity name who did what."
+)
+
+
+def missing_gitignore_entries(existing: str, workspace_rel: str) -> list[str]:
+    """Which required entries this .gitignore doesn't have yet.
+
+    Compared line by line (trimmed) rather than by substring, so a longer path that
+    merely *contains* a required one doesn't count as covering it.
+    """
+    present = {line.strip() for line in existing.splitlines()}
+    required = [entry.format(workspace_rel=workspace_rel) for entry in GITIGNORE_ENTRIES]
+    return [entry for entry in required if entry not in present]
+
+
+def _ensure_gitignore(root: Path, created: list[str]) -> None:
+    """Makes sure every runtime-state entry is ignored, appending only what is missing.
+
+    The previous version appended one fixed block and skipped entirely if the workspace
+    root was mentioned at all. That meant a repo which ran `init` before accounts.json
+    and costing.json existed could never pick them up - `init` would report "nothing to
+    do" while password hashes sat committable. Now the check is per entry.
+    """
+    gitignore = root / ".gitignore"
+    existing = gitignore.read_text() if gitignore.exists() else ""
+    missing = missing_gitignore_entries(existing, CONFIG.workspace_rel)
+    if not missing:
+        return
+
+    sensitive = {
+        entry.format(workspace_rel=CONFIG.workspace_rel)
+        for entry in GITIGNORE_ENTRIES
+        if any(name in entry for name in ("accounts", "costing", "audit", "activity"))
+    }
+    lines = ["", GITIGNORE_HEADER]
+    # Ordinary state first, then the credential-bearing group under its own note.
+    lines += [entry for entry in missing if entry not in sensitive]
+    if any(entry in sensitive for entry in missing):
+        lines += ["", GITIGNORE_SENSITIVE_NOTE]
+        lines += [entry for entry in missing if entry in sensitive]
+
+    text = existing
+    if text and not text.endswith("\n"):
+        text += "\n"
+    gitignore.write_text(text + "\n".join(lines) + "\n")
+    created.append(
+        f".gitignore ({len(missing)} runtime-state "
+        f"{'entry' if len(missing) == 1 else 'entries'} appended)"
+    )
 
 
 def _write_if_absent(path: Path, content: str, created: list[str], root: Path) -> None:
@@ -182,14 +248,7 @@ def run_init(root: Path) -> None:
     )
     _write_if_absent(root / "PROJECT_STATUS.md", PROJECT_STATUS_TEMPLATE, created, root)
 
-    # .gitignore: append the runtime-state block only if this workspace root isn't
-    # mentioned yet (a migrated repo already ignores its pm_agent/ equivalents).
-    gitignore = root / ".gitignore"
-    block = GITIGNORE_BLOCK_TEMPLATE.format(workspace_rel=CONFIG.workspace_rel)
-    existing = gitignore.read_text() if gitignore.exists() else ""
-    if f"{CONFIG.workspace_rel}/sessions/" not in existing:
-        gitignore.write_text(existing + block)
-        created.append(".gitignore (runtime-state block appended)")
+    _ensure_gitignore(root, created)
 
     if created:
         print("PM Studio init - created:")

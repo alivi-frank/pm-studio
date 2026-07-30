@@ -188,8 +188,13 @@ invite changes) append one JSON line to
 earlier entries. Nothing is written in personal mode — with one trusted user, the git
 snapshot history already answers the question.
 
-State lives in `<workspace_root>/workspace/accounts.json`, written `0600` and never
-git-tracked, so password hashes and session tokens stay out of the repo. Passwords are
+State lives in `<workspace_root>/workspace/accounts.json`, written `0600`. It is kept
+out of git by two independent mechanisms, because one was not enough: `init` lists it in
+`.gitignore`, **and** every snapshot commit unstages it unconditionally (see
+`gitsnapshot.SENSITIVE_WORKSPACE_FILES`). A PM turn snapshots the whole repo with
+`git add -A`, so a deployment whose `.gitignore` predates this file would otherwise have
+committed password hashes on its next turn. If one of these files is already tracked,
+the server says so on every snapshot with the `git rm --cached` command to run. Passwords are
 PBKDF2-HMAC-SHA256; login tokens and invite tokens are stored only as hashes, which
 also means an invite link cannot be re-read later — revoke and re-invite instead.
 
