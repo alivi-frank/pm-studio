@@ -25,7 +25,7 @@ state is JSON files plus git.
 Install a **pinned tag** into the environment of the project you want to run it in:
 
 ```bash
-pip install "pm-studio @ git+https://github.com/fromerosk/pm-studio@v0.3.0"
+pip install "pm-studio @ git+https://github.com/fromerosk/pm-studio@v0.3.1"
 ```
 
 ## Use
@@ -162,6 +162,13 @@ In `personal` mode this is a single-trusted-user, local-only tool: everything bi
 127.0.0.1 and dev agents run with bypassed permissions inside your repo. Do not expose
 the port. PM agents run under a strict literal-match Bash allowlist that structurally
 scopes them to their own session and their own product's board.
+
+Credential-bearing state (`accounts.json`, `costing.json`, `audit.jsonl`,
+`activity.jsonl`) is **unstaged from every snapshot commit unconditionally**, not merely
+git-ignored. Each PM turn ends in a repo-wide `git add -A`, so relying on an operator's
+`.gitignore` being right would make a password hash one stale config line away from being
+pushed. `init` also keeps those ignore entries up to date, appending any that a
+previously-initialized repo is missing.
 
 `enterprise` mode adds authentication so a shared instance can serve a team: every
 request needs a session cookie, credentials are stored as PBKDF2 hashes outside git,
