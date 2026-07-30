@@ -952,7 +952,37 @@ def roadmap_page() -> FileResponse:
 
 @app.get("/roadmap/data")
 def roadmap_data() -> dict:
-    return {"products": PRODUCTS, "items": roadmap_store.list_all()}
+    """The board's dataset, grouped by product (the original shape, unchanged).
+
+    `portfolio` is additive: the board ships it so the page can re-group into the
+    initiative lens locally as websocket events arrive, without refetching the whole
+    board on every keystroke elsewhere. Existing consumers can ignore it.
+    """
+    return {
+        "products": PRODUCTS,
+        "items": roadmap_store.list_all(),
+        "portfolio": {
+            "initiatives": portfolio_store.list_initiatives(),
+            "projects": portfolio_store.list_projects(),
+            "catch_all_project_id": portfolio_store.catch_all_project_id,
+        },
+    }
+
+
+@app.get("/roadmap/by-initiative")
+def roadmap_by_initiative() -> dict:
+    """The same changes under the other lens: Initiative -> Project -> Change.
+
+    One dataset, two pivots. Nothing is dropped when you switch - projects with no
+    initiative, and changes with no project, come back in a trailing group with
+    `initiative: null` rather than vanishing.
+    """
+    changes = [item for items in roadmap_store.list_all().values() for item in items]
+    return {
+        "pivot": "initiative",
+        "products": PRODUCTS,
+        "groups": portfolio_store.group_changes_by_initiative(changes),
+    }
 
 
 @app.get("/roadmap/{product}")

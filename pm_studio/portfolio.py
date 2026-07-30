@@ -560,6 +560,62 @@ class PortfolioStore:
             self._save()
         self._notify({"type": "portfolio_changed", "entity": "project", "id": project_id})
 
+    # ---- pivots ----
+
+    def group_changes_by_initiative(self, changes: list[dict]) -> list[dict]:
+        """Regroups roadmap items (changes) under Initiative -> Project.
+
+        The second lens on the same dataset: the board's own view groups by product,
+        this one walks the work model. Takes the changes as an argument rather than
+        reaching into the roadmap store, so this module stays independent of it and the
+        grouping is testable on its own.
+
+        Every change lands exactly once. Two synthetic groups catch what the tree
+        doesn't reach, so nothing silently disappears from the board when you switch
+        lens:
+
+        - a project whose `initiative_id` is None appears under an "unaligned"
+          initiative group (`initiative: None`)
+        - a change whose `project_id` is None (or points at a deleted project) appears
+          under an "unassigned" project group (`project: None`)
+        """
+        by_project: dict[str | None, list[dict]] = {}
+        for change in changes:
+            project_id = change.get("project_id")
+            if project_id not in self._projects:
+                project_id = None
+            by_project.setdefault(project_id, []).append(change)
+
+        groups: list[dict] = []
+
+        def project_entry(project: Project) -> dict:
+            return {
+                "project": project.to_public_dict(),
+                "changes": by_project.get(project.id, []),
+            }
+
+        # Real initiatives, in creation order, each with its own projects.
+        for initiative in self._sorted(self._initiatives):
+            children = [
+                p for p in self._sorted(self._projects) if p.initiative_id == initiative.id
+            ]
+            groups.append(
+                {
+                    "initiative": initiative.to_public_dict(),
+                    "projects": [project_entry(p) for p in children],
+                }
+            )
+
+        # Everything the tree doesn't reach goes into ONE trailing group, not two:
+        # projects with no initiative, then changes with no (or a dangling) project.
+        loose = [project_entry(p) for p in self._sorted(self._projects) if p.is_unaligned]
+        unassigned = by_project.get(None, [])
+        if unassigned:
+            loose.append({"project": None, "changes": unassigned})
+        if loose:
+            groups.append({"initiative": None, "projects": loose})
+        return groups
+
     # ---- the maintenance scaffold ----
 
     def ensure_maintenance_scaffold(

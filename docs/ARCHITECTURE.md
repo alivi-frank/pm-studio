@@ -148,6 +148,35 @@ catch-all project and its maintenance initiative cannot be closed or deleted.
 fan-out. Its events ride the roadmap websocket, since anything watching the board
 cares when a project is re-parented. Writes go through a temp file and `replace()`.
 
+### The two pivots
+
+One dataset, two lenses:
+
+- **By product** — `GET /roadmap/data`, the original shape, unchanged. Now also carries
+  an additive `portfolio` block (initiatives, projects, catch-all id) so the board page
+  can re-group locally as websocket events arrive instead of refetching on every change
+  made anywhere.
+- **By initiative** — `GET /roadmap/by-initiative`, returning
+  `groups: [{initiative, projects: [{project, changes}]}]`, produced by
+  `PortfolioStore.group_changes_by_initiative(changes)`. The changes are passed *in* so
+  the function is pure with respect to the roadmap store and testable on its own.
+
+The invariant is that switching lens never loses or duplicates a change. The
+per-product board can always show everything, since every change has a product; the
+initiative lens has two ways to fall off the tree, and both are caught:
+
+- a project with `initiative_id = None` → appears under a group with `initiative: null`
+- a change with `project_id = None`, **or pointing at a deleted project** → appears
+  under that same group with `project: null`
+
+Both land in **one** trailing group, not two, so the UI renders a single "Unaligned"
+heading. An initiative with no changes still appears — "nothing is happening on this"
+is information, not a reason to hide it.
+
+The board page mirrors this grouping in JS for live updates; `portfolio_changed` events
+trigger a refetch, since a re-parented project changes how the board groups without
+changing any item.
+
 ### Referential guards
 
 Deleting is refused rather than silently cascading: a goal an initiative still serves,
