@@ -1,10 +1,17 @@
 # Architecture Specification
 
-Complete technical spec of PM Studio (~2,700 lines of Python + 4 static HTML pages):
+Complete technical spec of PM Studio (~6,100 lines of Python + 10 static HTML pages):
 the package `pm_studio/` with modules `config.py`, `models.py`, `gitsnapshot.py`,
-`roadmap.py`, `tasks.py`, `agent.py`, `sessions.py`, `server.py`, `scaffold.py`,
-`__main__.py`, and `static/` (4 pages). Dependencies: `fastapi`, `uvicorn`, the
-`claude` CLI on PATH, `git`. No database — everything is JSON files + git.
+`roadmap.py`, `portfolio.py`, `tasks.py`, `agent.py`, `sessions.py`, `accounts.py`,
+`authz.py`, `costing.py`, `mailer.py`, `server.py`, `scaffold.py`, `__main__.py`, and
+`static/` (10 pages). Dependencies: `fastapi`, `uvicorn`, the `claude` CLI on PATH,
+`git` — no database, and no third-party crypto or ORM: everything is JSON files + git,
+with password hashing and tokens from the standard library.
+
+The enterprise layer (`accounts.py`, `authz.py`, `mailer.py`, `costing.py`) is inert
+unless `[enterprise] mode = "enterprise"` is set, and the work model (`portfolio.py`)
+is additive — a deployment that ignores both behaves exactly as the sections below
+describe.
 
 Deployment model: the package is installed (pinned) into any git repo — the "target
 repo" — and run from that repo's root. Everything project-specific lives in the target

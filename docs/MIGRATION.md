@@ -39,7 +39,7 @@ retry later — never migrate mid-merge.
 ### 2. Install the package (pinned)
 
 ```bash
-pip install "pm-studio @ git+https://github.com/fromerosk/pm-studio@v0.2.0"
+pip install "pm-studio @ git+https://github.com/fromerosk/pm-studio@v0.3.0"
 ```
 
 Verify: `python -m pm_studio version` prints the version. Locate the installed
