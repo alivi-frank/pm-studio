@@ -105,9 +105,41 @@ Turning it on:
    expire after 7 days, are single-use, and re-inviting someone supersedes their old
    link.
 
-Roles are `admin`, `pm`, `reviewer`, `viewer`. The roster and any cost data are
-admin-only; the roadmap is readable by everyone, by design — transparency is the
-default.
+### Roles
+
+| Capability | admin | pm | reviewer | viewer |
+| --- | :-: | :-: | :-: | :-: |
+| View sessions and the whole roadmap | ✅ | ✅ | ✅ | ✅ |
+| Work in PM sessions (send turns, retitle, reset) | ✅ | ✅ | — | — |
+| Create / merge / sync / end sessions | ✅ | ✅ | — | — |
+| **Dispatch dev agents** | ✅ | ✅ | — | — |
+| Change the roadmap | ✅ | ✅ | — | — |
+| Manage people (invites, roles, disable) | ✅ | — | — | — |
+
+Reads are open to every role on purpose: transparency is the deployment default, so
+there is no per-user filtering of the board. What a role changes is what you may *do*,
+not what you may see.
+
+**`dispatch_dev_task` is a code-execution boundary, not a UI affordance.** Dev agents
+run with bypassed permissions inside the repo, so granting `pm` is granting the ability
+to run arbitrary code on the host. It is enforced on the HTTP path and on the chat
+websocket, and every dispatch is recorded in the audit log with the actor who asked
+for it.
+
+`reviewer` is read-only today. The role exists so it can be assigned now, but the
+reviewer workflow itself is not implemented yet.
+
+The matrix lives in one table in `pm_studio/authz.py` — that is the single place to
+read or change what a role can do.
+
+### Audit log
+
+Consequential actions (dispatches, session lifecycle changes, roadmap writes, role and
+invite changes) append one JSON line to
+`<workspace_root>/workspace/audit.jsonl`, recording who did it. Admins can read it at
+`GET /audit`. It only ever grows and is never rewritten, so a crash cannot corrupt
+earlier entries. Nothing is written in personal mode — with one trusted user, the git
+snapshot history already answers the question.
 
 State lives in `<workspace_root>/workspace/accounts.json`, written `0600` and never
 git-tracked, so password hashes and session tokens stay out of the repo. Passwords are
