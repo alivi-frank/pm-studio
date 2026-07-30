@@ -87,6 +87,13 @@ mid-work, but reported so it gets linked up. Declare a maintenance goal + always
 initiative + catch-all project once (the page prompts you, with names you choose), and
 from then on unplanned work like a bug fix rolls up somewhere instead of floating.
 
+The roadmap board reads the same data through either lens — **by product** (Now / Next
+/ Later per product) or **by initiative** (initiative → project → change). The second
+lens is what shows you that one initiative spans several products, which the
+per-product board structurally can't. Switching never hides anything: work with no
+project, or a project with no initiative, is collected under an "Unaligned" heading
+rather than dropping out of view.
+
 Entirely optional and entirely additive: existing boards load unchanged, and a
 deployment that ignores `/portfolio` behaves exactly as before.
 
