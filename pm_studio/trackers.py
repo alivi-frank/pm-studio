@@ -42,11 +42,17 @@ from .config import CONFIG, TrackerConfig
 CATALOG_PATH = CONFIG.workspace_dir / "trackers.json"
 
 HTTP_TIMEOUT_SECONDS = 20
-# Bounds on one sync. A tracker with a hundred thousand issues must not be able to hang
-# the sync thread or blow up memory; the cap is reported when hit (see _note_truncation)
-# rather than silently trimming the board's view of the tracker.
+# Bounds on one sync. A tracker with a hundred thousand issues must not be able to hang the
+# sync thread or blow up memory; hitting the cap sets `truncated` on the tracker's status,
+# which the board reports, rather than silently trimming its view.
+#
+# 150 pages rather than the 40 this started at: a mid-size Jira project sits in the low
+# thousands of issues, which brushed against a 4,000 cap - and a limit a normal project
+# reaches is a limit that will start quietly dropping the oldest tickets out of the link
+# picker. At roughly 4ms per ticket a full 15,000 is about a minute on a background thread,
+# affordable at a 15-minute interval; memory is a few MB of dicts.
 PAGE_SIZE = 100
-MAX_PAGES = 40
+MAX_PAGES = 150
 MAX_TICKETS_PER_TRACKER = PAGE_SIZE * MAX_PAGES
 
 # ---- canonical types -------------------------------------------------------------
@@ -155,6 +161,17 @@ class Ticket:
     state: str
     url: str
     synced_at: float
+    # Where this ticket sits in the tracker's own hierarchy. Both None for a top-level
+    # item, and additive with None defaults so a cache written before this existed still
+    # loads. `parent_type` is the tracker's raw type name for the parent, which is what
+    # lets a caller tell "my parent is an Epic" from "my parent is a Story" - a distinction
+    # the import rules turn on, since an Epic becomes a project and a Story a change.
+    parent_key: str | None = None
+    parent_type: str | None = None
+    # Jira's status *category* ("To Do" / "In Progress" / "Done"), which is stable across
+    # the many workflow-specific names in `state` and is therefore what a bucket/status
+    # mapping should key on.
+    state_category: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -274,7 +291,7 @@ class JiraClient:
     A 404/410 on the first is the documented signal that an instance does not have it.
     """
 
-    JQL_FIELDS = "summary,issuetype,status"
+    JQL_FIELDS = "summary,issuetype,status,parent"
 
     def __init__(self, config: TrackerConfig) -> None:
         self.config = config
@@ -298,6 +315,11 @@ class JiraClient:
             return None
         fields = issue.get("fields") or {}
         raw_type = str((fields.get("issuetype") or {}).get("name") or "").strip()
+        status = fields.get("status") or {}
+        # Jira nests the parent's own fields, so one search call yields the parent's type
+        # too - no second round trip per issue just to learn whether it is an Epic.
+        parent = fields.get("parent") or {}
+        parent_fields = parent.get("fields") or {}
         return Ticket(
             tracker_id=self.config.id,
             provider="jira",
@@ -305,9 +327,14 @@ class JiraClient:
             type=canonical_type(raw_type),
             raw_type=raw_type or "Unknown",
             title=str(fields.get("summary") or "").strip(),
-            state=str((fields.get("status") or {}).get("name") or "").strip(),
+            state=str(status.get("name") or "").strip(),
             url=self.browse_url(key),
             synced_at=now,
+            parent_key=(str(parent.get("key")).strip().upper() if parent.get("key") else None),
+            parent_type=(
+                str((parent_fields.get("issuetype") or {}).get("name") or "").strip() or None
+            ),
+            state_category=str((status.get("statusCategory") or {}).get("name") or "").strip(),
         )
 
     def fetch_catalog(self) -> tuple[list[Ticket], bool]:
@@ -407,7 +434,16 @@ class AdoClient:
 
     API_VERSION = "7.0"
     BATCH_SIZE = 200
-    FIELDS = ("System.Id", "System.Title", "System.WorkItemType", "System.State")
+    FIELDS = (
+        "System.Id",
+        "System.Title",
+        "System.WorkItemType",
+        "System.State",
+        # ADO exposes the parent id but NOT the parent's type in this projection, so
+        # parent_type is resolved from the catalog after a sync (see _link_ado_parents)
+        # rather than costing one extra call per work item.
+        "System.Parent",
+    )
 
     def __init__(self, config: TrackerConfig) -> None:
         self.config = config
@@ -431,6 +467,7 @@ class AdoClient:
             return None
         fields = item.get("fields") or {}
         raw_type = str(fields.get("System.WorkItemType") or "").strip()
+        parent = fields.get("System.Parent")
         return Ticket(
             tracker_id=self.config.id,
             provider="ado",
@@ -441,6 +478,9 @@ class AdoClient:
             state=str(fields.get("System.State") or "").strip(),
             url=self.work_item_url(project, key),
             synced_at=now,
+            parent_key=(str(parent).strip() if parent else None),
+            # ADO has no status-category concept; its State is already the coarse value.
+            state_category=str(fields.get("System.State") or "").strip(),
         )
 
     def fetch_catalog(self) -> tuple[list[Ticket], bool]:
@@ -849,6 +889,19 @@ class TrackerStore:
                 self._state.statuses[config.id] = status
                 self._save_locked()
             return
+
+        # ADO's work-item projection carries the parent id but not its type, so fill it in
+        # from the batch we just pulled. Jira nests the parent's fields and needs none of
+        # this. Anything whose parent is outside the synced projects stays None, which the
+        # import rules treat the same as "no parent" - the honest answer, since we cannot
+        # know whether an unseen parent is an Epic.
+        if config.provider == "ado":
+            by_key = {t.key: t for t in tickets}
+            for ticket in tickets:
+                if ticket.parent_key and ticket.parent_type is None:
+                    parent = by_key.get(ticket.parent_key)
+                    if parent is not None:
+                        ticket.parent_type = parent.raw_type
 
         status.ok = True
         status.ticket_count = len(tickets)

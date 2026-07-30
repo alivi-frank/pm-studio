@@ -236,6 +236,29 @@ Declare one `[[trackers]]` block per connection (see the sample above). With non
 declared the whole feature is dormant: no extra threads, no ticket controls on the
 board, nothing.
 
+> **Tracker config belongs in your repo, not in this package.** This package is public and
+> its own `pm_studio_local/` is the config for developing PM Studio itself, so it declares
+> no tracker. Yours names your Jira site, your project keys and — via the synced catalog —
+> your ticket titles. That is your organisation's internal structure, and it stays in the
+> repo you control.
+>
+> Two consequences worth internalising before you point this at a real instance:
+>
+> - `pm_studio_local/config.toml` is **committed**. Use `token_env` and `email_env` so no
+>   credential is in it, and remember that `base_url` and `projects` alone disclose which
+>   vendor instance you run and how your work is organised. If your repo is public, that is
+>   published.
+> - A sync writes `<workspace>/trackers.json` — a cache of ticket titles from the synced
+>   instance — into whichever checkout the server runs from. It is git-ignored and unstaged
+>   from every snapshot, but do not run a sync from a checkout that is not yours to fill
+>   with that data.
+>
+> `tests/test_no_deployment_data.py` enforces both halves of this for the package itself:
+> no tracked file may name a real tracker host, the dogfood config may declare no tracker,
+> and no synced catalog may exist anywhere in the checkout. To exercise the sync while
+> developing, point a throwaway config at a local fake tracker; the suite covers the client
+> behaviour with no network at all.
+
 **What a link is.** A roadmap change may be linked to exactly **one** ticket, and a
 ticket to exactly one change — 1:1 in both directions. The change stores only
 `tracker_id` + `ticket_key`; the ticket's type, title, state and URL come from the

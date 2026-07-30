@@ -124,7 +124,9 @@ class TrackerConfig:
     # ADO:  derived from `organization` unless given explicitly.
     base_url: str
     projects: tuple[str, ...]
-    # Jira Cloud authenticates as email + API token; ADO as an empty user + PAT.
+    # Jira Cloud authenticates as email + API token; ADO as an empty user + PAT. Both the
+    # username and the token can be supplied by env var (`username_env`/`email_env` and
+    # `token_env`), which is what lets a deployment publish its pm_studio_local/ safely.
     username: str = ""
     token: str = ""
     # ADO only: the dev.azure.com organization name.
@@ -360,6 +362,23 @@ def _parse_trackers(raw: dict, config_path: Path) -> tuple[TrackerConfig, ...]:
                 file=sys.stderr,
             )
 
+        # The account name (Jira Cloud wants the email). Not a secret the way the token is,
+        # but pm_studio_local/ is committed and a deployment may publish that repo, so
+        # `username_env` / `email_env` exist to keep a work address out of it too.
+        username = str(entry.get("username", "") or entry.get("email", "")).strip()
+        username_env = str(
+            entry.get("username_env", "") or entry.get("email_env", "")
+        ).strip()
+        if username_env:
+            username = os.environ.get(username_env, "").strip()
+            if not username:
+                print(
+                    f"[pm_studio] WARNING: {where} in {config_path} sets username_env/"
+                    f"email_env = {username_env!r}, but that environment variable is empty "
+                    f"or unset, so tracker {tracker_id!r} will fail to authenticate.",
+                    file=sys.stderr,
+                )
+
         projects = entry.get("projects")
         if isinstance(projects, str):
             projects = [projects]
@@ -385,7 +404,7 @@ def _parse_trackers(raw: dict, config_path: Path) -> tuple[TrackerConfig, ...]:
                 or ("Jira" if provider == "jira" else "Azure DevOps"),
                 base_url=base_url,
                 projects=project_keys,
-                username=str(entry.get("username", "") or entry.get("email", "")).strip(),
+                username=username,
                 token=token,
                 organization=organization,
                 sync_interval_minutes=interval,

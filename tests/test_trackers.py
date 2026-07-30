@@ -72,11 +72,16 @@ class _PatchRequest:
         trackers_module._request = self._original
 
 
-def jira_issue(key, kind, summary="s", state="To Do"):
-    return {
-        "key": key,
-        "fields": {"summary": summary, "issuetype": {"name": kind}, "status": {"name": state}},
+def jira_issue(key, kind, summary="s", state="To Do", category="To Do", parent=None):
+    fields = {
+        "summary": summary,
+        "issuetype": {"name": kind},
+        "status": {"name": state, "statusCategory": {"name": category}},
     }
+    if parent:
+        parent_key, parent_type = parent
+        fields["parent"] = {"key": parent_key, "fields": {"issuetype": {"name": parent_type}}}
+    return {"key": key, "fields": fields}
 
 
 class CanonicalTypeTest(unittest.TestCase):
@@ -193,6 +198,43 @@ class JiraClientTest(unittest.TestCase):
         with _PatchRequest(lambda u, m, b: (_ for _ in ()).throw(TrackerError("HTTP 404: gone"))):
             self.assertIsNone(JiraClient(JIRA).fetch_one("PROJ-404"))
 
+    def test_parent_is_requested_in_one_call(self) -> None:
+        """The parent's own type has to come back with the search, or learning "is my parent
+        an Epic?" would cost an extra request per issue across thousands of them."""
+        with _PatchRequest(lambda u, m, b: {"issues": [], "isLast": True}) as rec:
+            JiraClient(JIRA).fetch_catalog()
+        self.assertIn("parent", rec.calls[0]["url"])
+
+    def test_parent_key_and_type_are_captured(self) -> None:
+        issue = jira_issue("PROJ-2", "Story", parent=("PROJ-1", "Epic"))
+        with _PatchRequest(lambda u, m, b: {"issues": [issue], "isLast": True}):
+            tickets, _ = JiraClient(JIRA).fetch_catalog()
+        self.assertEqual(tickets[0].parent_key, "PROJ-1")
+        self.assertEqual(tickets[0].parent_type, "Epic")
+
+    def test_parent_key_is_normalised_to_upper(self) -> None:
+        issue = jira_issue("PROJ-2", "Story", parent=("proj-1", "Epic"))
+        with _PatchRequest(lambda u, m, b: {"issues": [issue], "isLast": True}):
+            tickets, _ = JiraClient(JIRA).fetch_catalog()
+        self.assertEqual(tickets[0].parent_key, "PROJ-1")
+
+    def test_a_top_level_issue_has_no_parent(self) -> None:
+        with _PatchRequest(
+            lambda u, m, b: {"issues": [jira_issue("PROJ-1", "Epic")], "isLast": True}
+        ):
+            tickets, _ = JiraClient(JIRA).fetch_catalog()
+        self.assertIsNone(tickets[0].parent_key)
+        self.assertIsNone(tickets[0].parent_type)
+
+    def test_status_category_is_captured_separately_from_the_workflow_name(self) -> None:
+        """A deployment renames its statuses freely ("QA Testing", "Wont Do"); the category
+        is the stable value a bucket mapping can rely on."""
+        issue = jira_issue("PROJ-3", "Bug", state="QA Testing", category="In Progress")
+        with _PatchRequest(lambda u, m, b: {"issues": [issue], "isLast": True}):
+            tickets, _ = JiraClient(JIRA).fetch_catalog()
+        self.assertEqual(tickets[0].state, "QA Testing")
+        self.assertEqual(tickets[0].state_category, "In Progress")
+
 
 class AdoClientTest(unittest.TestCase):
     def test_pat_authenticates_as_an_empty_username(self) -> None:
@@ -244,6 +286,29 @@ class AdoClientTest(unittest.TestCase):
         with _PatchRequest(lambda u, m, b: {"workItems": []}) as rec:
             AdoClient(config).fetch_catalog()
         self.assertIn("'Bob''s Team'", rec.calls[0]["body"]["query"])
+
+    def test_parent_type_is_resolved_from_the_synced_batch(self) -> None:
+        """ADO's projection gives the parent id but not its type, so the type is filled in
+        from the same pull rather than costing one extra call per work item."""
+
+        def handler(url, method, body):
+            if "wiql" in url:
+                return {"workItems": [{"id": 10}, {"id": 11}]}
+            return {
+                "value": [
+                    {"id": 10, "fields": {"System.Title": "E", "System.WorkItemType": "Epic",
+                                          "System.State": "Active"}},
+                    {"id": 11, "fields": {"System.Title": "S", "System.WorkItemType": "User Story",
+                                          "System.State": "New", "System.Parent": 10}},
+                ]
+            }
+
+        with _PatchRequest(handler):
+            tickets, _ = AdoClient(ADO).fetch_catalog()
+        child = next(t for t in tickets if t.key == "11")
+        self.assertEqual(child.parent_key, "10")
+        # Unresolved before the store's post-pass; the store fills it in (see _sync_one).
+        self.assertIsNone(child.parent_type)
 
     def test_ids_are_hydrated_in_batches(self) -> None:
         """200 ids per call is a documented server limit, not a preference."""
@@ -670,7 +735,7 @@ class TrackerConfigParsingTest(unittest.TestCase):
                     "trackers": [
                         {
                             "provider": "jira",
-                            "base_url": "https://x.atlassian.net",
+                            "base_url": "https://acme.atlassian.net",
                             "projects": ["A"],
                             "token_env": "TEST_TRACKER_TOKEN",
                         }

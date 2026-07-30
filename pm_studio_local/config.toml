@@ -22,3 +22,16 @@ port = 8002
 [products]
 package = "Package (engine + UI)"
 docs = "Docs & Methodology"
+
+# No [[trackers]] here on purpose.
+#
+# This repo is the PUBLIC package and this file is committed to it, so it must describe
+# PM Studio's own development and nothing else. A tracker block naming a real Jira site,
+# project keys or team would put a deploying organisation's internal structure into a
+# public repo - and syncing from here would also drop that instance's ticket titles into
+# studio_data/, inside this checkout.
+#
+# Tracker config belongs in the DEPLOYING repo's own pm_studio_local/config.toml (see
+# docs/CONFIGURATION.md). To exercise the sync while developing the feature, point a
+# throwaway config at a local fake tracker rather than a real instance; the test suite
+# covers the client behaviour without any network at all.
