@@ -8,6 +8,12 @@ from typing import Callable, Literal
 
 from .config import CONFIG
 
+# Imported for the one rule that must not be re-implemented per caller: what makes two
+# spellings of a ticket key the SAME ticket. The 1:1 guarantee below is only as good as
+# that definition, so it lives in one place and the store applies it itself rather than
+# trusting callers to normalise first. (trackers.py imports only config - no cycle.)
+from .trackers import normalize_key
+
 ROADMAP_DIR = CONFIG.workspace_dir / "roadmap"
 
 Bucket = Literal["now", "next", "later"]
@@ -17,6 +23,27 @@ Status = Literal["pending", "in_progress", "done"]
 # [products] table (TOML order is display order). Empty when the target repo hasn't
 # declared products yet - sessions then run unpinned with no per-product boards.
 PRODUCTS: dict[str, str] = CONFIG.products
+
+
+class TicketAlreadyLinked(Exception):
+    """Raised when a ticket is already linked to a different roadmap change.
+
+    The link is 1:1 in both directions, and this is the half that needs enforcing: one
+    item holds at most one ticket by construction (a single pair of fields), but nothing
+    stops two items naming the same ticket except this check. Carries the conflicting
+    item so the caller can say *which* change already owns it - "already linked" alone
+    would leave the user hunting the board for it.
+    """
+
+    def __init__(self, tracker_id: str, ticket_key: str, item: "RoadmapItem") -> None:
+        self.tracker_id = tracker_id
+        self.ticket_key = ticket_key
+        self.item = item
+        super().__init__(
+            f"{ticket_key} is already linked to the change \"{item.title}\" "
+            f"(id {item.id}) on the {item.product} board. A ticket can be linked to "
+            "one change only - unlink it there first."
+        )
 
 
 @dataclass
@@ -48,6 +75,13 @@ class RoadmapItem:
     # change predates the work model or the deployment isn't using it - so existing
     # boards keep loading untouched, and this stays additive rather than a migration.
     project_id: str | None = None
+    # The 1:1 link to one ticket in one configured external tracker (see trackers.py).
+    # Only the reference is stored - the ticket's type, title, state and URL come from
+    # the synced catalog at read time, so a sync updates one place instead of having to
+    # rewrite every linked item. Both None (the default) for an unlinked change, which
+    # is what keeps existing roadmap JSON loading untouched.
+    tracker_id: str | None = None
+    ticket_key: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -129,6 +163,28 @@ class RoadmapStore:
         """How many changes hang off one project - what the server checks before
         allowing that project to be deleted."""
         return sum(1 for i in self._items.values() if i.project_id == project_id)
+
+    def item_for_ticket(self, tracker_id: str, ticket_key: str) -> RoadmapItem | None:
+        """Which change holds this ticket, if any - the read side of the 1:1 link."""
+        wanted = normalize_key(tracker_id, ticket_key)
+        return next(
+            (
+                i
+                for i in self._items.values()
+                if i.tracker_id == tracker_id
+                and i.ticket_key
+                and normalize_key(tracker_id, i.ticket_key) == wanted
+            ),
+            None,
+        )
+
+    def linked_ticket_refs(self) -> list[tuple[str, str]]:
+        """Every (tracker_id, key) currently linked, for the sync to keep fresh."""
+        return [
+            (i.tracker_id, i.ticket_key)
+            for i in self._items.values()
+            if i.tracker_id and i.ticket_key
+        ]
 
     def unassigned_items(self) -> list[dict]:
         """Changes with no parent project. Reported, not blocked: alignment is a
@@ -221,6 +277,51 @@ class RoadmapStore:
         self._notify({"type": "roadmap_item_upserted", "item": item.to_dict()})
         return item
 
+    def link_ticket(
+        self, item_id: str, tracker_id: str, ticket_key: str
+    ) -> RoadmapItem:
+        """Links a change to one tracker ticket, 1:1.
+
+        Raises TicketAlreadyLinked if a DIFFERENT change already holds it. Re-linking the
+        same pair is a no-op rather than an error - a PM re-sending the same PATCH must not
+        get a conflict against the item itself.
+
+        The check and the write happen under one lock hold, so two concurrent links to the
+        same ticket cannot both pass their check and leave two items pointing at it.
+        """
+        key = normalize_key(tracker_id, ticket_key)
+        if not tracker_id or not key:
+            raise ValueError("tracker_id and ticket_key are both required to link a ticket")
+        with self._lock:
+            item = self._items.get(item_id)
+            if item is None:
+                raise KeyError(f"Unknown roadmap item: {item_id}")
+            for other in self._items.values():
+                if other.id == item_id or other.tracker_id != tracker_id or not other.ticket_key:
+                    continue
+                if normalize_key(tracker_id, other.ticket_key) == key:
+                    raise TicketAlreadyLinked(tracker_id, key, other)
+            item.tracker_id = tracker_id
+            item.ticket_key = key
+            item.updated_at = time.time()
+            self._save_product(item.product)
+        self._notify({"type": "roadmap_item_upserted", "item": item.to_dict()})
+        return item
+
+    def unlink_ticket(self, item_id: str) -> RoadmapItem:
+        """Clears the link. Idempotent: unlinking an unlinked change is not an error, so a
+        PM clearing a field it already cleared doesn't fail a turn."""
+        with self._lock:
+            item = self._items.get(item_id)
+            if item is None:
+                raise KeyError(f"Unknown roadmap item: {item_id}")
+            item.tracker_id = None
+            item.ticket_key = None
+            item.updated_at = time.time()
+            self._save_product(item.product)
+        self._notify({"type": "roadmap_item_upserted", "item": item.to_dict()})
+        return item
+
     def move(
         self,
         item_id: str,
@@ -280,10 +381,20 @@ class RoadmapStore:
 
     # ---- PM context injection ----
 
-    def describe_own_product(self, product: str) -> str:
+    def describe_own_product(
+        self,
+        product: str,
+        ticket_lookup: Callable[[str, str], dict | None] | None = None,
+    ) -> str:
         """Full-depth view of one product's roadmap - every item, every bucket/status,
         full description - for injection into that product's own PM session. Flags any
-        untriaged cross-product suggestion waiting on this PM to accept or drop."""
+        untriaged cross-product suggestion waiting on this PM to accept or drop.
+
+        `ticket_lookup` resolves (tracker_id, key) to the synced ticket so the PM sees what
+        each change is tracked as in Jira/ADO. Passed in rather than imported so this store
+        keeps knowing nothing about the tracker catalog; omitted (as in tests) the linked
+        key is still reported, just without its type.
+        """
         items = [i for i in self.list_product(product) if i["status"] != "done"]
         if not items:
             return f"{PRODUCTS[product]} roadmap has no open items right now."
@@ -298,6 +409,19 @@ class RoadmapStore:
                     f' [EXTERNAL - owned by {i["owner"]}: track it, never dispatch '
                     "dev work for it]"
                 )
+            if i.get("ticket_key"):
+                ticket = (
+                    ticket_lookup(i["tracker_id"], i["ticket_key"])
+                    if ticket_lookup
+                    else None
+                )
+                if ticket:
+                    flag += (
+                        f' [tracked as {ticket["raw_type"]} {i["ticket_key"]}'
+                        f' ({ticket["state"]}) in {i["tracker_id"]}]'
+                    )
+                else:
+                    flag += f' [linked to {i["ticket_key"]} in {i["tracker_id"]}]'
             lines.append(
                 f'- id {i["id"]} [{i["bucket"]}/{i["status"]}] {i["title"]}{flag}\n'
                 f'  {i["description"]}'

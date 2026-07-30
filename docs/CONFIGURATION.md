@@ -82,6 +82,32 @@ from_address = "pm-studio@example.com"
 username = "pm-studio"
 password_env = "PM_STUDIO_SMTP_PASSWORD"
 use_tls = true
+
+# Optional external issue trackers. One [[trackers]] block per connection - a shop
+# running both a Jira instance and an ADO project declares both. Omit the whole
+# thing and the roadmap board looks exactly as it did before ticket linking
+# existed. `projects` is required: it bounds what the sync pulls, and it is what
+# lets a bare key like PROJ-123 be attributed to the right tracker.
+# ALWAYS use `token_env` (the NAME of an environment variable) rather than
+# `token` - pm_studio_local/ is normally committed, so an inline token is a token
+# in your git history. PM Studio warns loudly if you use `token`.
+[[trackers]]
+id = "jira"                      # stable: every linked change stores this id
+provider = "jira"
+label = "Acme Jira"
+base_url = "https://acme.atlassian.net"
+projects = ["PROJ", "PLAT"]
+email = "pm@acme.com"            # Jira Cloud authenticates as email + API token
+token_env = "PM_STUDIO_JIRA_TOKEN"
+sync_interval_minutes = 15       # default 15, floor 1
+
+[[trackers]]
+id = "ado"
+provider = "ado"
+label = "Acme ADO"
+organization = "acme"            # base_url is derived: https://dev.azure.com/acme
+projects = ["Platform"]
+token_env = "PM_STUDIO_ADO_PAT"  # an ADO personal access token
 ```
 
 ## Operating modes
@@ -203,6 +229,65 @@ cookie, so the process mints a per-run agent token and splices it into the promp
 curl examples. It is never persisted, holds the `pm` role (never `admin`, so it can't
 reach the roster or cost data), and grants nothing beyond the endpoints an agent's
 Bash allowlist already matched in personal mode.
+
+## External trackers (Jira / Azure DevOps)
+
+Declare one `[[trackers]]` block per connection (see the sample above). With none
+declared the whole feature is dormant: no extra threads, no ticket controls on the
+board, nothing.
+
+**What a link is.** A roadmap change may be linked to exactly **one** ticket, and a
+ticket to exactly one change — 1:1 in both directions. The change stores only
+`tracker_id` + `ticket_key`; the ticket's type, title, state and URL come from the
+synced catalog, so a sync updates one place instead of rewriting every linked change.
+Attempting to link a ticket another change already holds returns **409** naming that
+change. Keys are compared case-insensitively for Jira, so `proj-1` cannot sneak in
+alongside `PROJ-1`.
+
+**Linking.** On the board, each card gets a *Link ticket…* control opening a picker
+over the synced catalog (already-linked tickets are shown but greyed out). You can
+also paste a full ticket URL or a bare key. The PM agent can do the same from a
+session pinned to that product:
+
+```bash
+curl -s -X PATCH http://127.0.0.1:8000/roadmap/<product>/items/<item_id> -H "Content-Type: application/json" -d '{"ticket": "PROJ-123"}'
+```
+
+`"ticket": ""` unlinks. A key that does not exist in the tracker is refused with a
+**404** rather than stored, so a typo can't sit on a card forever looking like a sync
+outage.
+
+**Syncing.** Each tracker is pulled on its own `sync_interval_minutes` by one
+background thread, plus **Sync now** in the board header. Jira uses
+`/rest/api/3/search/jql` and falls back to the older offset-paginated
+`/rest/api/{3,2}/search` for Server/DC; ADO uses WIQL then batched work-item hydration.
+Linked tickets that fall outside `projects` are fetched individually, so a one-off
+dependency on another team's board still resolves.
+
+**When a tracker is down** its previous catalog is deliberately *kept* — a card showing
+last week's type is more useful than one that suddenly claims the ticket is gone. The
+failure and its reason appear in the board header, and the tracker keeps retrying. A
+link whose ticket isn't in the catalog renders as a dashed **NOT SYNCED** badge rather
+than disappearing.
+
+**Ticket types and colour.** Each tracker's own type names are normalised onto a small
+vocabulary — epic, feature, story, task, bug, spike, subtask, other — which is what
+picks the badge colour, so ADO's *Product Backlog Item* and Jira's *Story* look alike.
+The badge always shows the tracker's **own** name for the type, so a team that renamed
+Story to Deliverable sees "Deliverable", and an unrecognised custom type gets a neutral
+colour rather than a wrong one. Colour is never the only signal.
+
+**Nothing is written back.** The sync is read-only: PM Studio never changes a ticket's
+type, state or anything else in Jira or ADO. The board's own bucket/status stays
+independent, on purpose.
+
+**Credentials and cached data.** Tokens are read from the environment via `token_env`,
+are only ever sent in an `Authorization` header, and are scrubbed from every error
+message before it is stored or served — `GET /trackers` cannot return one. The catalog
+cache at `<workspace>/trackers.json` holds ticket titles from your tracker, so it is
+treated like the other credential-bearing state: gitignored *and* unstaged from every
+snapshot unconditionally (see `gitsnapshot.SENSITIVE_WORKSPACE_FILES`). Deleting it
+costs one sync.
 
 ## `PM_INSTRUCTIONS.md`
 

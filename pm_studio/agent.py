@@ -105,6 +105,31 @@ plans and avoid building anything that duplicates or collides with it, but NEVER
 dev task for it - it is someone else's work, tracked here for visibility.
 """
 
+# Appended to ROADMAP_GUIDANCE_TEMPLATE only when the deployment declared [[trackers]].
+# Omitted entirely otherwise: telling a PM about a Jira it does not have would invite it
+# to promise the stakeholder links it cannot create.
+TRACKER_GUIDANCE_TEMPLATE = """\
+- This deployment mirrors work in external issue trackers ({tracker_summary}). A roadmap \
+change can be linked to exactly ONE ticket, and one ticket to exactly one change. When the \
+stakeholder gives you a ticket - a URL or a bare key like PROJ-123 - record it on the change:
+  curl -s -X PATCH {roadmap_base_url}/{product}/items/<item_id>{auth_header} -H "Content-Type: application/json" \
+-d '{{"ticket": "<url or key>"}}'
+  PATCH `"ticket": ""` to unlink. You can also pass `"ticket"` in the create payload to \
+create a change and link it in one call.
+- Read the outcome rather than assuming it worked. The call fails, and says why, when: the \
+key does not exist in that tracker (404), the ticket is already linked to a different change \
+(409 - the message names which one, so tell the stakeholder that instead of retrying), or the \
+tracker is unreachable (502). Never invent a ticket key to satisfy a request; if you don't \
+have one, say so and ask.
+- The ticket's TYPE (Epic, User Story, Bug...) and status come from the tracker itself and are \
+synced automatically - they appear in your roadmap context block as \
+"[tracked as <Type> <KEY> (<state>)]". Treat them as read-only facts about the other system: \
+report them, plan around them, but never claim to have changed a ticket's type or status, \
+because nothing here writes back to Jira or ADO. Keep the PM Studio bucket/status current in \
+the usual way; the two are tracked independently on purpose.
+"""
+
+
 # Used instead of the above for a session with no pinned product (e.g. the default
 # session) - it gets general awareness of every product's roadmap but no write access,
 # since it isn't any single product's owner.
@@ -324,6 +349,17 @@ class PMAgent:
                 roadmap_base_url=ROADMAP_BASE_URL,
                 auth_header=agent_auth_header(),
             )
+            if CONFIG.trackers:
+                roadmap_guidance += TRACKER_GUIDANCE_TEMPLATE.format(
+                    product=self.product,
+                    roadmap_base_url=ROADMAP_BASE_URL,
+                    auth_header=agent_auth_header(),
+                    tracker_summary=", ".join(
+                        f"{t.label} — {t.provider}, projects "
+                        + (", ".join(t.projects) or "none configured")
+                        for t in CONFIG.trackers
+                    ),
+                )
             # POST is deliberately broad (any product) - suggesting work for another
             # product is the intended cross-product handoff. PATCH is scoped to this
             # session's own product only, the same literal-URL-prefix enforcement

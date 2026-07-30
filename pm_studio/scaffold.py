@@ -155,6 +155,7 @@ GITIGNORE_ENTRIES: tuple[str, ...] = (
     "{workspace_rel}/costing.json",
     "{workspace_rel}/audit.jsonl",
     "{workspace_rel}/activity.jsonl",
+    "{workspace_rel}/trackers.json",
     # The stores write `<name>.tmp` then atomically replace; a snapshot landing inside
     # that window would otherwise catch one.
     "{workspace_rel}/*.tmp",
@@ -166,7 +167,8 @@ GITIGNORE_HEADER = "# PM Studio runtime/bookkeeping state (per-session, not prod
 # itself, where an operator tidying their .gitignore will actually read it.
 GITIGNORE_SENSITIVE_NOTE = (
     "# Keep these ignored: accounts.json holds password hashes and live login tokens,\n"
-    "# costing.json holds pay rates, audit/activity name who did what."
+    "# costing.json holds pay rates, audit/activity name who did what, and\n"
+    "# trackers.json caches ticket titles pulled from your Jira/ADO."
 )
 
 

@@ -238,7 +238,8 @@
     margin-top: 2px;
     align-self: flex-start;
   }
-  .card .owner-btn {
+  .card .owner-btn,
+  .card .ticket-btn {
     background: none;
     border: none;
     font: inherit;
@@ -247,7 +248,8 @@
     cursor: pointer;
     padding: 0;
   }
-  .card .owner-btn:hover { color: var(--ink-secondary); }
+  .card .owner-btn:hover,
+  .card .ticket-btn:hover { color: var(--ink-secondary); }
   .empty-col { color: var(--ink-muted); font-size: 0.8em; font-style: italic; }
   details.shipped { margin-top: 14px; }
   details.shipped summary {
@@ -359,6 +361,193 @@
     color: var(--ink-muted);
   }
   .lens-empty { font-size: 0.85em; color: var(--ink-muted); margin: 6px 0 0 14px; }
+
+  /* ---- linked Jira / ADO ticket ----
+     One palette for the canonical types trackers.py normalises onto (its CANONICAL_TYPES
+     is the source of these slugs). Semantic rather than vendor-matched, because Jira and
+     ADO colour the same rungs differently and a board showing both needs one consistent
+     scale: epic/feature are the two "big" rungs, story/task the delivery rungs, bug is the
+     only red, spike is research, subtask recedes.
+
+     Colour is never the only signal - the badge always carries the tracker's own type name
+     as text, so this reads correctly in greyscale and to a colour-blind viewer. */
+  .ticket-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    max-width: 100%;
+    margin-top: 6px;
+    padding: 2px 8px;
+    border: 1px solid var(--ticket-color, var(--border));
+    border-left: 3px solid var(--ticket-color, var(--border));
+    border-radius: 6px;
+    background: var(--ticket-bg, transparent);
+    color: var(--ticket-color, var(--ink-secondary));
+    font-size: 0.75em;
+    font-weight: 600;
+    text-decoration: none;
+    line-height: 1.5;
+  }
+  a.ticket-badge:hover { text-decoration: underline; }
+  .ticket-badge .ticket-type {
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+  }
+  .ticket-badge .ticket-key {
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-weight: 500;
+    opacity: 0.85;
+    white-space: nowrap;
+  }
+  .ticket-badge .ticket-state {
+    color: var(--ink-muted);
+    font-weight: 400;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* A link whose ticket wasn't in the last sync: shown, never hidden, and visibly
+     different from a resolved one so "not synced yet" can't read as "type unknown". */
+  .ticket-badge.unresolved {
+    border-style: dashed;
+    border-left-style: dashed;
+    color: var(--ink-muted);
+    --ticket-color: var(--ink-muted);
+    --ticket-bg: transparent;
+  }
+  .ticket-badge[data-type="epic"]    { --ticket-color: #8b5cf6; --ticket-bg: rgba(139, 92, 246, 0.10); }
+  .ticket-badge[data-type="feature"] { --ticket-color: #6366f1; --ticket-bg: rgba(99, 102, 241, 0.10); }
+  .ticket-badge[data-type="story"]   { --ticket-color: #0f9d58; --ticket-bg: rgba(15, 157, 88, 0.10); }
+  .ticket-badge[data-type="task"]    { --ticket-color: #2a78d6; --ticket-bg: rgba(42, 120, 214, 0.10); }
+  .ticket-badge[data-type="bug"]     { --ticket-color: #d03b3b; --ticket-bg: rgba(208, 59, 59, 0.10); }
+  .ticket-badge[data-type="spike"]   { --ticket-color: #b8860b; --ticket-bg: rgba(184, 134, 11, 0.12); }
+  .ticket-badge[data-type="subtask"] { --ticket-color: #6b7280; --ticket-bg: rgba(107, 114, 128, 0.10); }
+  .ticket-badge[data-type="other"]   { --ticket-color: #898781; --ticket-bg: rgba(137, 135, 129, 0.10); }
+  @media (prefers-color-scheme: dark) {
+    .ticket-badge[data-type="epic"]    { --ticket-color: #a78bfa; --ticket-bg: rgba(167, 139, 250, 0.16); }
+    .ticket-badge[data-type="feature"] { --ticket-color: #818cf8; --ticket-bg: rgba(129, 140, 248, 0.16); }
+    .ticket-badge[data-type="story"]   { --ticket-color: #34d399; --ticket-bg: rgba(52, 211, 153, 0.15); }
+    .ticket-badge[data-type="task"]    { --ticket-color: #3987e5; --ticket-bg: rgba(57, 135, 229, 0.18); }
+    .ticket-badge[data-type="bug"]     { --ticket-color: #e66767; --ticket-bg: rgba(230, 103, 103, 0.16); }
+    .ticket-badge[data-type="spike"]   { --ticket-color: #d4a72c; --ticket-bg: rgba(212, 167, 44, 0.16); }
+    .ticket-badge[data-type="subtask"] { --ticket-color: #9ca3af; --ticket-bg: rgba(156, 163, 175, 0.14); }
+    .ticket-badge[data-type="other"]   { --ticket-color: #a8a6a0; --ticket-bg: rgba(168, 166, 160, 0.14); }
+  }
+
+  /* Sync status strip in the page header. */
+  #tracker-bar {
+    display: none;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+    font-size: 0.8em;
+    color: var(--ink-muted);
+  }
+  #tracker-bar.visible { display: flex; }
+  #tracker-bar button {
+    font: inherit;
+    padding: 3px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--ink-secondary);
+    cursor: pointer;
+  }
+  #tracker-bar button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  #tracker-bar button:disabled { opacity: 0.6; cursor: default; }
+  .tracker-chip { display: inline-flex; align-items: center; gap: 5px; }
+  .tracker-chip .dot { font-size: 0.9em; line-height: 1; }
+  .tracker-chip.ok .dot { color: var(--status-done); }
+  .tracker-chip.failed { color: var(--danger); }
+  .tracker-chip.failed .dot { color: var(--danger); }
+  .tracker-chip.never .dot { color: var(--ink-muted); }
+
+  /* Link picker: a plain modal, consistent with the board's prompt-driven controls. */
+  #ticket-picker {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    background: rgba(0, 0, 0, 0.45);
+    align-items: flex-start;
+    justify-content: center;
+    padding: 8vh 16px 16px;
+  }
+  #ticket-picker.open { display: flex; }
+  #ticket-picker .sheet {
+    width: min(620px, 100%);
+    max-height: 74vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 18px;
+  }
+  #ticket-picker h2 { margin: 0 0 4px; font-size: 1em; }
+  #ticket-picker .sub { margin: 0 0 12px; font-size: 0.82em; color: var(--ink-muted); }
+  #ticket-picker input[type="text"] {
+    width: 100%;
+    padding: 9px 11px;
+    font: inherit;
+    font-size: 0.9em;
+    color: var(--ink-primary);
+    background: var(--page);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+  }
+  #picker-results {
+    flex: 1;
+    overflow-y: auto;
+    margin: 12px -4px 0;
+    padding: 0 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .picker-row {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    width: 100%;
+    padding: 7px 9px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--page);
+    font: inherit;
+    font-size: 0.85em;
+    color: var(--ink-primary);
+    text-align: left;
+    cursor: pointer;
+  }
+  .picker-row:hover:not(:disabled) { border-color: var(--accent); }
+  .picker-row:disabled { opacity: 0.5; cursor: not-allowed; }
+  .picker-row .row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .picker-row .row-taken { font-size: 0.85em; color: var(--ink-muted); white-space: nowrap; }
+  #picker-note { margin-top: 10px; font-size: 0.8em; color: var(--ink-muted); }
+  #picker-note.error { color: var(--danger); }
+  #ticket-picker .sheet-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+  /* Matches .add-form's button treatment rather than inventing a second one. */
+  #ticket-picker .sheet-actions button {
+    font: inherit;
+    font-size: 0.85em;
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--ink-secondary);
+    cursor: pointer;
+  }
+  #ticket-picker .sheet-actions button.primary {
+    background: var(--accent);
+    color: var(--accent-fg);
+    border-color: var(--accent);
+  }
+  #ticket-picker .sheet-actions button:disabled { opacity: 0.55; cursor: default; }
+  #picker-unlink { margin-right: auto; }
+  #picker-unlink.hidden { display: none; }
 </style>
 </head>
 <body>
@@ -371,8 +560,26 @@
     <button type="button" data-lens="product" class="active">By product</button>
     <button type="button" data-lens="initiative">By initiative</button>
   </div>
+  <!-- Shown only when the deployment configured [[trackers]]; otherwise the header looks
+       exactly as it did before Jira/ADO linking existed. -->
+  <div id="tracker-bar"></div>
 </header>
 <main id="main"></main>
+<div id="ticket-picker" role="dialog" aria-modal="true" aria-labelledby="picker-title">
+  <div class="sheet">
+    <h2 id="picker-title">Link a ticket</h2>
+    <p class="sub" id="picker-sub"></p>
+    <input id="picker-input" type="text" autocomplete="off"
+           placeholder="Search synced tickets, or paste a ticket URL / key" />
+    <div id="picker-results"></div>
+    <div id="picker-note"></div>
+    <div class="sheet-actions">
+      <button type="button" class="ghost" id="picker-unlink">Unlink</button>
+      <button type="button" class="ghost" id="picker-cancel">Cancel</button>
+      <button type="button" class="primary" id="picker-link">Link</button>
+    </div>
+  </div>
+</div>
 <script>
   const main = document.getElementById("main");
 
@@ -388,6 +595,9 @@
   // The work model, used only by the initiative lens. Empty on a deployment that
   // doesn't use /portfolio, in which case that lens shows everything as unassigned.
   let PORTFOLIO = { initiatives: [], projects: [], catch_all_project_id: null };
+  // External trackers (see trackers.py). `configured: false` on a deployment with no
+  // [[trackers]] block, which hides every ticket control on this page.
+  let TRACKERS = { configured: false, syncing: false, trackers: [], last_sync_at: null };
 
   // Which lens is showing. Persisted so switching pages doesn't reset it.
   let lens = localStorage.getItem("roadmapLens") === "initiative" ? "initiative" : "product";
@@ -412,6 +622,47 @@
     return new Date(seconds * 1000).toLocaleDateString();
   }
 
+  // ---- linked tickets (Jira / Azure DevOps) ----
+
+  function ticketBadge(ticket) {
+    // An <a> when we know the URL, a <span> when we don't - a badge that looks clickable
+    // and goes nowhere is worse than one that plainly isn't a link yet.
+    const el = document.createElement(ticket.url ? "a" : "span");
+    el.className = "ticket-badge" + (ticket.unresolved ? " unresolved" : "");
+    el.dataset.type = ticket.type || "other";
+    if (ticket.url) {
+      el.href = ticket.url;
+      el.target = "_blank";
+      el.rel = "noopener noreferrer";
+    }
+
+    const type = document.createElement("span");
+    type.className = "ticket-type";
+    // The tracker's OWN name for the type, not our normalised slug: a team that renamed
+    // "Story" to "Deliverable" should see "Deliverable". The slug only picks the colour.
+    type.textContent = ticket.unresolved ? "Not synced" : (ticket.raw_type || "Ticket");
+    el.appendChild(type);
+
+    const key = document.createElement("span");
+    key.className = "ticket-key";
+    key.textContent = ticket.key;
+    el.appendChild(key);
+
+    if (ticket.state) {
+      const state = document.createElement("span");
+      state.className = "ticket-state";
+      state.textContent = ticket.state;
+      el.appendChild(state);
+    }
+
+    el.title = ticket.unresolved
+      ? `${ticket.key} is linked in ${ticket.tracker_label || ticket.tracker_id} but was not in the last sync. ` +
+        `It may be new, outside the configured projects, or the tracker may be unreachable.`
+      : `${ticket.raw_type} ${ticket.key} — ${ticket.title || "(no title)"}\n` +
+        `${ticket.tracker_label || ticket.tracker_id}${ticket.state ? " · " + ticket.state : ""}`;
+    return el;
+  }
+
   function itemCard(item, opts = {}) {
     const card = document.createElement("div");
     card.className = "card";
@@ -426,6 +677,7 @@
         <select class="mini bucket-select"></select>
         <select class="mini move-select"></select>
         <button type="button" class="owner-btn" title="Track work done by another person or team">Owner…</button>
+        ${TRACKERS.configured ? `<button type="button" class="ticket-btn"></button>` : ""}
         <button type="button" class="del" title="Delete">Delete</button>
       </div>
     `;
@@ -444,6 +696,20 @@
     // tasks for it.
     if (item.owner) card.querySelector(".owner-badge").textContent = `External — ${item.owner}`;
     if (item.description) card.querySelector(".desc").textContent = item.description;
+
+    // The 1:1 link to a Jira/ADO ticket. Inserted before the controls row so the badge
+    // sits with the change's identity rather than among its actions.
+    if (item.ticket) {
+      card.querySelector(".row").before(ticketBadge(item.ticket));
+    }
+    const ticketBtn = card.querySelector(".ticket-btn");
+    if (ticketBtn) {
+      ticketBtn.textContent = item.ticket ? "Ticket…" : "Link ticket…";
+      ticketBtn.title = item.ticket
+        ? `Change or remove the ${item.ticket.key} link`
+        : "Link this change to one Jira or Azure DevOps ticket";
+      ticketBtn.addEventListener("click", () => openTicketPicker(item));
+    }
 
     card.querySelector(".owner-btn").addEventListener("click", () => {
       const owner = prompt(
@@ -828,9 +1094,220 @@
         PRODUCTS = data.products;
         itemsByProduct = data.items;
         PORTFOLIO = data.portfolio || PORTFOLIO;
+        TRACKERS = data.trackers || TRACKERS;
+        renderTrackerBar();
         renderAll();
       });
   }
+
+  // ---- tracker sync status ----
+
+  function renderTrackerBar() {
+    const bar = document.getElementById("tracker-bar");
+    bar.classList.toggle("visible", !!TRACKERS.configured);
+    if (!TRACKERS.configured) return;
+    bar.innerHTML = "";
+
+    for (const tracker of TRACKERS.trackers) {
+      const status = tracker.status;
+      const chip = document.createElement("span");
+      // Three states, each explicit: synced, failed, never synced. A tracker that has
+      // never run must not look the same as one holding zero tickets.
+      const state = !status || (!status.ok && !status.error)
+        ? "never"
+        : status.error
+        ? "failed"
+        : "ok";
+      chip.className = `tracker-chip ${state}`;
+
+      const dot = document.createElement("span");
+      dot.className = "dot";
+      dot.textContent = state === "ok" ? "●" : state === "failed" ? "▲" : "○";
+      chip.appendChild(dot);
+
+      const text = document.createElement("span");
+      if (!tracker.usable) {
+        text.textContent = `${tracker.label} — not configured: ${tracker.unusable_reason}`;
+        chip.className = "tracker-chip failed";
+      } else if (state === "failed") {
+        text.textContent = `${tracker.label} — sync failed: ${status.error}`;
+      } else if (state === "never") {
+        text.textContent = `${tracker.label} — not synced yet`;
+      } else {
+        const when = relativeTime(status.finished_at);
+        text.textContent =
+          `${tracker.label} — ${tracker.ticket_count} ticket${tracker.ticket_count === 1 ? "" : "s"}` +
+          (when ? `, synced ${when}` : "") +
+          (status.truncated ? " (capped — only the most recently changed were pulled)" : "");
+      }
+      chip.appendChild(text);
+      bar.appendChild(chip);
+    }
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = TRACKERS.syncing ? "Syncing…" : "Sync now";
+    button.disabled = !!TRACKERS.syncing;
+    button.addEventListener("click", () => {
+      button.disabled = true;
+      button.textContent = "Syncing…";
+      fetch("/trackers/sync", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+        .then((r) => r.json().then((body) => ({ ok: r.ok, body })))
+        .then(({ ok, body }) => {
+          if (!ok) {
+            button.disabled = false;
+            button.textContent = "Sync now";
+            alert(body.detail || "Could not start a sync.");
+            return;
+          }
+          TRACKERS = body.trackers ? body : TRACKERS;
+          // The finished state arrives on the roadmap socket as `trackers_synced`.
+        })
+        .catch(() => {
+          button.disabled = false;
+          button.textContent = "Sync now";
+        });
+    });
+    bar.appendChild(button);
+  }
+
+  // ---- link picker ----
+
+  const picker = document.getElementById("ticket-picker");
+  const pickerInput = document.getElementById("picker-input");
+  const pickerResults = document.getElementById("picker-results");
+  const pickerNote = document.getElementById("picker-note");
+  const pickerSub = document.getElementById("picker-sub");
+  const pickerUnlink = document.getElementById("picker-unlink");
+  const pickerLink = document.getElementById("picker-link");
+  let pickerItem = null;
+  let searchTimer = null;
+
+  function openTicketPicker(item) {
+    pickerItem = item;
+    pickerInput.value = "";
+    pickerNote.textContent = "";
+    pickerNote.classList.remove("error");
+    pickerSub.textContent = item.ticket
+      ? `"${item.title}" is linked to ${item.ticket.key}. Pick another ticket to move the link, or unlink it.`
+      : `Link "${item.title}" to one ticket. A ticket can belong to one change only.`;
+    pickerUnlink.classList.toggle("hidden", !item.ticket);
+    picker.classList.add("open");
+    pickerInput.focus();
+    searchTickets("");
+  }
+
+  function closeTicketPicker() {
+    picker.classList.remove("open");
+    pickerItem = null;
+    pickerResults.innerHTML = "";
+  }
+
+  function searchTickets(query) {
+    fetch(`/trackers/tickets?q=${encodeURIComponent(query)}&limit=50`)
+      .then((r) => r.json())
+      .then(({ tickets }) => {
+        pickerResults.innerHTML = "";
+        if (!tickets.length) {
+          const empty = document.createElement("div");
+          empty.className = "lens-empty";
+          empty.textContent = TRACKERS.trackers.some((t) => t.ticket_count)
+            ? "No synced ticket matches that. You can still paste a full URL or key above."
+            : "Nothing synced yet — run a sync, or paste a ticket URL or key above.";
+          pickerResults.appendChild(empty);
+          return;
+        }
+        for (const ticket of tickets) {
+          const row = document.createElement("button");
+          row.type = "button";
+          row.className = "picker-row";
+          row.appendChild(ticketBadge({ ...ticket, url: "" }));
+          const title = document.createElement("span");
+          title.className = "row-title";
+          title.textContent = ticket.title || "(no title)";
+          row.appendChild(title);
+          // Already-linked tickets are shown but unpickable: seeing that PROJ-12 is taken
+          // is more useful than it silently missing from the list.
+          const alreadyThis = pickerItem && pickerItem.ticket && pickerItem.ticket.key === ticket.key
+            && pickerItem.ticket.tracker_id === ticket.tracker_id;
+          if (ticket.linked && !alreadyThis) {
+            const taken = document.createElement("span");
+            taken.className = "row-taken";
+            taken.textContent = "linked elsewhere";
+            row.appendChild(taken);
+            row.disabled = true;
+          } else if (alreadyThis) {
+            const taken = document.createElement("span");
+            taken.className = "row-taken";
+            taken.textContent = "current";
+            row.appendChild(taken);
+          }
+          row.addEventListener("click", () => submitLink({ tracker_id: ticket.tracker_id, ticket_key: ticket.key }));
+          pickerResults.appendChild(row);
+        }
+      })
+      .catch(() => {});
+  }
+
+  function submitLink(payload) {
+    if (!pickerItem) return;
+    pickerNote.textContent = "Linking…";
+    pickerNote.classList.remove("error");
+    pickerLink.disabled = true;
+    fetch(`/roadmap/${pickerItem.product}/items/${pickerItem.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+      .then((r) => r.json().then((body) => ({ ok: r.ok, body })))
+      .then(({ ok, body }) => {
+        pickerLink.disabled = false;
+        if (!ok) {
+          // The 409 body names the change already holding the ticket, which is the whole
+          // point of surfacing it here rather than just saying "conflict".
+          pickerNote.textContent = body.detail || "Could not link that ticket.";
+          pickerNote.classList.add("error");
+          return;
+        }
+        closeTicketPicker();
+        // The board updates itself from the roadmap websocket's upsert event.
+      })
+      .catch(() => {
+        pickerLink.disabled = false;
+        pickerNote.textContent = "Could not reach the server.";
+        pickerNote.classList.add("error");
+      });
+  }
+
+  pickerInput.addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => searchTickets(pickerInput.value.trim()), 150);
+  });
+  pickerInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      pickerLink.click();
+    }
+  });
+  // The typed value is sent as `ticket`, which the server resolves from a URL or a bare
+  // key against the configured trackers (see _apply_ticket_link).
+  pickerLink.addEventListener("click", () => {
+    const raw = pickerInput.value.trim();
+    if (!raw) {
+      pickerNote.textContent = "Paste a ticket URL or key, or pick one from the list.";
+      pickerNote.classList.add("error");
+      return;
+    }
+    submitLink({ ticket: raw });
+  });
+  pickerUnlink.addEventListener("click", () => submitLink({ ticket: "" }));
+  document.getElementById("picker-cancel").addEventListener("click", closeTicketPicker);
+  picker.addEventListener("click", (event) => {
+    if (event.target === picker) closeTicketPicker();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && picker.classList.contains("open")) closeTicketPicker();
+  });
 
   loadBoard();
 
@@ -843,6 +1320,9 @@
     // groups, but says nothing about the items themselves - so refetch rather than
     // trying to patch the work model incrementally.
     if (event.type === "portfolio_changed") loadBoard();
+    // A sync finished: statuses changed, and so did every linked card's badge, so take
+    // the whole board again rather than reconciling ticket-by-ticket.
+    if (event.type === "trackers_synced") loadBoard();
   };
 </script>
 </body>

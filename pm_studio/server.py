@@ -1,6 +1,7 @@
 import asyncio
 import json
 import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
@@ -44,8 +45,9 @@ from .portfolio import (
     PortfolioError,
     PortfolioStore,
 )
-from .roadmap import PRODUCTS, RoadmapStore
+from .roadmap import PRODUCTS, RoadmapItem, RoadmapStore, TicketAlreadyLinked
 from .sessions import DEFAULT_SESSION_ID, SessionManager, SessionRuntime
+from .trackers import TrackerError, TrackerStore, normalize_key
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -63,6 +65,10 @@ _main_loop: asyncio.AbstractEventLoop | None = None
 sessions = SessionManager()
 roadmap_store = RoadmapStore()
 portfolio_store = PortfolioStore()
+# The synced Jira/ADO ticket catalog. Constructed unconditionally; with no [[trackers]]
+# configured it holds nothing and every ticket join below resolves to None, so the board
+# behaves exactly as it did before the feature existed.
+tracker_store = TrackerStore()
 # Constructed in both modes (it is empty and untouched in personal mode) so nothing
 # has to branch on mode just to reach the store.
 account_store = AccountStore()
@@ -97,6 +103,52 @@ _PUBLIC_PATHS = frozenset(
 )
 
 
+def _lookup_ticket(tracker_id: str, key: str) -> dict | None:
+    ticket = tracker_store.lookup(tracker_id, key)
+    return ticket.to_dict() if ticket is not None else None
+
+
+def _with_ticket(item: dict) -> dict:
+    """Joins a roadmap change to its linked ticket for the wire.
+
+    The item stores only `tracker_id` + `ticket_key` (see roadmap.py); everything the card
+    renders - canonical type for the colour, the tracker's own type name for the label,
+    title, state, URL - comes from the synced catalog here. A link whose ticket is not in
+    the catalog yet returns `unresolved: true` rather than being dropped, so the UI can say
+    "linked, not seen in the last sync" instead of silently showing no badge at all.
+    """
+    tracker_id, key = item.get("tracker_id"), item.get("ticket_key")
+    if not tracker_id or not key:
+        return {**item, "ticket": None}
+    ticket = tracker_store.lookup(tracker_id, key)
+    if ticket is None:
+        config = CONFIG.tracker(tracker_id)
+        return {
+            **item,
+            "ticket": {
+                "tracker_id": tracker_id,
+                "tracker_label": config.label if config else tracker_id,
+                "provider": config.provider if config else "",
+                "key": key,
+                "type": "other",
+                "raw_type": "",
+                "title": "",
+                "state": "",
+                "url": "",
+                "unresolved": True,
+            },
+        }
+    config = CONFIG.tracker(tracker_id)
+    return {
+        **item,
+        "ticket": {
+            **ticket.to_dict(),
+            "tracker_label": config.label if config else tracker_id,
+            "unresolved": False,
+        },
+    }
+
+
 def _roadmap_context_for(session_id: str) -> str:
     """Builds the roadmap block injected into a PM's turn: full depth on its own
     product, a one-line digest of every other product for general awareness only. A
@@ -105,7 +157,7 @@ def _roadmap_context_for(session_id: str) -> str:
     session = sessions.get(session_id)
     product = session.product if session is not None else None
     if product:
-        own = roadmap_store.describe_own_product(product)
+        own = roadmap_store.describe_own_product(product, ticket_lookup=_lookup_ticket)
         others = roadmap_store.describe_other_products(product)
         if others:
             return f"{own}\n\nOther products (brief, for awareness only):\n{others}"
@@ -216,6 +268,12 @@ async def _broadcast_task_update(session_id: str, task: dict) -> None:
 
 def _on_roadmap_update(event: dict) -> None:
     if _main_loop is not None:
+        # Enrich here rather than in the store: the store deliberately knows nothing about
+        # the tracker catalog, and the board needs the same joined shape from a websocket
+        # event as it gets from GET /roadmap/data - otherwise a live edit would blank out
+        # a card's ticket badge until the next full reload.
+        if isinstance(event.get("item"), dict):
+            event = {**event, "item": _with_ticket(event["item"])}
         _main_loop.call_soon_threadsafe(asyncio.create_task, _broadcast_roadmap_update(event))
 
 
@@ -286,6 +344,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Portfolio edits ride the roadmap socket: anything watching the board already
     # cares when a project is re-parented or an initiative closes.
     portfolio_store.subscribe(_on_roadmap_update)
+    # Only started when a tracker is actually configured, so an unconfigured deployment
+    # runs no extra thread at all.
+    if tracker_store.is_configured:
+        threading.Thread(target=_tracker_sync_loop, daemon=True).start()
     yield
 
 
@@ -1183,6 +1245,94 @@ def roadmap_page() -> FileResponse:
     return FileResponse(STATIC_DIR / "roadmap.html")
 
 
+# ---- external trackers (Jira / Azure DevOps) ----
+#
+# Reads are open like every other read in this system (see authz.py's transparency note);
+# triggering a sync is a `manage_roadmap` write because it costs an outbound API call
+# against someone else's rate limit.
+
+
+@app.get("/trackers")
+def get_trackers() -> dict:
+    """Configured trackers plus each one's last sync outcome.
+
+    Never includes a token: the payload is assembled field by field in
+    TrackerStore.describe() precisely so that adding a config field later cannot leak one
+    by accident.
+    """
+    return tracker_store.describe()
+
+
+@app.get("/trackers/tickets")
+def search_tickets(q: str = "", tracker_id: str = "", limit: int = 50) -> dict:
+    """Candidate tickets for the link picker, from the synced catalog only - this endpoint
+    never calls out to a tracker, so typing in the picker cannot generate API traffic."""
+    tickets = tracker_store.search(q, tracker_id, max(1, min(limit, 200)))
+    # Which candidates are already taken, so the picker can grey them out instead of
+    # letting someone choose one and only then be refused by the 1:1 check. A set of
+    # tuples rather than a joined string: how a catalog key is spelled is trackers.py's
+    # business, and duplicating that format here is what invites the two to drift apart.
+    taken = {
+        (tid, normalize_key(tid, key))
+        for tid, key in roadmap_store.linked_ticket_refs()
+    }
+    for ticket in tickets:
+        tid = ticket["tracker_id"]
+        ticket["linked"] = (tid, normalize_key(tid, ticket["key"])) in taken
+    return {"tickets": tickets}
+
+
+@app.post("/trackers/sync")
+def sync_trackers(request: Request, payload: dict = Body(default={})) -> dict:
+    """Kicks off a sync and returns immediately.
+
+    Runs on a daemon thread, like merges and dev tasks (see sessions.py) - a Jira with
+    thousands of issues would otherwise block the event loop for the whole pull. The board
+    learns it finished from the roadmap websocket.
+    """
+    _require(request, "manage_roadmap")
+    if not tracker_store.is_configured:
+        raise HTTPException(
+            status_code=400,
+            detail="No trackers are configured. Add a [[trackers]] block to "
+            "pm_studio_local/config.toml.",
+        )
+    if tracker_store.is_syncing:
+        # Not an error: the caller wanted a fresh catalog and one is already being built.
+        return {"status": "already_syncing", **tracker_store.describe()}
+    tracker_id = (payload.get("tracker_id") or "").strip() or None
+    if tracker_id and CONFIG.tracker(tracker_id) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown tracker: {tracker_id}")
+    threading.Thread(target=_run_tracker_sync, args=(tracker_id,), daemon=True).start()
+    return {"status": "syncing", **tracker_store.describe()}
+
+
+def _run_tracker_sync(tracker_id: str | None) -> None:
+    """One sync pass, off the event loop. Never raises - TrackerStore.sync records each
+    tracker's failure in its own status entry, and this wrapper is the last backstop so a
+    bug here cannot kill the thread silently."""
+    try:
+        tracker_store.sync(tracker_id)
+        # Linked tickets outside the configured projects are not in the catalog pull, so
+        # fetch those individually - otherwise they would render as unresolved forever.
+        tracker_store.refresh_missing(roadmap_store.linked_ticket_refs())
+    except Exception as exc:  # noqa: BLE001
+        print(f"[trackers] sync failed: {exc}")
+    _on_roadmap_update({"type": "trackers_synced", "trackers": tracker_store.describe()})
+
+
+def _tracker_sync_loop() -> None:
+    """Background poller: wakes once a minute and syncs whichever trackers are due on
+    their own interval (see TrackerConfig.sync_interval_minutes)."""
+    while True:
+        try:
+            for tracker_id in tracker_store.due_tracker_ids():
+                _run_tracker_sync(tracker_id)
+        except Exception as exc:  # noqa: BLE001 - the loop must outlive any single error
+            print(f"[trackers] sync loop error: {exc}")
+        time.sleep(60)
+
+
 @app.get("/roadmap/data")
 def roadmap_data() -> dict:
     """The board's dataset, grouped by product (the original shape, unchanged).
@@ -1193,12 +1343,18 @@ def roadmap_data() -> dict:
     """
     return {
         "products": PRODUCTS,
-        "items": roadmap_store.list_all(),
+        "items": {
+            product: [_with_ticket(item) for item in items]
+            for product, items in roadmap_store.list_all().items()
+        },
         "portfolio": {
             "initiatives": portfolio_store.list_initiatives(),
             "projects": portfolio_store.list_projects(),
             "catch_all_project_id": portfolio_store.catch_all_project_id,
         },
+        # So the board can render the badge palette and the picker without a second
+        # round trip. Empty/`configured: false` when no [[trackers]] are declared.
+        "trackers": tracker_store.describe(),
     }
 
 
@@ -1210,11 +1366,16 @@ def roadmap_by_initiative() -> dict:
     initiative, and changes with no project, come back in a trailing group with
     `initiative: null` rather than vanishing.
     """
-    changes = [item for items in roadmap_store.list_all().values() for item in items]
+    changes = [
+        _with_ticket(item)
+        for items in roadmap_store.list_all().values()
+        for item in items
+    ]
     return {
         "pivot": "initiative",
         "products": PRODUCTS,
         "groups": portfolio_store.group_changes_by_initiative(changes),
+        "trackers": tracker_store.describe(),
     }
 
 
@@ -1247,7 +1408,12 @@ def create_roadmap_item(product: str, request: Request, payload: dict = Body(...
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _audit(actor, "roadmap.item_created", f"{product}/{item.id}", item.title)
-    return item.to_dict()
+    # Linking at creation is one call instead of create-then-PATCH. A failed link raises,
+    # which leaves the change created but unlinked - deliberately not rolled back: the
+    # change is the thing worth keeping, and the error says exactly what to retry.
+    if payload.get("ticket") or payload.get("ticket_key"):
+        item = _apply_ticket_link(actor, item.id, payload)
+    return _with_ticket(item.to_dict())
 
 
 @app.patch("/roadmap/{product}/items/{item_id}")
@@ -1283,7 +1449,9 @@ def update_roadmap_item(product: str, item_id: str, request: Request, payload: d
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         _audit(actor, "roadmap.item_moved", item_id, f"{product} -> {move_to}")
-        return item.to_dict()
+        # Joined like every other item response - a move must not hand back a shape whose
+        # `ticket` key is missing, or the board would drop the badge until a reload.
+        return _with_ticket(item.to_dict())
 
     item = roadmap_store.update(
         item_id,
@@ -1297,8 +1465,87 @@ def update_roadmap_item(product: str, item_id: str, request: Request, payload: d
         # Same convention: "" detaches the change from its project.
         project_id=_validated_project_id(payload.get("project_id")),
     )
+    # Ticket linking is applied after the ordinary field update so one PATCH can do both,
+    # and it is keyed off `ticket` being PRESENT rather than truthy - `"ticket": ""` is how
+    # a caller unlinks, matching the `owner`/`project_id` convention above.
+    if "ticket" in payload or "ticket_key" in payload:
+        item = _apply_ticket_link(actor, item_id, payload)
     _audit(actor, "roadmap.item_updated", f"{product}/{item_id}")
-    return item.to_dict()
+    return _with_ticket(item.to_dict())
+
+
+def _apply_ticket_link(actor: User | None, item_id: str, payload: dict) -> RoadmapItem:
+    """Links or unlinks a change's ticket from a roadmap PATCH.
+
+    Accepts either a single `ticket` value - a full URL or a bare key, resolved against the
+    configured trackers - or an explicit `tracker_id` + `ticket_key` pair for a caller that
+    already knows both. An empty value unlinks.
+
+    A link is refused unless the ticket actually EXISTS in its tracker: without that, a
+    typo would sit on the card forever as an unresolved badge, which looks identical to a
+    tracker being down. The existence check reuses the synced catalog and only calls out
+    for a ticket the last sync did not cover.
+    """
+    reference = payload.get("ticket")
+    explicit_key = (payload.get("ticket_key") or "").strip()
+    explicit_tracker = (payload.get("tracker_id") or "").strip()
+
+    # Unlink: `"ticket": ""` or `"ticket_key": ""`.
+    if (reference is not None and not str(reference).strip()) or (
+        "ticket_key" in payload and not explicit_key
+    ):
+        _audit(actor, "roadmap.ticket_unlinked", item_id)
+        return roadmap_store.unlink_ticket(item_id)
+
+    if not tracker_store.is_configured:
+        raise HTTPException(
+            status_code=400,
+            detail="No trackers are configured, so a ticket cannot be linked. Add a "
+            "[[trackers]] block to pm_studio_local/config.toml.",
+        )
+
+    if explicit_key and explicit_tracker:
+        tracker_id, key = explicit_tracker, explicit_key
+    else:
+        resolved = tracker_store.resolve(str(reference or explicit_key))
+        if resolved is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Could not tell which tracker {str(reference or explicit_key)!r} "
+                "belongs to. Paste the ticket's URL, or send tracker_id and ticket_key "
+                "explicitly. Configured trackers: "
+                + (", ".join(t.id for t in CONFIG.trackers) or "none"),
+            )
+        tracker_id, key = resolved
+
+    if CONFIG.tracker(tracker_id) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown tracker: {tracker_id}")
+
+    try:
+        ticket = tracker_store.ensure_ticket(tracker_id, key)
+    except TrackerError as exc:
+        # 502: the tracker, not this request, is what failed - and the message is already
+        # scrubbed of the token by trackers._scrub.
+        raise HTTPException(
+            status_code=502, detail=f"Could not reach {tracker_id}: {exc}"
+        ) from exc
+    if ticket is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"{key} was not found in {tracker_id}. Check the key, or that the "
+            "configured credential can see that project.",
+        )
+
+    try:
+        item = roadmap_store.link_ticket(item_id, tracker_id, key)
+    except TicketAlreadyLinked as exc:
+        # 409, not 400: the request was well-formed, it collided with existing state. The
+        # detail names the change already holding the ticket.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit(actor, "roadmap.ticket_linked", item_id, f"{tracker_id}/{ticket.key}")
+    return item
 
 
 @app.delete("/roadmap/{product}/items/{item_id}")

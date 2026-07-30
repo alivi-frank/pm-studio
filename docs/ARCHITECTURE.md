@@ -191,6 +191,65 @@ an initiative that still has projects, a project that still has changes. The cha
 count is passed *in* by the server (`roadmap_store.count_by_project`) so this module
 never reaches across into the roadmap store.
 
+## 3c. `trackers.py` — external issue trackers (Jira / Azure DevOps)
+
+Owns everything *about* a ticket; `roadmap.py` owns only the link to it.
+
+**The 1:1 link.** A `RoadmapItem` carries `tracker_id` + `ticket_key`, both defaulting to
+`None` so pre-existing roadmap JSON loads with no migration. One item holds at most one
+ticket by construction; the other direction is enforced in `RoadmapStore.link_ticket`,
+which scans for a conflicting holder and raises `TicketAlreadyLinked` (→ HTTP 409) naming
+it. The check and the write happen under **one** lock hold, so two concurrent links to the
+same ticket cannot both pass. Keys are compared through `normalize_key` (Jira upper-cased,
+ADO ids left alone) — imported by `roadmap.py` rather than reimplemented, because the
+guarantee is only as good as the definition of "same ticket".
+
+**Why the type is not denormalised onto the item.** The type is the tracker's fact. Copying
+it would make every sync rewrite every linked item, and one missed write would leave a card
+claiming "Bug" for something converted to a Story months ago. So the item stores the
+reference, this store holds one entry per ticket, and `server.py`'s `_with_ticket` joins
+them at read time — including on websocket events, or a live edit would blank a card's badge
+until the next reload.
+
+**Type normalisation.** Tracker type names map onto `CANONICAL_TYPES` (epic, feature, story,
+task, bug, spike, subtask, other), which is what picks the badge colour — so ADO's *Product
+Backlog Item* and Jira's *Story* colour alike. `raw_type` keeps whatever the tracker said and
+is what the UI actually labels, so a renamed or custom type is never relabelled into a lie;
+an unrecognised one lands on `other` (neutral colour) rather than being guessed at. The
+palette itself lives in roadmap.html, keyed on these slugs, where light/dark are expressible.
+
+**Three properties worth preserving:**
+
+- **The network is one seam.** Every HTTP call goes through the module-level `_request`,
+  which the tests replace wholesale — the suite pins the exact URLs, methods, auth headers
+  and pagination we send without anyone needing a live Jira.
+- **A sync never raises at the caller.** Each tracker's outcome lands in its own
+  `SyncStatus`. On failure the previous catalog is deliberately **kept** and the error is
+  surfaced in the board header: a stale type beats a card that suddenly claims no ticket.
+  Due-ness keys off the last *attempt*, so a failing tracker keeps retrying.
+- **Tokens never leave the module.** They go into an `Authorization` header and nowhere
+  else. `_scrub` is applied to every error before it is stored, and `describe()` builds its
+  payload field by field (never `asdict`) so adding a config field can't leak one.
+
+**Provider shapes.** Jira tries `/rest/api/3/search/jql` (token-paginated, current Cloud)
+and falls back to `/rest/api/{3,2}/search` (offset-paginated) on 404/410 only — any other
+status surfaces rather than walking the chain. ADO needs two calls by design: WIQL for ids
+(single quotes doubled, so a project named `Bob's Team` can't break the literal), then
+hydration in batches of 200, a server limit rather than a preference.
+
+**Sync trigger.** One daemon thread started from `lifespan` *only when a tracker is
+configured*, waking each minute and pulling whichever trackers are due on their own
+`sync_interval_minutes`; plus `POST /trackers/sync`. After a catalog pull, linked tickets
+outside the configured `projects` are fetched individually, so a one-off dependency on
+another team's board resolves instead of rendering unresolved forever.
+
+**Read-only.** Nothing writes back to Jira or ADO. The board's bucket/status stays
+independent of the ticket's state, on purpose, and the PM prompt says so explicitly.
+
+The cache at `workspace/trackers.json` is in `SENSITIVE_WORKSPACE_FILES`: it holds no
+credential of ours but caches another system's ticket titles, and never committing it costs
+exactly one re-sync.
+
 ## 4. `tasks.py` — dev-task registry (one per session)
 
 ```python

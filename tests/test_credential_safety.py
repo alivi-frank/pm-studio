@@ -63,7 +63,13 @@ class SnapshotNeverCommitsSecretsTest(unittest.TestCase):
         (self.workspace / "costing.json").write_text('{"roster": [{"rate_per_hour": 250}]}')
         (self.workspace / "audit.jsonl").write_text('{"actor_email": "a@b.co"}\n')
         (self.workspace / "activity.jsonl").write_text('{"user_id": "u1"}\n')
+        # Not a credential of ours, but a cache of another system's private data - see
+        # gitsnapshot.SENSITIVE_WORKSPACE_FILES for why it is unstaged all the same.
+        (self.workspace / "trackers.json").write_text(
+            '{"tickets": [{"key": "PROJ-1", "title": "secret acquisition plan"}]}'
+        )
         (self.workspace / "accounts.json.tmp").write_text('{"users": []}')
+        (self.workspace / "trackers.json.tmp").write_text('{"tickets": []}')
 
     def _tracked(self) -> list[str]:
         return git("ls-files", cwd=self.root).stdout.split()
@@ -91,6 +97,9 @@ class SnapshotNeverCommitsSecretsTest(unittest.TestCase):
         self.assertNotIn("deadbeef", blob)
         self.assertNotIn("password_hash", blob)
         self.assertNotIn("rate_per_hour", blob)
+        # A ticket title pulled from the deployment's Jira is somebody else's data and
+        # must not end up in this repo's history either.
+        self.assertNotIn("secret acquisition plan", blob)
 
     def test_a_snapshot_with_only_secrets_changed_commits_nothing(self) -> None:
         """After unstaging there is nothing left, so no empty commit should be made."""
