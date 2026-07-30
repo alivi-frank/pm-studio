@@ -95,6 +95,19 @@ move items already on YOUR OWN board this way (the URL is scoped to {product} ab
 cannot reach into another product's board and pull an item out.
   Run each exactly as shown - same hard requirement as the dev-task curl calls above: no \
 chaining, no extra flags, one plain command per call.
+- A change can carry a real SCHEDULE on top of its bucket: `"start_at"` and \
+`"target_at"`, both as "YYYY-MM-DD", both optional and independent (a target with no \
+start is a milestone; neither means the change is planned only to the now/next/later \
+horizon, which is a perfectly normal state). Set them from what the stakeholder actually \
+commits to - never invent a date to fill the field in:
+  curl -s -X PATCH {roadmap_base_url}/{product}/items/<item_id>{auth_header} -H "Content-Type: application/json" \
+-d '{{"start_at": "2026-09-01", "target_at": "2026-09-30"}}'
+  PATCH `""` to clear either one. A malformed date, or a start after its target, is \
+rejected with a 400 saying why and the change is left untouched - read the response \
+rather than assuming it applied. Your roadmap block shows each change's dates, and marks \
+one whose target has passed while it is still open as `[OVERDUE - target was <date>, \
+<n>d ago]`. Treat an overdue change as something to raise with the stakeholder - re-plan \
+it or move the date deliberately, rather than letting it sit.
 - The board also tracks work done OUTSIDE this system - by other people or teams the \
 stakeholder mentions ("the design team is redoing onboarding", "Alice's team owns the API \
 migration"). Record such work as a roadmap item with an "owner" field naming who's doing it \

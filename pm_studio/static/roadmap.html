@@ -15,14 +15,18 @@
     --ink-secondary: #52514e;
     --ink-muted: #898781;
     --border: rgba(11, 11, 11, 0.10);
+    --hairline: rgba(11, 11, 11, 0.06);
+    --hover: rgba(11, 11, 11, 0.04);
     --status-pending: #898781;
     --status-in-progress: #2a78d6;
     --status-done: #0ca30c;
-    --suggestion-bg: rgba(184, 134, 11, 0.12);
+    --suggestion-bg: rgba(184, 134, 11, 0.10);
     --suggestion-border: #b8860b;
     --accent: #2a78d6;
     --accent-fg: #ffffff;
     --danger: #d03b3b;
+    --danger-bg: rgba(208, 59, 59, 0.10);
+    --today: #d03b3b;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -33,14 +37,18 @@
       --ink-secondary: #c3c2b7;
       --ink-muted: #898781;
       --border: rgba(255, 255, 255, 0.10);
+      --hairline: rgba(255, 255, 255, 0.07);
+      --hover: rgba(255, 255, 255, 0.05);
       --status-pending: #898781;
       --status-in-progress: #3987e5;
       --status-done: #0ca30c;
-      --suggestion-bg: rgba(212, 167, 44, 0.12);
+      --suggestion-bg: rgba(212, 167, 44, 0.10);
       --suggestion-border: #d4a72c;
       --accent: #3987e5;
       --accent-fg: #ffffff;
       --danger: #e66767;
+      --danger-bg: rgba(230, 103, 103, 0.16);
+      --today: #e66767;
     }
   }
   * { box-sizing: border-box; }
@@ -51,248 +59,338 @@
     color: var(--ink-primary);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
-  header {
-    padding: 20px 24px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: baseline;
-    gap: 12px;
-    flex-wrap: wrap;
-  }
-  header h1 { font-size: 1.2em; margin: 0; }
-  header p { margin: 4px 0 0; color: var(--ink-muted); font-size: 0.85em; }
-  header a { color: var(--ink-secondary); font-size: 0.85em; text-decoration: none; }
-  header a:hover { text-decoration: underline; }
+  /* No page <header>. The title was a restatement of the tab already lit in the nav,
+     and the toggles now live in the nav's own controls slot - together that is ~90px of
+     vertical space handed back to the board itself. */
   main {
-    max-width: 1400px;
+    max-width: 1440px;
     margin: 0 auto;
-    padding: 24px;
-    display: flex;
-    flex-direction: column;
-    gap: 28px;
+    padding: 14px 20px 40px;
   }
-  section.product {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    padding: 18px 20px;
-  }
-  .product-head {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 12px;
-    margin-bottom: 12px;
-    cursor: pointer;
-    user-select: none;
-  }
-  .product-head h2 {
-    margin: 0;
-    font-size: 1.05em;
+
+  /* ---- groups (one per product, or one per initiative) ---------------------------
+     A rule and a heading rather than a card: three nested rounded boxes (section >
+     column > card) spent most of their width on their own padding. */
+  section.group { margin-bottom: 8px; }
+  .group-head {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 9px;
+    width: 100%;
+    padding: 7px 4px;
+    border: 0;
+    border-bottom: 1px solid var(--border);
+    background: none;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
   }
-  .product-head .chevron {
-    display: inline-block;
-    font-size: 0.8em;
+  .group-head:hover { background: var(--hover); }
+  .group-head .chevron {
     color: var(--ink-muted);
+    font-size: 0.7em;
     transition: transform 0.15s ease;
   }
-  section.product.collapsed .product-head .chevron { transform: rotate(-90deg); }
-  .product-head .count { color: var(--ink-muted); font-size: 0.8em; }
-  .product-head .inprogress-badge {
-    color: var(--status-done);
-    font-size: 0.75em;
-    font-weight: 600;
-  }
-  section.product.collapsed .suggestions,
-  section.product.collapsed .columns,
-  section.product.collapsed details.shipped {
-    display: none;
-  }
-  .suggestions {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    margin-bottom: 14px;
-  }
-  .suggestion-card {
-    background: var(--suggestion-bg);
-    border: 1px solid var(--suggestion-border);
-    border-radius: 10px;
-    padding: 10px 12px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    flex-wrap: wrap;
-  }
-  .suggestion-card .body { min-width: 0; }
-  .suggestion-card .title { font-weight: 600; }
-  .suggestion-card .from { font-size: 0.78em; color: var(--ink-muted); }
-  .suggestion-card .desc { font-size: 0.82em; color: var(--ink-secondary); margin-top: 2px; }
-  .suggestion-card .actions { display: flex; gap: 6px; flex-shrink: 0; }
-  .columns {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 14px;
-  }
-  @media (max-width: 900px) {
-    .columns { grid-template-columns: 1fr; }
-  }
-  .column {
-    background: var(--column);
-    border-radius: 10px;
-    padding: 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    min-height: 60px;
-  }
-  .column-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  .column-head h3 {
+  section.group.collapsed .chevron { transform: rotate(-90deg); }
+  .group-head h2 {
     margin: 0;
-    font-size: 0.85em;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--ink-secondary);
+    font-size: 0.98em;
+    font-weight: 650;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
-  .add-btn {
-    border: none;
-    background: transparent;
+  .group-head .tally {
+    display: flex;
+    gap: 8px;
+    margin-left: auto;
+    font-size: 0.76em;
     color: var(--ink-muted);
-    font: inherit;
-    font-size: 1.1em;
-    line-height: 1;
-    cursor: pointer;
-    padding: 0 4px;
+    white-space: nowrap;
   }
-  .add-btn:hover { color: var(--accent); }
-  .card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 10px 12px;
+  .group-head .tally .live { color: var(--status-in-progress); font-weight: 600; }
+  section.group.collapsed .group-body { display: none; }
+  .group-body { padding-top: 10px; }
+
+  /* ---- lanes (the now / next / later subview) ---- */
+  .lanes {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    align-items: start;
   }
-  .card .title { font-weight: 600; font-size: 0.92em; }
-  .card .desc {
-    margin-top: 4px;
-    font-size: 0.82em;
-    color: var(--ink-secondary);
-    line-height: 1.35;
-    white-space: pre-wrap;
+  @media (max-width: 860px) { .lanes { grid-template-columns: 1fr; } }
+  .lane {
+    background: var(--column);
+    border-radius: 8px;
+    padding: 7px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
   }
-  .card .row {
-    margin-top: 8px;
+  .lane-head {
     display: flex;
     align-items: center;
     gap: 6px;
-    flex-wrap: wrap;
+    padding: 0 3px 1px;
   }
-  .dot { font-size: 0.9em; line-height: 1; }
-  .status-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 0.78em;
-    font-weight: 600;
+  .lane-head h3 {
+    margin: 0;
+    font-size: 0.7em;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--ink-secondary);
   }
-  .status-badge.pending { color: var(--status-pending); }
-  .status-badge.in_progress { color: var(--status-in-progress); }
-  .status-badge.in_progress .dot { animation: pulse 1.4s ease-in-out infinite; }
-  .status-badge.done { color: var(--status-done); }
-  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
-  select.mini, .card select {
-    font: inherit;
-    font-size: 0.78em;
-    background: var(--page);
-    color: var(--ink-primary);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 2px 4px;
+  .lane-head .n {
+    font-size: 0.72em;
+    color: var(--ink-muted);
+    font-variant-numeric: tabular-nums;
   }
-  .card .del {
+  .add-btn {
     margin-left: auto;
     border: none;
     background: transparent;
     color: var(--ink-muted);
-    cursor: pointer;
-    font-size: 0.78em;
-  }
-  .card .del:hover { color: var(--danger); }
-  .card .owner-badge {
-    display: inline-block;
-    font-size: 0.72em;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--ink-muted);
-    border: 1px solid var(--ink-muted);
-    border-radius: 4px;
-    padding: 0 5px;
-    margin-top: 2px;
-    align-self: flex-start;
-  }
-  .card .owner-btn,
-  .card .ticket-btn {
-    background: none;
-    border: none;
     font: inherit;
-    font-size: 0.78em;
-    color: var(--ink-muted);
+    font-size: 1em;
+    line-height: 1;
     cursor: pointer;
-    padding: 0;
+    padding: 1px 4px;
+    border-radius: 5px;
   }
-  .card .owner-btn:hover,
-  .card .ticket-btn:hover { color: var(--ink-secondary); }
-  .empty-col { color: var(--ink-muted); font-size: 0.8em; font-style: italic; }
-  details.shipped { margin-top: 14px; }
+  .add-btn:hover { color: var(--accent); background: var(--hover); }
+  .lane-empty {
+    color: var(--ink-muted);
+    font-size: 0.75em;
+    padding: 2px 3px 4px;
+  }
+
+  /* ---- the change card ------------------------------------------------------------
+     Collapsed it is one line: a status dot, the title, and whatever metadata the change
+     actually has. Every control the old always-open card showed (four selects and three
+     buttons, on every card, at all times) is one click away in the same place instead -
+     which is what took a card from ~140px to ~30px. */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    overflow: hidden;
+  }
+  .card:hover { border-color: rgba(128, 128, 128, 0.35); }
+  .card-main {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+    width: 100%;
+    padding: 6px 8px;
+    border: 0;
+    background: none;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .card-main:hover { background: var(--hover); }
+  .card-title {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.86em;
+    font-weight: 600;
+    line-height: 1.35;
+  }
+  .card:not(.open) .card-title {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  /* Status as a dot on the left edge of the title, not a badge with a word next to it -
+     the word cost a whole row on every card and the legend is one hover away. */
+  .status-dot {
+    flex: 0 0 auto;
+    width: 7px;
+    height: 7px;
+    margin-top: 1px;
+    border-radius: 50%;
+    align-self: flex-start;
+    transform: translateY(4px);
+  }
+  .status-dot.pending { border: 1.5px solid var(--status-pending); }
+  .status-dot.in_progress { background: var(--status-in-progress); }
+  .status-dot.done { background: var(--status-done); }
+  @media (prefers-reduced-motion: no-preference) {
+    .status-dot.in_progress { animation: pulse 1.6s ease-in-out infinite; }
+  }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  .card-meta {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-wrap: wrap;
+    padding: 0 8px 5px 22px;
+  }
+  .card-meta:empty { display: none; }
+  /* Plain muted text separated by middots, not a row of filled pills: on a card that is
+     now two lines tall, three pills outweighed the title they were annotating. Only the
+     chips that mean something is WRONG get a fill. */
+  .chip {
+    font-size: 0.7em;
+    line-height: 1.5;
+    color: var(--ink-muted);
+    white-space: nowrap;
+    max-width: 26ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* Trailing, not leading: when the row wraps, a dot left at the end of a line reads as
+     "continues below", where a dot starting the next line reads as a bullet. Scoped to a
+     card's metadata row - a section head's flags sit next to a tally pushed to the far
+     right, where a separator would just dangle. */
+  .card-meta .chip:not(:last-child)::after { content: "·"; margin-left: 5px; }
+  .chip.warn {
+    padding: 0 5px;
+    border-radius: 4px;
+    color: var(--suggestion-border);
+    background: var(--suggestion-bg);
+  }
+  .chip.warn::after { content: none; }
+  .chip.owner { color: var(--ink-secondary); }
+
+  .card-body {
+    display: none;
+    padding: 2px 8px 8px 22px;
+    border-top: 1px solid var(--hairline);
+    margin-top: 2px;
+  }
+  .card.open .card-body { display: block; }
+  /* Shared by the lane card's open body and the timeline row's detail panel - the two
+     places a change's full text and controls appear. */
+  .desc {
+    font-size: 0.8em;
+    color: var(--ink-secondary);
+    line-height: 1.45;
+    white-space: pre-wrap;
+    margin: 6px 0;
+  }
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-wrap: wrap;
+    margin-top: 6px;
+  }
+  select.mini, input.mini {
+    font: inherit;
+    font-size: 0.75em;
+    background: var(--page);
+    color: var(--ink-primary);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 2px 4px;
+  }
+  .date-field {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.75em;
+    color: var(--ink-muted);
+  }
+  .date-field input.mini { font-size: 1em; }
+  .controls button {
+    font: inherit;
+    font-size: 0.75em;
+    padding: 2px 7px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: transparent;
+    color: var(--ink-secondary);
+    cursor: pointer;
+  }
+  .controls button:hover { border-color: var(--accent); color: var(--accent); }
+  .controls .del { margin-left: auto; }
+  .controls .del:hover { border-color: var(--danger); color: var(--danger); }
+
+  /* ---- cross-product suggestions awaiting triage ---- */
+  .triage {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin-bottom: 10px;
+  }
+  .suggestion {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    background: var(--suggestion-bg);
+    border: 1px solid var(--suggestion-border);
+    border-radius: 7px;
+    padding: 6px 9px;
+  }
+  .suggestion .body { min-width: 0; flex: 1; }
+  .suggestion .title { font-size: 0.85em; font-weight: 600; }
+  .suggestion .from { font-size: 0.72em; color: var(--ink-muted); }
+  .suggestion .actions { display: flex; gap: 5px; flex-shrink: 0; }
+  .suggestion button {
+    font: inherit;
+    font-size: 0.75em;
+    padding: 2px 8px;
+    border: 1px solid var(--suggestion-border);
+    border-radius: 5px;
+    background: transparent;
+    color: var(--ink-secondary);
+    cursor: pointer;
+  }
+  .suggestion button.accept { background: var(--suggestion-border); color: #fff; }
+
+  /* ---- shipped ---- */
+  details.shipped { margin-top: 8px; }
   details.shipped summary {
     cursor: pointer;
-    font-size: 0.82em;
-    color: var(--ink-secondary);
+    font-size: 0.76em;
+    color: var(--ink-muted);
     user-select: none;
+    padding: 2px 4px;
   }
-  .shipped-list { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .shipped-list { margin: 4px 0 0 16px; display: flex; flex-direction: column; gap: 3px; }
   .shipped-item {
-    font-size: 0.82em;
+    font-size: 0.78em;
     color: var(--ink-secondary);
     display: flex;
     gap: 8px;
     align-items: baseline;
   }
-  .shipped-item .when { color: var(--ink-muted); font-size: 0.85em; white-space: nowrap; }
+  .shipped-item .when { color: var(--ink-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+  /* ---- add form ---- */
   .add-form {
     display: none;
     flex-direction: column;
-    gap: 6px;
+    gap: 5px;
     background: var(--surface);
     border: 1px dashed var(--border);
-    border-radius: 10px;
-    padding: 10px 12px;
+    border-radius: 7px;
+    padding: 7px 8px;
   }
   .add-form.open { display: flex; }
   .add-form input, .add-form textarea {
     font: inherit;
-    font-size: 0.82em;
-    padding: 6px 8px;
+    font-size: 0.8em;
+    padding: 5px 7px;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: 5px;
     background: var(--page);
     color: var(--ink-primary);
     resize: vertical;
   }
-  .add-form .buttons { display: flex; gap: 6px; justify-content: flex-end; }
+  .add-form .buttons { display: flex; gap: 5px; justify-content: flex-end; }
   .add-form button {
     font: inherit;
-    font-size: 0.8em;
-    padding: 5px 10px;
-    border-radius: 6px;
+    font-size: 0.78em;
+    padding: 4px 9px;
+    border-radius: 5px;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--ink-secondary);
@@ -300,67 +398,234 @@
   }
   .add-form button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
 
-  /* ---- pivot toggle + the initiative lens ---- */
-  #pivot-toggle { display: inline-flex; gap: 0; margin-top: 10px; }
-  #pivot-toggle button {
-    padding: 6px 13px;
-    font: inherit;
-    font-size: 0.82em;
-    color: var(--ink-secondary);
-    background: transparent;
-    border: 1px solid var(--border);
-    cursor: pointer;
+  /* Compact schedule chips on a card. `late` is the only one that shouts. */
+  .chip.dates { color: var(--ink-secondary); font-variant-numeric: tabular-nums; }
+  .chip.late {
+    padding: 0 5px;
+    border-radius: 4px;
+    color: var(--danger);
+    background: var(--danger-bg);
+    font-weight: 600;
   }
-  #pivot-toggle button:first-child { border-radius: 7px 0 0 7px; }
-  #pivot-toggle button:last-child { border-radius: 0 7px 7px 0; border-left: 0; }
-  #pivot-toggle button.active {
-    color: var(--accent-fg);
-    background: var(--accent);
-    border-color: var(--accent);
+  .chip.late::after { content: none; }
+
+  /* ---- the timeline subview ------------------------------------------------------
+     One axis for the whole page, shared by every group, so two products' bars are
+     directly comparable. Bars are positioned as percentages of that axis rather than
+     laid out in a grid of cells, because a month is not a fixed width in time. */
+  .gantt-scroll { overflow-x: auto; padding-bottom: 4px; }
+  .gantt {
+    --gutter: 290px;
+    min-width: 900px;
   }
-  .initiative-group { margin-bottom: 26px; }
-  .initiative-head {
-    display: flex;
-    align-items: baseline;
-    gap: 9px;
-    padding-bottom: 7px;
+  @media (max-width: 700px) { .gantt { --gutter: 160px; } }
+  /* NOT sticky, deliberately. `overflow-x: auto` on the wrapper makes it the nearest
+     scrollport in BOTH axes, so a `position: sticky` axis here is measured against that
+     box rather than the window - it renders `top` pixels down from the top of the
+     timeline, on top of the first rows, and never sticks to anything. The today line
+     runs the full height of the body instead, which is the orientation anchor that
+     survives scrolling. */
+  .gantt-head {
+    display: grid;
+    grid-template-columns: var(--gutter) 1fr;
+    background: var(--page);
     border-bottom: 1px solid var(--border);
   }
-  .initiative-head h2 { font-size: 1em; margin: 0; }
-  .initiative-head .count { font-size: 0.78em; color: var(--ink-muted); }
-  .initiative-goals { margin-top: 5px; font-size: 0.78em; color: var(--ink-muted); }
-  .project-block { margin: 14px 0 0 14px; }
-  .project-head {
+  .gantt-legend {
     display: flex;
-    align-items: baseline;
-    gap: 8px;
-    margin-bottom: 7px;
-    font-size: 0.88em;
-    font-weight: 600;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 8px;
+    font-size: 0.72em;
+    color: var(--ink-muted);
+    flex-wrap: wrap;
   }
-  .project-head .count { font-weight: 400; font-size: 0.85em; color: var(--ink-muted); }
-  .project-changes {
+  .gantt-legend .key { display: inline-flex; align-items: center; gap: 5px; }
+  /* Real bars are absolutely positioned inside a track; the legend borrows their fill
+     but has to put them back in flow. */
+  .gantt-legend .swatch { position: static; width: 18px; height: 8px; border-radius: 2px; }
+  .gantt-legend .swatch.gantt-age { height: 0; align-self: center; }
+  .gantt-legend .swatch.gantt-target { width: 9px; height: 9px; margin: 0; }
+  .gantt-scale { position: relative; height: 34px; }
+  .gantt-quarter {
+    position: absolute;
+    top: 0;
+    height: 16px;
+    font-size: 0.7em;
+    font-weight: 650;
+    color: var(--ink-secondary);
+    padding-left: 5px;
+    border-left: 1px solid var(--border);
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .gantt-quarter.is-current { color: var(--accent); }
+  .gantt-month {
+    position: absolute;
+    top: 17px;
+    height: 15px;
+    font-size: 0.64em;
+    color: var(--ink-muted);
+    padding-left: 4px;
+    border-left: 1px solid var(--hairline);
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .gantt-body { position: relative; }
+  /* One gridline layer behind every row, rather than a background per track. */
+  .gantt-lines {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: var(--gutter);
+    right: 0;
+    pointer-events: none;
+  }
+  .gantt-lines .q { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--border); }
+  .gantt-lines .m { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--hairline); }
+  .gantt-today {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: var(--today);
+    opacity: 0.75;
+  }
+  /* In the scale it starts below the quarter label, so it cannot strike through one. */
+  .gantt-today.head { top: 17px; }
+  .gantt-legend .swatch.today {
+    width: 2px;
+    height: 12px;
+    border-radius: 0;
+    background: var(--today);
+  }
+  /* The heading and its counts both stay in the label gutter. Spilling the tally into
+     the second column would print it across the time axis, where the gridlines run
+     through the text and it reads as a bar that starts in April. */
+  .gantt-group {
+    width: var(--gutter);
+    padding: 12px 10px 3px 0;
+  }
+  .gantt-group h2 {
+    margin: 0;
+    font-size: 0.85em;
+    font-weight: 650;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .gantt-group .tally {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-top: 1px;
+    font-size: 0.72em;
+    color: var(--ink-muted);
+  }
+  .gantt-row {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-    gap: 9px;
+    grid-template-columns: var(--gutter) 1fr;
+    align-items: center;
+    min-height: 23px;
+    position: relative;
   }
-  .lens-flag {
-    display: inline-block;
-    padding: 1px 7px;
-    font-size: 0.72em;
-    font-weight: 600;
-    border-radius: 999px;
+  .gantt-row:hover { background: var(--hover); }
+  .gantt-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 10px 0 12px;
+    border: 0;
+    background: none;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+    min-width: 0;
+  }
+  .gantt-label .name {
+    font-size: 0.79em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* Second to the title for space: a truncated change is unreadable, a truncated
+     product name is still recognisable. */
+  .gantt-label .sub {
+    font-size: 0.68em;
     color: var(--ink-muted);
-    border: 1px solid var(--border);
+    white-space: nowrap;
+    max-width: 12ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
-  .lens-flag.warn { color: var(--waiting-accent, #c77700); border-color: currentColor; }
-  .card .product-tag {
-    display: inline-block;
-    margin-bottom: 5px;
-    font-size: 0.72em;
-    color: var(--ink-muted);
+  /* The lane card nudges its dot down to sit on the first line of a wrapping title; a
+     timeline row is one line, so it just centres. */
+  .gantt-label .status-dot { align-self: center; transform: none; margin-top: 0; }
+  .gantt-track { position: relative; height: 23px; }
+  /* A bar carries two independent facts, so it has two independent modifiers rather
+     than one class per combination:
+       COLOUR (--bar)  what state the change is in - pending / in progress / shipped,
+                       or overdue, which overrides the others because a missed date is
+                       the thing you need to see first.
+       FILL            solid when the span comes from real dates the change carries;
+                       hatched when it is derived from the Now / Next / Later horizon.
+                       A hatch reads as "a band, not a date", which is exactly the
+                       claim an undated change can make. */
+  .gantt-bar {
+    position: absolute;
+    top: 6px;
+    height: 11px;
+    min-width: 4px;
+    border-radius: 3px;
+    background: var(--bar);
   }
-  .lens-empty { font-size: 0.85em; color: var(--ink-muted); margin: 6px 0 0 14px; }
+  .gantt-bar.s-pending { --bar: var(--status-pending); }
+  .gantt-bar.s-in_progress { --bar: var(--status-in-progress); }
+  .gantt-bar.s-done { --bar: var(--status-done); }
+  .gantt-bar.s-overdue { --bar: var(--danger); }
+  .gantt-bar.derived {
+    background: repeating-linear-gradient(135deg, var(--bar) 0 3px, transparent 3px 7px);
+    border: 1px solid var(--bar);
+    opacity: 0.8;
+  }
+  .gantt-bar.clip-start { border-top-left-radius: 0; border-bottom-left-radius: 0; }
+  .gantt-bar.clip-end { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+  /* The committed target date, marked on the bar rather than replacing it - on a
+     shipped change the gap between the bar's end and this diamond IS the slip. */
+  .gantt-target {
+    position: absolute;
+    top: 7px;
+    width: 9px;
+    height: 9px;
+    margin-left: -5px;
+    transform: rotate(45deg);
+    background: var(--surface);
+    border: 1.5px solid var(--mark, var(--ink-secondary));
+  }
+  .gantt-target.met { background: var(--mark, var(--ink-secondary)); }
+  .gantt-target.missed { --mark: var(--danger); }
+  /* How long it has been sitting on the board before its horizon opens. */
+  .gantt-age {
+    position: absolute;
+    top: 11px;
+    height: 1px;
+    border-top: 1px dotted var(--ink-muted);
+    opacity: 0.6;
+  }
+  .gantt-detail {
+    grid-column: 1 / -1;
+    padding: 2px 12px 8px 30px;
+    background: var(--surface);
+    border-top: 1px solid var(--hairline);
+  }
+  .gantt-detail .card-meta { padding: 4px 0 0; }
+  .gantt-empty { grid-column: 1 / -1; font-size: 0.76em; color: var(--ink-muted); padding: 2px 12px 4px; }
+
+  /* ---- shared bits ---- */
+  .lens-empty { font-size: 0.85em; color: var(--ink-muted); padding: 20px 4px; }
+  .lens-empty a { color: var(--accent); }
 
   /* ---- linked Jira / ADO ticket ----
      One palette for the canonical types trackers.py normalises onto (its CANONICAL_TYPES
@@ -370,23 +635,24 @@
      only red, spike is research, subtask recedes.
 
      Colour is never the only signal - the badge always carries the tracker's own type name
-     as text, so this reads correctly in greyscale and to a colour-blind viewer. */
+     as text, so this reads correctly in greyscale and to a colour-blind viewer. The
+     compact variant on a collapsed card drops the type WORD for space, so it also keeps
+     the type in its tooltip and the full badge is one click away. */
   .ticket-badge {
     display: inline-flex;
     align-items: center;
     gap: 5px;
     max-width: 100%;
-    margin-top: 6px;
-    padding: 2px 8px;
+    padding: 0 6px;
     border: 1px solid var(--ticket-color, var(--border));
     border-left: 3px solid var(--ticket-color, var(--border));
-    border-radius: 6px;
+    border-radius: 5px;
     background: var(--ticket-bg, transparent);
     color: var(--ticket-color, var(--ink-secondary));
-    font-size: 0.75em;
+    font-size: 0.7em;
+    line-height: 1.7;
     font-weight: 600;
     text-decoration: none;
-    line-height: 1.5;
   }
   a.ticket-badge:hover { text-decoration: underline; }
   .ticket-badge .ticket-type {
@@ -394,6 +660,8 @@
     letter-spacing: 0.04em;
     white-space: nowrap;
   }
+  .ticket-badge.compact .ticket-type,
+  .ticket-badge.compact .ticket-state { display: none; }
   .ticket-badge .ticket-key {
     font-family: ui-monospace, SFMono-Regular, monospace;
     font-weight: 500;
@@ -435,22 +703,25 @@
     .ticket-badge[data-type="other"]   { --ticket-color: #a8a6a0; --ticket-bg: rgba(168, 166, 160, 0.14); }
   }
 
-  /* Sync status strip in the page header. */
+  /* Sync status strip. One line above the board, only on a deployment that configured
+     [[trackers]]; otherwise the page has no strip at all. */
   #tracker-bar {
     display: none;
     align-items: center;
     gap: 10px;
     flex-wrap: wrap;
-    margin-top: 8px;
-    font-size: 0.8em;
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--hairline);
+    font-size: 0.75em;
     color: var(--ink-muted);
   }
   #tracker-bar.visible { display: flex; }
   #tracker-bar button {
     font: inherit;
-    padding: 3px 10px;
+    padding: 2px 9px;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: 5px;
     background: var(--surface);
     color: var(--ink-secondary);
     cursor: pointer;
@@ -529,7 +800,6 @@
   #picker-note { margin-top: 10px; font-size: 0.8em; color: var(--ink-muted); }
   #picker-note.error { color: var(--danger); }
   #ticket-picker .sheet-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
-  /* Matches .add-form's button treatment rather than inventing a second one. */
   #ticket-picker .sheet-actions button {
     font: inherit;
     font-size: 0.85em;
@@ -552,19 +822,11 @@
 </head>
 <body>
 <div id="pm-nav" data-page="roadmap"></div>
-<header>
-  <h1>Product Roadmap</h1>
-  <p id="subtitle">Now / Next / Later per product &middot; status tracked independently &middot; cross-product suggestions flagged for triage</p>
-  <!-- Two lenses on one dataset: group by product, or walk the work model. -->
-  <div id="pivot-toggle">
-    <button type="button" data-lens="product" class="active">By product</button>
-    <button type="button" data-lens="initiative">By initiative</button>
-  </div>
-  <!-- Shown only when the deployment configured [[trackers]]; otherwise the header looks
-       exactly as it did before Jira/ADO linking existed. -->
+<main>
+  <!-- Shown only when the deployment configured [[trackers]]. -->
   <div id="tracker-bar"></div>
-</header>
-<main id="main"></main>
+  <div id="board"></div>
+</main>
 <div id="ticket-picker" role="dialog" aria-modal="true" aria-labelledby="picker-title">
   <div class="sheet">
     <h2 id="picker-title">Link a ticket</h2>
@@ -581,35 +843,46 @@
   </div>
 </div>
 <script>
-  const main = document.getElementById("main");
+  const board = document.getElementById("board");
 
   const BUCKETS = [["now", "Now"], ["next", "Next"], ["later", "Later"]];
-  const STATUS_BADGE = {
-    pending: { dot: "○", label: "Pending" },
-    in_progress: { dot: "●", label: "In progress" },
-    done: { dot: "✓", label: "Done" },
-  };
+  const BUCKET_RANK = { now: 0, next: 1, later: 2 };
+  const STATUS_LABEL = { pending: "Pending", in_progress: "In progress", done: "Done" };
 
   let PRODUCTS = {};
   let itemsByProduct = {}; // product -> [item]
-  // The work model, used only by the initiative lens. Empty on a deployment that
-  // doesn't use /portfolio, in which case that lens shows everything as unassigned.
+  // The work model, used only by the initiative grouping. Empty on a deployment that
+  // doesn't use /portfolio, in which case everything lands in one "Unaligned" group.
   let PORTFOLIO = { initiatives: [], projects: [], catch_all_project_id: null };
   // External trackers (see trackers.py). `configured: false` on a deployment with no
   // [[trackers]] block, which hides every ticket control on this page.
   let TRACKERS = { configured: false, syncing: false, trackers: [], last_sync_at: null };
 
-  // Which lens is showing. Persisted so switching pages doesn't reset it.
-  let lens = localStorage.getItem("roadmapLens") === "initiative" ? "initiative" : "product";
+  /* Two independent axes, not one four-way switch:
+       groupBy - what the sections are (product | initiative)
+       view    - how the changes inside a section are drawn (board | timeline)
+     Every combination is valid and both are persisted, so the board comes back the way
+     you left it. */
+  let groupBy = localStorage.getItem("roadmapGroupBy") === "initiative" ? "initiative" : "product";
+  let view = localStorage.getItem("roadmapView") === "timeline" ? "timeline" : "board";
 
-  // Which product sections are collapsed - kept outside the DOM (and in
-  // localStorage) because renderAll() rebuilds every section from scratch on
-  // every websocket event; without this, a fold would reset the instant anyone
-  // else touched the board.
-  const collapsedProducts = new Set(JSON.parse(localStorage.getItem("roadmapCollapsed") || "[]"));
+  /* Which sections are folded, and which cards are open. Both live outside the DOM
+     because renderAll() rebuilds everything from scratch on every websocket event -
+     without this, a fold or an open card would reset the instant anyone else touched
+     the board. Folds persist across loads; an open card is a transient reading state
+     and deliberately does not. */
+  const collapsed = new Set(JSON.parse(localStorage.getItem("roadmapCollapsedGroups") || "[]"));
+  const openCards = new Set();
 
   function persistCollapsed() {
-    localStorage.setItem("roadmapCollapsed", JSON.stringify([...collapsedProducts]));
+    localStorage.setItem("roadmapCollapsedGroups", JSON.stringify([...collapsed]));
+  }
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = text;
+    return node;
   }
 
   function relativeTime(seconds) {
@@ -622,128 +895,188 @@
     return new Date(seconds * 1000).toLocaleDateString();
   }
 
-  // ---- linked tickets (Jira / Azure DevOps) ----
-
-  function ticketBadge(ticket) {
-    // An <a> when we know the URL, a <span> when we don't - a badge that looks clickable
-    // and goes nowhere is worse than one that plainly isn't a link yet.
-    const el = document.createElement(ticket.url ? "a" : "span");
-    el.className = "ticket-badge" + (ticket.unresolved ? " unresolved" : "");
-    el.dataset.type = ticket.type || "other";
-    if (ticket.url) {
-      el.href = ticket.url;
-      el.target = "_blank";
-      el.rel = "noopener noreferrer";
-    }
-
-    const type = document.createElement("span");
-    type.className = "ticket-type";
-    // The tracker's OWN name for the type, not our normalised slug: a team that renamed
-    // "Story" to "Deliverable" should see "Deliverable". The slug only picks the colour.
-    type.textContent = ticket.unresolved ? "Not synced" : (ticket.raw_type || "Ticket");
-    el.appendChild(type);
-
-    const key = document.createElement("span");
-    key.className = "ticket-key";
-    key.textContent = ticket.key;
-    el.appendChild(key);
-
-    if (ticket.state) {
-      const state = document.createElement("span");
-      state.className = "ticket-state";
-      state.textContent = ticket.state;
-      el.appendChild(state);
-    }
-
-    el.title = ticket.unresolved
-      ? `${ticket.key} is linked in ${ticket.tracker_label || ticket.tracker_id} but was not in the last sync. ` +
-        `It may be new, outside the configured projects, or the tracker may be unreachable.`
-      : `${ticket.raw_type} ${ticket.key} — ${ticket.title || "(no title)"}\n` +
-        `${ticket.tracker_label || ticket.tracker_id}${ticket.state ? " · " + ticket.state : ""}`;
-    return el;
+  function shortDate(ms) {
+    return new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
   }
 
-  function itemCard(item, opts = {}) {
-    const card = document.createElement("div");
-    card.className = "card";
-    const badge = STATUS_BADGE[item.status] ?? STATUS_BADGE.pending;
-    card.innerHTML = `
-      <div class="title"></div>
-      ${item.owner ? `<span class="owner-badge"></span>` : ""}
-      ${item.description ? `<div class="desc"></div>` : ""}
-      <div class="row">
-        <span class="status-badge ${item.status}"><span class="dot">${badge.dot}</span>${badge.label}</span>
-        <select class="mini status-select"></select>
-        <select class="mini bucket-select"></select>
-        <select class="mini move-select"></select>
-        <button type="button" class="owner-btn" title="Track work done by another person or team">Owner…</button>
-        ${TRACKERS.configured ? `<button type="button" class="ticket-btn"></button>` : ""}
-        <button type="button" class="del" title="Delete">Delete</button>
-      </div>
-    `;
-    card.querySelector(".title").textContent = item.title;
-    // In the initiative lens a group spans products, so each card says which product
-    // it belongs to. In the product lens that would just repeat the section heading.
-    // Inserted after innerHTML above, which would otherwise overwrite it.
-    if (opts.showProduct) {
-      const tag = document.createElement("span");
-      tag.className = "product-tag";
-      tag.textContent = PRODUCTS[item.product] || item.product;
-      card.prepend(tag);
-    }
-    // External work: done by another person/team, tracked on this board for
-    // visibility - PM agents keep its status current but never dispatch dev
-    // tasks for it.
-    if (item.owner) card.querySelector(".owner-badge").textContent = `External — ${item.owner}`;
-    if (item.description) card.querySelector(".desc").textContent = item.description;
+  /* Schedule dates are "YYYY-MM-DD" calendar dates (see roadmap.py), so they are read
+     with the LOCAL Date constructor, never Date.parse / new Date("2026-09-30") - that
+     spelling is parsed as UTC midnight and lands on the 29th for anyone west of it,
+     which is the exact bug the string storage exists to avoid. */
+  function dateMs(iso) {
+    if (!iso) return null;
+    const [y, m, d] = iso.split("-").map(Number);
+    return +new Date(y, m - 1, d);
+  }
+  // The exclusive end of a target day: a change due on the 30th owns the whole 30th.
+  function endOfDayMs(iso) {
+    const start = dateMs(iso);
+    return start == null ? null : start + 86400000;
+  }
+  function todayMs() {
+    const now = new Date();
+    return +new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  }
+  function daysBetween(aMs, bMs) {
+    return Math.round((bMs - aMs) / 86400000);
+  }
+  // "Sep 30" for a date this year, "Sep 30 2027" when the year is not the obvious one.
+  function dateLabel(iso) {
+    const ms = dateMs(iso);
+    if (ms == null) return "";
+    const opts = { month: "short", day: "numeric" };
+    if (new Date(ms).getFullYear() !== new Date().getFullYear()) opts.year = "numeric";
+    return new Date(ms).toLocaleDateString(undefined, opts);
+  }
 
-    // The 1:1 link to a Jira/ADO ticket. Inserted before the controls row so the badge
-    // sits with the change's identity rather than among its actions.
-    if (item.ticket) {
-      card.querySelector(".row").before(ticketBadge(item.ticket));
+  // ---- the view switches, mounted into the shared nav's controls slot ----
+
+  function segmented(label, options, current, onPick) {
+    const wrap = el("div", "pmnav-seg");
+    wrap.setAttribute("role", "group");
+    wrap.setAttribute("aria-label", label);
+    for (const [value, text, hint] of options) {
+      const button = el("button", null, text);
+      button.type = "button";
+      button.setAttribute("aria-pressed", String(value === current));
+      if (hint) button.title = hint;
+      button.addEventListener("click", () => onPick(value));
+      wrap.appendChild(button);
     }
-    const ticketBtn = card.querySelector(".ticket-btn");
-    if (ticketBtn) {
-      ticketBtn.textContent = item.ticket ? "Ticket…" : "Link ticket…";
-      ticketBtn.title = item.ticket
-        ? `Change or remove the ${item.ticket.key} link`
-        : "Link this change to one Jira or Azure DevOps ticket";
-      ticketBtn.addEventListener("click", () => openTicketPicker(item));
+    return wrap;
+  }
+
+  function mountControls(slot) {
+    slot.textContent = "";
+    slot.appendChild(el("span", "pmnav-seg-label", "Group by"));
+    slot.appendChild(segmented("Group changes by", [
+      ["product", "Product", "One section per product board"],
+      ["initiative", "Initiative", "One section per initiative — an initiative can span products"],
+    ], groupBy, (value) => {
+      groupBy = value;
+      localStorage.setItem("roadmapGroupBy", value);
+      renderAll();
+    }));
+    slot.appendChild(el("span", "pmnav-seg-label", "View"));
+    slot.appendChild(segmented("View changes as", [
+      ["board", "Now / Next / Later", "Three horizon lanes per section"],
+      ["timeline", "Timeline", "Every change on one shared time axis"],
+    ], view, (value) => {
+      view = value;
+      localStorage.setItem("roadmapView", value);
+      renderAll();
+    }));
+  }
+
+  PMNav.ready.then(mountControls);
+
+  // ---- linked tickets (Jira / Azure DevOps) ----
+
+  function ticketBadge(ticket, compact) {
+    // An <a> when we know the URL, a <span> when we don't - a badge that looks clickable
+    // and goes nowhere is worse than one that plainly isn't a link yet.
+    const node = document.createElement(ticket.url ? "a" : "span");
+    node.className = "ticket-badge" + (compact ? " compact" : "") + (ticket.unresolved ? " unresolved" : "");
+    node.dataset.type = ticket.type || "other";
+    if (ticket.url) {
+      node.href = ticket.url;
+      node.target = "_blank";
+      node.rel = "noopener noreferrer";
     }
 
-    card.querySelector(".owner-btn").addEventListener("click", () => {
-      const owner = prompt(
-        "Who is doing this work outside PM Studio (person or team)?\nLeave blank to mark it as built here.",
-        item.owner || ""
-      );
-      if (owner === null) return;
-      patchItem(item, { owner: owner.trim() });
-    });
+    // The tracker's OWN name for the type, not our normalised slug: a team that renamed
+    // "Story" to "Deliverable" should see "Deliverable". The slug only picks the colour.
+    const typeName = ticket.unresolved ? "Not synced" : (ticket.raw_type || "Ticket");
+    node.appendChild(el("span", "ticket-type", typeName));
+    node.appendChild(el("span", "ticket-key", ticket.key));
+    if (ticket.state) node.appendChild(el("span", "ticket-state", ticket.state));
 
-    const statusSelect = card.querySelector(".status-select");
-    for (const [value, label] of Object.entries({ pending: "Pending", in_progress: "In progress", done: "Done" })) {
-      const opt = document.createElement("option");
-      opt.value = value; opt.textContent = label; opt.selected = value === item.status;
+    node.title = ticket.unresolved
+      ? `${ticket.key} is linked in ${ticket.tracker_label || ticket.tracker_id} but was not in the last sync. ` +
+        `It may be new, outside the configured projects, or the tracker may be unreachable.`
+      : `${typeName} ${ticket.key} — ${ticket.title || "(no title)"}\n` +
+        `${ticket.tracker_label || ticket.tracker_id}${ticket.state ? " · " + ticket.state : ""}`;
+    return node;
+  }
+
+  // ---- the change, in its two shapes ----
+
+  function chip(text, className) {
+    const node = el("span", "chip" + (className ? " " + className : ""), text);
+    node.title = text;
+    return node;
+  }
+
+  // Rebuilt whenever the work model changes, rather than per card - a full board render
+  // asks for a change's project once per chip, and there is one chip per card.
+  let PROJECTS_BY_ID = {};
+  function indexProjects() {
+    PROJECTS_BY_ID = Object.fromEntries(PORTFOLIO.projects.map((p) => [p.id, p]));
+  }
+
+  /* The metadata a change carries, minus whatever the surrounding section already says.
+     `omit` is how one function serves both groupings: a product section doesn't repeat
+     the product on every card, an initiative section doesn't repeat the initiative. */
+  function metaChips(item, omit = {}) {
+    const chips = [];
+    if (!omit.product) chips.push(chip(PRODUCTS[item.product] || item.product));
+    const project = PROJECTS_BY_ID[item.project_id];
+    if (project) chips.push(chip(project.title));
+    // Alignment is a practice the board surfaces, never a validation that blocks work -
+    // so an unaligned change is flagged on its card and still shown everywhere else.
+    else chips.push(chip("unaligned", "warn"));
+    if (item.owner) chips.push(chip(`External — ${item.owner}`, "owner"));
+    // The schedule, in whatever shape it has. `is_overdue` is computed server-side
+    // (roadmap.py) so the board and the PM's context block never disagree about what
+    // "late" means on a machine whose clock or timezone differs.
+    if (item.is_overdue) {
+      chips.push(chip(`Overdue — ${dateLabel(item.target_at)}`, "late"));
+    } else if (item.start_at && item.target_at) {
+      chips.push(chip(`${dateLabel(item.start_at)} → ${dateLabel(item.target_at)}`, "dates"));
+    } else if (item.target_at) {
+      chips.push(chip(`Target ${dateLabel(item.target_at)}`, "dates"));
+    } else if (item.start_at) {
+      chips.push(chip(`Started ${dateLabel(item.start_at)}`, "dates"));
+    }
+    return chips;
+  }
+
+  /* Every write the board can make to one change, in one place, used by the card in the
+     lane view and by the detail panel in the timeline view. */
+  function itemControls(item) {
+    const row = el("div", "controls");
+
+    const statusSelect = el("select", "mini");
+    statusSelect.title = "Status";
+    for (const [value, label] of Object.entries(STATUS_LABEL)) {
+      const opt = el("option", null, label);
+      opt.value = value;
+      opt.selected = value === item.status;
       statusSelect.appendChild(opt);
     }
     statusSelect.addEventListener("change", () => patchItem(item, { status: statusSelect.value }));
+    row.appendChild(statusSelect);
 
-    const bucketSelect = card.querySelector(".bucket-select");
+    const bucketSelect = el("select", "mini");
+    bucketSelect.title = "Horizon";
     for (const [value, label] of BUCKETS) {
-      const opt = document.createElement("option");
-      opt.value = value; opt.textContent = label; opt.selected = value === item.bucket;
+      const opt = el("option", null, label);
+      opt.value = value;
+      opt.selected = value === item.bucket;
       bucketSelect.appendChild(opt);
     }
     bucketSelect.addEventListener("change", () => patchItem(item, { bucket: bucketSelect.value }));
+    row.appendChild(bucketSelect);
 
-    const moveSelect = card.querySelector(".move-select");
-    const placeholder = document.createElement("option");
-    placeholder.value = ""; placeholder.textContent = "Move to…";
+    const moveSelect = el("select", "mini");
+    moveSelect.title = "Move to another product";
+    const placeholder = el("option", null, "Move to…");
+    placeholder.value = "";
     moveSelect.appendChild(placeholder);
     for (const [id, label] of Object.entries(PRODUCTS)) {
       if (id === item.product) continue;
-      const opt = document.createElement("option");
-      opt.value = id; opt.textContent = label;
+      const opt = el("option", null, label);
+      opt.value = id;
       moveSelect.appendChild(opt);
     }
     moveSelect.addEventListener("change", () => {
@@ -758,54 +1091,143 @@
       // (see agent.py) omits this and lands untriaged for the destination to review.
       patchItem(item, { move_to_product: target, triaged: true });
     });
+    row.appendChild(moveSelect);
 
-    card.querySelector(".del").addEventListener("click", () => {
+    // The schedule. Two native date pickers rather than a prompt(), because a date is
+    // the one field on this card where free text would mean parsing failures for a
+    // stakeholder typing "end of Sept". Either can be cleared on its own; the server
+    // refuses a start after its target and says so.
+    for (const [field, label] of [["start_at", "Start"], ["target_at", "Target"]]) {
+      const wrap = el("label", "date-field");
+      wrap.appendChild(el("span", null, label));
+      const input = el("input", "mini");
+      input.type = "date";
+      input.value = item[field] || "";
+      input.title = `${label} date — clear the field to remove it`;
+      input.addEventListener("change", () => patchItem(item, { [field]: input.value }));
+      wrap.appendChild(input);
+      row.appendChild(wrap);
+    }
+
+    const ownerBtn = el("button", null, "Owner…");
+    ownerBtn.type = "button";
+    ownerBtn.title = "Track work done by another person or team";
+    ownerBtn.addEventListener("click", () => {
+      const owner = prompt(
+        "Who is doing this work outside PM Studio (person or team)?\nLeave blank to mark it as built here.",
+        item.owner || ""
+      );
+      if (owner === null) return;
+      patchItem(item, { owner: owner.trim() });
+    });
+    row.appendChild(ownerBtn);
+
+    if (TRACKERS.configured) {
+      const ticketBtn = el("button", null, item.ticket ? "Ticket…" : "Link ticket…");
+      ticketBtn.type = "button";
+      ticketBtn.title = item.ticket
+        ? `Change or remove the ${item.ticket.key} link`
+        : "Link this change to one Jira or Azure DevOps ticket";
+      ticketBtn.addEventListener("click", () => openTicketPicker(item));
+      row.appendChild(ticketBtn);
+    }
+
+    const del = el("button", "del", "Delete");
+    del.type = "button";
+    del.addEventListener("click", () => {
       if (!confirm(`Delete "${item.title}"?`)) return;
       fetch(`/roadmap/${item.product}/items/${item.id}`, { method: "DELETE" }).catch(() => {});
     });
+    row.appendChild(del);
+
+    return row;
+  }
+
+  function itemCard(item, omit) {
+    const card = el("article", "card" + (openCards.has(item.id) ? " open" : ""));
+
+    const main = el("button", "card-main");
+    main.type = "button";
+    main.setAttribute("aria-expanded", String(openCards.has(item.id)));
+    const dot = el("span", `status-dot ${item.status}`);
+    dot.title = STATUS_LABEL[item.status] || item.status;
+    main.appendChild(dot);
+    main.appendChild(el("span", "card-title", item.title));
+    main.addEventListener("click", () => {
+      const nowOpen = !openCards.has(item.id);
+      if (nowOpen) openCards.add(item.id); else openCards.delete(item.id);
+      card.classList.toggle("open", nowOpen);
+      main.setAttribute("aria-expanded", String(nowOpen));
+    });
+    card.appendChild(main);
+
+    // The ticket badge is a real link, so it sits outside the toggle button rather than
+    // nested inside one - a link inside a button is neither reliably clickable nor valid.
+    const meta = el("div", "card-meta");
+    for (const node of metaChips(item, omit)) meta.appendChild(node);
+    if (item.ticket) meta.appendChild(ticketBadge(item.ticket, true));
+    card.appendChild(meta);
+
+    const body = el("div", "card-body");
+    if (item.description) body.appendChild(el("div", "desc", item.description));
+    if (item.ticket) body.appendChild(ticketBadge(item.ticket, false));
+    body.appendChild(itemControls(item));
+    card.appendChild(body);
 
     return card;
   }
 
   function suggestionCard(item) {
-    const card = document.createElement("div");
-    card.className = "suggestion-card";
-    card.innerHTML = `
-      <div class="body">
-        <div class="title"></div>
-        <div class="from"></div>
-        ${item.description ? `<div class="desc"></div>` : ""}
-      </div>
-      <div class="actions">
-        <button type="button" class="accept">Accept</button>
-        <button type="button" class="dismiss">Dismiss</button>
-      </div>
-    `;
-    card.querySelector(".title").textContent = item.title;
-    card.querySelector(".from").textContent = `Suggested by ${PRODUCTS[item.origin_product] ?? item.origin_product}`;
-    if (item.description) card.querySelector(".desc").textContent = item.description;
-    card.querySelector(".accept").addEventListener("click", () => patchItem(item, { triaged: true }));
-    card.querySelector(".dismiss").addEventListener("click", () => {
+    const card = el("div", "suggestion");
+    const body = el("div", "body");
+    body.appendChild(el("div", "title", item.title));
+    body.appendChild(el("div", "from",
+      `Suggested by ${PRODUCTS[item.origin_product] ?? item.origin_product}`
+      + (item.description ? ` — ${item.description}` : "")));
+    card.appendChild(body);
+
+    const actions = el("div", "actions");
+    const accept = el("button", "accept", "Accept");
+    accept.type = "button";
+    accept.addEventListener("click", () => patchItem(item, { triaged: true }));
+    const dismiss = el("button", null, "Dismiss");
+    dismiss.type = "button";
+    dismiss.addEventListener("click", () => {
       fetch(`/roadmap/${item.product}/items/${item.id}`, { method: "DELETE" }).catch(() => {});
     });
+    actions.appendChild(accept);
+    actions.appendChild(dismiss);
+    card.appendChild(actions);
     return card;
   }
 
+  /* A PATCH can now be refused on its CONTENT, not just on permissions - a malformed
+     date, or a start after its target, is a 400 naming the reason. Silently swallowing
+     that would leave the control showing a value the server never stored, so the reason
+     is shown and the board is refetched to put the control back to the truth. */
   function patchItem(item, fields) {
-    fetch(`/roadmap/${item.product}/items/${item.id}`, {
+    return fetch(`/roadmap/${item.product}/items/${item.id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(fields),
-    }).catch(() => {});
+    })
+      .then((r) => {
+        if (r.ok) return;
+        return r.json().catch(() => ({})).then((body) => {
+          alert(body.detail || "That change could not be saved.");
+          loadBoard();
+        });
+      })
+      .catch(() => {});
   }
 
-  function addForm(product, bucket) {
-    const form = document.createElement("form");
-    form.className = "add-form";
+  function addForm(product, bucket, projectId) {
+    const form = el("form", "add-form");
     form.innerHTML = `
       <input type="text" placeholder="Title" class="title" required />
       <textarea placeholder="Description (optional)" class="desc" rows="2"></textarea>
-      <input type="text" placeholder="External owner (optional — person/team doing this outside PM Studio)" class="owner" />
+      <input type="text" placeholder="External owner (optional)" class="owner" />
+      <label class="date-field"><span>Target</span><input type="date" class="mini target" /></label>
       <div class="buttons">
         <button type="button" class="cancel">Cancel</button>
         <button type="submit" class="primary">Add</button>
@@ -816,261 +1238,545 @@
       e.preventDefault();
       const title = form.querySelector(".title").value.trim();
       if (!title) return;
-      const description = form.querySelector(".desc").value.trim();
-      const owner = form.querySelector(".owner").value.trim();
+      const payload = {
+        title,
+        description: form.querySelector(".desc").value.trim(),
+        owner: form.querySelector(".owner").value.trim(),
+        // Only the target is offered here: a date you commit to at the moment you raise
+        // the change. A start date is something you set when work actually begins, so
+        // it lives on the card rather than in the create form.
+        target_at: form.querySelector(".target").value,
+        bucket,
+        status: "pending",
+      };
+      // Adding from inside an initiative section means the change belongs to that
+      // initiative's work - so it lands on its project rather than unaligned.
+      if (projectId) payload.project_id = projectId;
       fetch(`/roadmap/${product}/items`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title, description, bucket, status: "pending", owner }),
-      }).then(() => {
-        form.querySelector(".title").value = "";
-        form.querySelector(".desc").value = "";
-        form.querySelector(".owner").value = "";
+        body: JSON.stringify(payload),
+      }).then((r) => {
+        // Kept open with the typed values intact when the server refuses it - clearing
+        // the form on a rejected date would throw away what the user just wrote.
+        if (!r.ok) {
+          return r.json().catch(() => ({})).then((body) => {
+            alert(body.detail || "That change could not be created.");
+          });
+        }
+        form.reset();
         form.classList.remove("open");
       }).catch(() => {});
     });
     return form;
   }
 
-  function renderProduct(product) {
-    const items = itemsByProduct[product] ?? [];
-    const open = items.filter((i) => i.status !== "done");
-    const shipped = items
-      .filter((i) => i.status === "done")
-      .sort((a, b) => (b.shipped_at ?? b.updated_at) - (a.shipped_at ?? a.updated_at))
-      .slice(0, 8);
-    const suggestions = open.filter((i) => i.origin_product !== product && !i.triaged);
-
-    const section = document.createElement("section");
-    section.className = "product";
-    section.dataset.product = product;
-    if (collapsedProducts.has(product)) section.classList.add("collapsed");
-    section.innerHTML = `
-      <div class="product-head">
-        <h2><span class="chevron">&#9662;</span><span class="name"></span><span class="inprogress-badge"></span></h2>
-        <span class="count"></span>
-      </div>
-      <div class="suggestions"></div>
-      <div class="columns"></div>
-    `;
-    const nowCount = open.filter((i) => i.bucket === "now").length;
-    const inProgressCount = open.filter((i) => i.status === "in_progress").length;
-    const nextCount = open.filter((i) => i.bucket === "next").length;
-
-    section.querySelector(".name").textContent = PRODUCTS[product] ?? product;
-    const inprogressBadge = section.querySelector(".inprogress-badge");
-    if (inProgressCount > 0) {
-      inprogressBadge.textContent = `${inProgressCount} in progress`;
-      inprogressBadge.style.display = "";
-    } else {
-      inprogressBadge.style.display = "none";
-    }
-    section.querySelector(".count").textContent =
-      `${open.length} open — ${nowCount} now · ${inProgressCount} in progress · ${nextCount} next`;
-    section.querySelector(".product-head").addEventListener("click", () => {
-      const nowCollapsed = section.classList.toggle("collapsed");
-      if (nowCollapsed) collapsedProducts.add(product); else collapsedProducts.delete(product);
-      persistCollapsed();
-    });
-
-    const suggestionsEl = section.querySelector(".suggestions");
-    for (const item of suggestions) suggestionsEl.appendChild(suggestionCard(item));
-
-    const columnsEl = section.querySelector(".columns");
-    for (const [bucketValue, bucketLabel] of BUCKETS) {
-      const bucketItems = open.filter((i) => i.bucket === bucketValue && !suggestions.includes(i));
-      const col = document.createElement("div");
-      col.className = "column";
-      col.innerHTML = `
-        <div class="column-head">
-          <h3>${bucketLabel}</h3>
-          <button type="button" class="add-btn" title="Add item">+</button>
-        </div>
-      `;
-      const form = addForm(product, bucketValue);
-      col.appendChild(form);
-      col.querySelector(".add-btn").addEventListener("click", () => form.classList.toggle("open"));
-
-      if (bucketItems.length === 0) {
-        const empty = document.createElement("div");
-        empty.className = "empty-col";
-        empty.textContent = "Nothing here.";
-        col.appendChild(empty);
-      } else {
-        for (const item of bucketItems) col.appendChild(itemCard(item));
-      }
-      columnsEl.appendChild(col);
-    }
-
-    if (shipped.length > 0) {
-      const details = document.createElement("details");
-      details.className = "shipped";
-      details.innerHTML = `<summary>Recently shipped (${shipped.length})</summary><div class="shipped-list"></div>`;
-      const list = details.querySelector(".shipped-list");
-      for (const item of shipped) {
-        const row = document.createElement("div");
-        row.className = "shipped-item";
-        row.innerHTML = `<span class="when"></span><span class="title"></span>`;
-        row.querySelector(".when").textContent = relativeTime(item.shipped_at ?? item.updated_at);
-        row.querySelector(".title").textContent = item.title;
-        list.appendChild(row);
-      }
-      section.appendChild(details);
-    }
-
-    return section;
-  }
-
-  // ---- the initiative lens ----
+  // ---- grouping: the sections, whichever view draws them ----
 
   function allChanges() {
     return Object.values(itemsByProduct).flat();
   }
 
+  /* A group is { key, title, flags, changes, addTo }.
+     `addTo` is { product, projectId } when a "+" in this section has an unambiguous
+     destination, and null when it does not - an initiative spanning three products has
+     no single board to add to, so it shows no "+" rather than guessing one. */
+  function groupsByProduct() {
+    return Object.keys(PRODUCTS).map((product) => ({
+      key: `product:${product}`,
+      title: PRODUCTS[product] ?? product,
+      flags: [],
+      changes: itemsByProduct[product] ?? [],
+      omit: { product: true },
+      addTo: { product, projectId: null },
+    }));
+  }
+
   /* Mirrors portfolio.group_changes_by_initiative on the server (see
-     /roadmap/by-initiative). Done client-side so the lens re-groups instantly on
+     /roadmap/by-initiative). Done client-side so the grouping re-computes instantly on
      websocket events instead of refetching the whole board on every change made
      anywhere. Every change appears exactly once, and anything the tree doesn't reach
-     lands in one trailing group rather than disappearing. */
-  function groupByInitiative() {
-    const projectsById = Object.fromEntries(PORTFOLIO.projects.map((p) => [p.id, p]));
-    const byProject = new Map();
+     lands in one trailing "Unaligned" group rather than disappearing. */
+  function groupsByInitiative() {
+    const initiativeOf = (change) => {
+      const project = PROJECTS_BY_ID[change.project_id];
+      return project && project.initiative_id ? project.initiative_id : null;
+    };
+
+    const buckets = new Map();
     for (const change of allChanges()) {
-      const key = projectsById[change.project_id] ? change.project_id : null;
-      if (!byProject.has(key)) byProject.set(key, []);
-      byProject.get(key).push(change);
+      const key = initiativeOf(change);
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(change);
     }
-    const entry = (project) => ({ project, changes: byProject.get(project.id) || [] });
 
-    const groups = PORTFOLIO.initiatives.map((initiative) => ({
-      initiative,
-      projects: PORTFOLIO.projects
-        .filter((p) => p.initiative_id === initiative.id)
-        .map(entry),
-    }));
+    const groups = PORTFOLIO.initiatives.map((initiative) => {
+      const changes = buckets.get(initiative.id) || [];
+      const flags = [];
+      if (initiative.is_maintenance) flags.push(["always open", false]);
+      if (initiative.status === "closed") flags.push(["closed", false]);
+      // The product spread is the point of this grouping: it is what a per-product
+      // board structurally cannot show.
+      const products = new Set(changes.map((c) => c.product));
+      if (products.size > 1) flags.push([`${products.size} products`, false]);
+      const projects = PORTFOLIO.projects.filter((p) => p.initiative_id === initiative.id);
+      return {
+        key: `initiative:${initiative.id}`,
+        title: initiative.title,
+        flags,
+        changes,
+        omit: {},
+        // Unambiguous only when the whole initiative lives on one product AND one
+        // project; otherwise a "+" would have to guess where the change belongs.
+        addTo: products.size === 1 && projects.length === 1
+          ? { product: [...products][0], projectId: projects[0].id }
+          : null,
+      };
+    });
 
-    const loose = PORTFOLIO.projects.filter((p) => !p.initiative_id).map(entry);
-    const unassigned = byProject.get(null) || [];
-    if (unassigned.length) loose.push({ project: null, changes: unassigned });
-    if (loose.length) groups.push({ initiative: null, projects: loose });
+    const unaligned = buckets.get(null) || [];
+    if (unaligned.length || !groups.length) {
+      groups.push({
+        key: "initiative:none",
+        title: "Unaligned",
+        flags: [["no initiative", true]],
+        changes: unaligned,
+        omit: {},
+        addTo: null,
+      });
+    }
     return groups;
   }
 
-  function flag(text, warn) {
-    const span = document.createElement("span");
-    span.className = warn ? "lens-flag warn" : "lens-flag";
-    span.textContent = text;
-    return span;
+  function currentGroups() {
+    return groupBy === "initiative" ? groupsByInitiative() : groupsByProduct();
   }
 
-  function renderProjectBlock(entry) {
-    const block = document.createElement("div");
-    block.className = "project-block";
+  // ---- the now / next / later view ----
 
-    const head = document.createElement("div");
-    head.className = "project-head";
-    const name = document.createElement("span");
-    name.textContent = entry.project ? entry.project.title : "No project";
-    head.appendChild(name);
-    if (entry.project?.is_catch_all) head.appendChild(flag("catch-all"));
-    if (!entry.project) head.appendChild(flag("unassigned", true));
-    if (entry.project?.status === "closed") head.appendChild(flag("closed"));
-    const count = document.createElement("span");
-    count.className = "count";
-    const open = entry.changes.filter((c) => c.status !== "done").length;
-    count.textContent = `${entry.changes.length} change${entry.changes.length === 1 ? "" : "s"}`
-      + (open === entry.changes.length ? "" : ` · ${open} open`);
-    head.appendChild(count);
-    block.appendChild(head);
+  function renderLanes(group, container) {
+    const open = group.changes.filter((i) => i.status !== "done");
+    const suggestions = open.filter((i) => i.origin_product !== i.product && !i.triaged);
 
-    if (!entry.changes.length) {
-      const empty = document.createElement("div");
-      empty.className = "lens-empty";
-      empty.textContent = "Nothing here yet.";
-      block.appendChild(empty);
-      return block;
-    }
-    const grid = document.createElement("div");
-    grid.className = "project-changes";
-    for (const change of entry.changes) grid.appendChild(itemCard(change, { showProduct: true }));
-    block.appendChild(grid);
-    return block;
-  }
-
-  function renderInitiativeGroup(group) {
-    const section = document.createElement("section");
-    section.className = "initiative-group";
-
-    const head = document.createElement("div");
-    head.className = "initiative-head";
-    const title = document.createElement("h2");
-    title.textContent = group.initiative ? group.initiative.title : "Unaligned";
-    head.appendChild(title);
-    if (group.initiative?.is_maintenance) head.appendChild(flag("always open"));
-    if (group.initiative?.status === "closed") head.appendChild(flag("closed"));
-    if (!group.initiative) head.appendChild(flag("no initiative", true));
-    const total = group.projects.reduce((sum, p) => sum + p.changes.length, 0);
-    const count = document.createElement("span");
-    count.className = "count";
-    const productCount = new Set(
-      group.projects.flatMap((p) => p.changes.map((c) => c.product))
-    ).size;
-    count.textContent = `${total} change${total === 1 ? "" : "s"}`
-      // Spelling out the product spread is the point of this lens: it's what the
-      // per-product board structurally cannot show.
-      + (productCount > 1 ? ` across ${productCount} products` : "");
-    head.appendChild(count);
-    section.appendChild(head);
-
-    if (group.initiative && !group.initiative.is_unaligned) {
-      const goals = document.createElement("div");
-      goals.className = "initiative-goals";
-      goals.textContent = `serves ${group.initiative.goal_ids.length} goal`
-        + (group.initiative.goal_ids.length === 1 ? "" : "s");
-      section.appendChild(goals);
+    if (suggestions.length) {
+      const triage = el("div", "triage");
+      for (const item of suggestions) triage.appendChild(suggestionCard(item));
+      container.appendChild(triage);
     }
 
-    for (const entry of group.projects) section.appendChild(renderProjectBlock(entry));
-    return section;
+    const lanes = el("div", "lanes");
+    for (const [value, label] of BUCKETS) {
+      const items = open
+        .filter((i) => i.bucket === value && !suggestions.includes(i))
+        // Soonest commitment first, undated work after it - so a date changes what you
+        // see in this view too, not only on the timeline. ISO dates sort as strings.
+        .sort((a, b) =>
+          (a.target_at ? 0 : 1) - (b.target_at ? 0 : 1)
+          || (a.target_at || "").localeCompare(b.target_at || "")
+          || a.created_at - b.created_at);
+      const lane = el("div", "lane");
+
+      const head = el("div", "lane-head");
+      head.appendChild(el("h3", null, label));
+      head.appendChild(el("span", "n", String(items.length)));
+      lane.appendChild(head);
+
+      if (group.addTo) {
+        const form = addForm(group.addTo.product, value, group.addTo.projectId);
+        const add = el("button", "add-btn", "+");
+        add.type = "button";
+        add.title = `Add a change to ${label}`;
+        add.addEventListener("click", () => form.classList.toggle("open"));
+        head.appendChild(add);
+        lane.appendChild(form);
+      }
+
+      if (!items.length) lane.appendChild(el("div", "lane-empty", "—"));
+      for (const item of items) lane.appendChild(itemCard(item, group.omit));
+      lanes.appendChild(lane);
+    }
+    container.appendChild(lanes);
+
+    const shipped = group.changes
+      .filter((i) => i.status === "done")
+      .sort((a, b) => (b.shipped_at ?? b.updated_at) - (a.shipped_at ?? a.updated_at))
+      .slice(0, 8);
+    if (shipped.length) {
+      const details = el("details", "shipped");
+      details.appendChild(el("summary", null, `Recently shipped (${shipped.length})`));
+      const list = el("div", "shipped-list");
+      for (const item of shipped) {
+        const row = el("div", "shipped-item");
+        row.appendChild(el("span", "when", relativeTime(item.shipped_at ?? item.updated_at)));
+        row.appendChild(el("span", null, item.title));
+        list.appendChild(row);
+      }
+      details.appendChild(list);
+      container.appendChild(details);
+    }
   }
 
-  function renderByInitiative() {
-    const groups = groupByInitiative();
-    if (!groups.length) {
-      const empty = document.createElement("p");
-      empty.className = "lens-empty";
+  function renderBoard() {
+    for (const group of currentGroups()) {
+      const section = el("section", "group");
+      if (collapsed.has(group.key)) section.classList.add("collapsed");
+
+      const head = el("button", "group-head");
+      head.type = "button";
+      head.setAttribute("aria-expanded", String(!collapsed.has(group.key)));
+      head.appendChild(el("span", "chevron", "▾"));
+      head.appendChild(el("h2", null, group.title));
+      for (const [text, warn] of group.flags) head.appendChild(chip(text, warn ? "warn" : null));
+
+      const open = group.changes.filter((i) => i.status !== "done");
+      const live = open.filter((i) => i.status === "in_progress").length;
+      const tally = el("div", "tally");
+      tally.appendChild(el("span", null, `${open.length} open`));
+      if (live) tally.appendChild(el("span", "live", `${live} in progress`));
+      tally.appendChild(el("span", null, `${open.filter((i) => i.bucket === "now").length} now`));
+      head.appendChild(tally);
+
+      head.addEventListener("click", () => {
+        const nowCollapsed = section.classList.toggle("collapsed");
+        if (nowCollapsed) collapsed.add(group.key); else collapsed.delete(group.key);
+        head.setAttribute("aria-expanded", String(!nowCollapsed));
+        persistCollapsed();
+      });
+      section.appendChild(head);
+
+      const body = el("div", "group-body");
+      renderLanes(group, body);
+      section.appendChild(body);
+      board.appendChild(section);
+    }
+  }
+
+  /* ---- the timeline view ----------------------------------------------------------
+
+     A change may carry real dates (`start_at` / `target_at`) and may not - both are
+     optional, on purpose, because the board's own unit of planning is the Now / Next /
+     Later horizon and a change nobody has committed to a date for is a normal change,
+     not an incomplete one. So a bar is drawn from whichever is available, and SAYS
+     WHICH:
+
+       solid    the span is real - dates the change carries, or, for a shipped change,
+                the history it actually has.
+       hatched  the span is derived from the horizon: "planned for roughly here". It
+                must never be mistaken for a commitment.
+
+     A diamond marks the target date. On a shipped change it stays put, so the gap
+     between the end of the bar and the diamond is the slip, filled when it shipped on
+     time and red when it did not. A dotted tail before a bar is how long the change has
+     been sitting on the board before its span opens - the one thing a lane view cannot
+     show at all. */
+
+  function startOfQuarter(date) {
+    return new Date(date.getFullYear(), Math.floor(date.getMonth() / 3) * 3, 1);
+  }
+  function addMonths(date, n) {
+    return new Date(date.getFullYear(), date.getMonth() + n, 1);
+  }
+
+  function axis() {
+    const q0 = startOfQuarter(new Date());
+    // One quarter of history, then the three horizons: Now is this quarter, Next the
+    // one after, Later the two beyond that. Fifteen months, which fits without
+    // scrolling on a normal window and keeps a month column readable.
+    return {
+      start: +addMonths(q0, -3),
+      end: +addMonths(q0, 12),
+      bands: {
+        now: [+q0, +addMonths(q0, 3)],
+        next: [+addMonths(q0, 3), +addMonths(q0, 6)],
+        later: [+addMonths(q0, 6), +addMonths(q0, 12)],
+      },
+    };
+  }
+
+  function barFor(item, ax) {
+    const band = ax.bands[item.bucket] || ax.bands.later;
+    const raised = item.created_at * 1000;
+    const start = dateMs(item.start_at);
+    const target = endOfDayMs(item.target_at);
+    const lines = [];
+
+    if (item.start_at) lines.push(`starts ${dateLabel(item.start_at)}`);
+    if (item.target_at) lines.push(`target ${dateLabel(item.target_at)}`);
+
+    if (item.status === "done") {
+      const shipped = (item.shipped_at ?? item.updated_at) * 1000;
+      // A shipped change is history, so the bar is measured, not planned: from when
+      // work began (its own start date if it has one) to when it actually shipped.
+      const from = Math.min(start ?? raised, shipped);
+      if (target != null) {
+        const slip = daysBetween(target, shipped);
+        lines.push(slip > 0 ? `shipped ${slip}d after target` : "shipped on or before target");
+      }
+      return {
+        start: from, end: shipped, status: "done", derived: false, tail: null, target,
+        targetMet: target == null ? null : shipped <= target,
+        note: [`shipped ${shortDate(shipped)}`, ...lines].join(" · "),
+      };
+    }
+
+    /* Open change. Four shapes, because the missing edge has to be derived from
+       something and the horizon is only the right answer when there is no date at all:
+
+         both dates   the committed span, exactly as given.
+         target only  from today to the target - "from now until due". The horizon is
+                      NOT used for the left edge here: a change bucketed "next" but due
+                      in three weeks would get a bar starting after it was meant to
+                      finish, and the date is the sharper of the two claims.
+         start only   from the start out to the end of its horizon, open-ended.
+         neither      the horizon band, hatched, claiming nothing more.
+
+       `derived` is true only in the last case - a bar with one committed edge is a
+       commitment, and shading it like a guess would undersell it. */
+    const today = todayMs();
+    const overdue = !!item.is_overdue;
+    let from, to, derived = false;
+    if (start != null && target != null) {
+      [from, to] = [start, target];
+    } else if (target != null) {
+      [from, to] = [Math.min(today, target), target];
+    } else if (start != null) {
+      [from, to] = [start, Math.max(band[1], today)];
+    } else {
+      [from, to] = [band[0], band[1]];
+      derived = true;
+    }
+    // An overdue change keeps running to today, so the overrun past its diamond is the
+    // length of the bar rather than something you have to read off the axis.
+    if (overdue) to = Math.max(to, today + 86400000);
+
+    if (derived) {
+      lines.push(`${item.bucket} horizon (${shortDate(band[0])} – ${shortDate(band[1] - 1)})`);
+    } else if (overdue) {
+      lines.push(`OVERDUE by ${daysBetween(dateMs(item.target_at), today)}d`);
+    } else if (target != null) {
+      const left = daysBetween(today, dateMs(item.target_at));
+      lines.push(left === 0 ? "due today" : `${left}d left`);
+    }
+
+    return {
+      start: from,
+      end: to,
+      status: overdue ? "overdue" : item.status,
+      derived,
+      // Only worth drawing when the change predates the span it is waiting on.
+      tail: raised < from ? [raised, from] : null,
+      target,
+      targetMet: null,
+      note: [STATUS_LABEL[item.status], ...lines.filter(Boolean),
+             `on the board since ${shortDate(raised)}`].join(" · "),
+    };
+  }
+
+  function renderTimeline() {
+    const ax = axis();
+    const span = ax.end - ax.start;
+    const pct = (t) => ((t - ax.start) / span) * 100;
+    const clamp = (p) => Math.max(0, Math.min(100, p));
+
+    // Says plainly which bars are dates and which are derived bands - the difference
+    // between a commitment and a horizon is the one thing this view must not blur.
+    const legend = el("div", "gantt-legend");
+    const key = (swatch, text) => {
+      const node = el("span", "key");
+      node.appendChild(el("span", "swatch " + swatch));
+      node.appendChild(el("span", null, text));
+      legend.appendChild(node);
+    };
+    key("gantt-bar s-pending", "scheduled");
+    key("gantt-bar s-in_progress", "in progress");
+    key("gantt-bar s-done", "shipped");
+    key("gantt-bar s-overdue", "overdue");
+    key("gantt-bar s-pending derived", "no dates — horizon only");
+    key("gantt-target", "target date");
+    key("gantt-age", "waiting on the board");
+    key("today", "today");
+    board.appendChild(legend);
+
+    const scroll = el("div", "gantt-scroll");
+    const gantt = el("div", "gantt");
+
+    // Months and quarters, positioned from real timestamps rather than as equal cells -
+    // February is not the same width in time as March.
+    const months = [];
+    for (let d = new Date(ax.start); +d < ax.end; d = addMonths(d, 1)) months.push(new Date(d));
+
+    const head = el("div", "gantt-head");
+    head.appendChild(el("div"));
+
+    const scale = el("div", "gantt-scale");
+    for (const month of months) {
+      const left = pct(+month);
+      const width = pct(+addMonths(month, 1)) - left;
+      if (month.getMonth() % 3 === 0) {
+        const q = el("div", "gantt-quarter",
+          `Q${Math.floor(month.getMonth() / 3) + 1} ${month.getFullYear()}`);
+        q.style.left = left + "%";
+        q.style.width = (width * 3) + "%";
+        if (+month === +startOfQuarter(new Date())) q.classList.add("is-current");
+        scale.appendChild(q);
+      }
+      const m = el("div", "gantt-month",
+        month.toLocaleDateString(undefined, { month: "short" }));
+      m.style.left = left + "%";
+      m.style.width = width + "%";
+      scale.appendChild(m);
+    }
+    const todayHead = el("div", "gantt-today head");
+    todayHead.style.left = clamp(pct(Date.now())) + "%";
+    scale.appendChild(todayHead);
+    head.appendChild(scale);
+    gantt.appendChild(head);
+
+    const body = el("div", "gantt-body");
+    const lines = el("div", "gantt-lines");
+    lines.setAttribute("aria-hidden", "true");
+    for (const month of months) {
+      const line = el("div", month.getMonth() % 3 === 0 ? "q" : "m");
+      line.style.left = pct(+month) + "%";
+      lines.appendChild(line);
+    }
+    const today = el("div", "gantt-today");
+    today.style.left = clamp(pct(Date.now())) + "%";
+    lines.appendChild(today);
+    body.appendChild(lines);
+
+    for (const group of currentGroups()) {
+      const header = el("div", "gantt-group");
+      header.appendChild(el("h2", null, group.title));
+      const tally = el("div", "tally");
+      // Same flags the lane view puts on a section head - "no initiative" or "closed"
+      // must not be information you can only get by switching views.
+      for (const [text, warn] of group.flags) tally.appendChild(chip(text, warn ? "warn" : null));
+      const open = group.changes.filter((i) => i.status !== "done").length;
+      tally.appendChild(el("span", null,
+        `${group.changes.length} change${group.changes.length === 1 ? "" : "s"} · ${open} open`));
+      header.appendChild(tally);
+      body.appendChild(header);
+
+      // Everything on one axis, but out-of-range history would add rows that draw
+      // nothing - so it is counted instead of listed.
+      const rows = [];
+      let earlier = 0;
+      for (const item of group.changes) {
+        const bar = barFor(item, ax);
+        if (bar.end <= ax.start) { earlier++; continue; }
+        rows.push({ item, bar });
+      }
+      rows.sort((a, b) =>
+        (a.item.status === "done") - (b.item.status === "done")
+        || (BUCKET_RANK[a.item.bucket] ?? 3) - (BUCKET_RANK[b.item.bucket] ?? 3)
+        || a.bar.start - b.bar.start);
+
+      if (!rows.length) {
+        body.appendChild(el("div", "gantt-empty", earlier
+          ? `Nothing in range — ${earlier} shipped earlier.`
+          : "No changes."));
+        continue;
+      }
+
+      for (const { item, bar } of rows) {
+        const row = el("div", "gantt-row");
+
+        const label = el("button", "gantt-label");
+        label.type = "button";
+        label.setAttribute("aria-expanded", String(openCards.has(item.id)));
+        const dot = el("span", `status-dot ${item.status}`);
+        dot.title = STATUS_LABEL[item.status];
+        label.appendChild(dot);
+        label.appendChild(el("span", "name", item.title));
+        if (!group.omit.product) label.appendChild(el("span", "sub", PRODUCTS[item.product] || item.product));
+        else if (item.ticket) label.appendChild(el("span", "sub", item.ticket.key));
+        label.title = `${item.title}\n${bar.note}`;
+        row.appendChild(label);
+
+        const track = el("div", "gantt-track");
+        if (bar.tail) {
+          const tail = el("div", "gantt-age");
+          const left = clamp(pct(bar.tail[0]));
+          tail.style.left = left + "%";
+          tail.style.width = Math.max(0, clamp(pct(bar.tail[1])) - left) + "%";
+          track.appendChild(tail);
+        }
+        const rect = el("div", `gantt-bar s-${bar.status}` + (bar.derived ? " derived" : ""));
+        const left = clamp(pct(bar.start));
+        rect.style.left = left + "%";
+        rect.style.width = Math.max(0.4, clamp(pct(bar.end)) - left) + "%";
+        if (bar.start < ax.start) rect.classList.add("clip-start");
+        if (bar.end > ax.end) rect.classList.add("clip-end");
+        rect.title = bar.note;
+        track.appendChild(rect);
+
+        // Drawn even when it coincides with the bar's own right edge: on an open change
+        // that is the same information twice, but on a shipped one it is the only way
+        // to see that the bar stopped somewhere else.
+        if (bar.target != null && bar.target > ax.start && bar.target < ax.end) {
+          const mark = el("div", "gantt-target"
+            + (bar.targetMet === true ? " met" : "")
+            + (bar.targetMet === false || bar.status === "overdue" ? " missed" : ""));
+          mark.style.left = clamp(pct(bar.target)) + "%";
+          mark.title = `Target ${dateLabel(item.target_at)}`;
+          track.appendChild(mark);
+        }
+        row.appendChild(track);
+
+        // The same controls the lane view's card opens, in the same place: a row that
+        // can be read but not changed would send you back to the other view to act.
+        const detail = el("div", "gantt-detail");
+        detail.hidden = !openCards.has(item.id);
+        if (item.description) detail.appendChild(el("div", "desc", item.description));
+        const chips = el("div", "card-meta");
+        for (const node of metaChips(item, group.omit)) chips.appendChild(node);
+        if (item.ticket) chips.appendChild(ticketBadge(item.ticket, false));
+        detail.appendChild(chips);
+        detail.appendChild(itemControls(item));
+        row.appendChild(detail);
+
+        label.addEventListener("click", () => {
+          const nowOpen = !openCards.has(item.id);
+          if (nowOpen) openCards.add(item.id); else openCards.delete(item.id);
+          detail.hidden = !nowOpen;
+          label.setAttribute("aria-expanded", String(nowOpen));
+        });
+
+        body.appendChild(row);
+      }
+
+      if (earlier) {
+        body.appendChild(el("div", "gantt-empty",
+          `+ ${earlier} shipped before ${shortDate(ax.start)}.`));
+      }
+    }
+
+    gantt.appendChild(body);
+    scroll.appendChild(gantt);
+    board.appendChild(scroll);
+  }
+
+  // ---- render ----
+
+  function renderAll() {
+    board.textContent = "";
+    const slot = document.getElementById("pm-nav-slot");
+    if (slot) mountControls(slot);
+
+    if (!Object.keys(PRODUCTS).length) {
+      board.appendChild(el("p", "lens-empty", "No products are configured."));
+      return;
+    }
+    if (groupBy === "initiative" && !PORTFOLIO.initiatives.length && !allChanges().length) {
+      const empty = el("p", "lens-empty");
       empty.innerHTML =
         'No goals, initiatives or projects yet — set them up on the '
         + '<a href="/portfolio">portfolio page</a>, and changes will group here.';
-      main.appendChild(empty);
+      board.appendChild(empty);
       return;
     }
-    for (const group of groups) main.appendChild(renderInitiativeGroup(group));
-  }
-
-  function renderAll() {
-    main.innerHTML = "";
-    document.getElementById("subtitle").textContent = lens === "initiative"
-      ? "Initiative → project → change · one initiative can span several products"
-      : "Now / Next / Later per product · status tracked independently · cross-product suggestions flagged for triage";
-    for (const button of document.querySelectorAll("#pivot-toggle button")) {
-      button.classList.toggle("active", button.dataset.lens === lens);
-    }
-    if (lens === "initiative") {
-      renderByInitiative();
-      return;
-    }
-    for (const product of Object.keys(PRODUCTS)) {
-      main.appendChild(renderProduct(product));
-    }
-  }
-
-  for (const button of document.querySelectorAll("#pivot-toggle button")) {
-    button.addEventListener("click", () => {
-      lens = button.dataset.lens;
-      localStorage.setItem("roadmapLens", lens);
-      renderAll();
-    });
+    if (view === "timeline") renderTimeline(); else renderBoard();
   }
 
   function upsertItem(item) {
@@ -1095,6 +1801,7 @@
         itemsByProduct = data.items;
         PORTFOLIO = data.portfolio || PORTFOLIO;
         TRACKERS = data.trackers || TRACKERS;
+        indexProjects();
         renderTrackerBar();
         renderAll();
       });
@@ -1106,11 +1813,10 @@
     const bar = document.getElementById("tracker-bar");
     bar.classList.toggle("visible", !!TRACKERS.configured);
     if (!TRACKERS.configured) return;
-    bar.innerHTML = "";
+    bar.textContent = "";
 
     for (const tracker of TRACKERS.trackers) {
       const status = tracker.status;
-      const chip = document.createElement("span");
       // Three states, each explicit: synced, failed, never synced. A tracker that has
       // never run must not look the same as one holding zero tickets.
       const state = !status || (!status.ok && !status.error)
@@ -1118,35 +1824,30 @@
         : status.error
         ? "failed"
         : "ok";
-      chip.className = `tracker-chip ${state}`;
+      const chipEl = el("span", `tracker-chip ${state}`);
+      chipEl.appendChild(el("span", "dot", state === "ok" ? "●" : state === "failed" ? "▲" : "○"));
 
-      const dot = document.createElement("span");
-      dot.className = "dot";
-      dot.textContent = state === "ok" ? "●" : state === "failed" ? "▲" : "○";
-      chip.appendChild(dot);
-
-      const text = document.createElement("span");
+      let text;
       if (!tracker.usable) {
-        text.textContent = `${tracker.label} — not configured: ${tracker.unusable_reason}`;
-        chip.className = "tracker-chip failed";
+        text = `${tracker.label} — not configured: ${tracker.unusable_reason}`;
+        chipEl.className = "tracker-chip failed";
       } else if (state === "failed") {
-        text.textContent = `${tracker.label} — sync failed: ${status.error}`;
+        text = `${tracker.label} — sync failed: ${status.error}`;
       } else if (state === "never") {
-        text.textContent = `${tracker.label} — not synced yet`;
+        text = `${tracker.label} — not synced yet`;
       } else {
         const when = relativeTime(status.finished_at);
-        text.textContent =
+        text =
           `${tracker.label} — ${tracker.ticket_count} ticket${tracker.ticket_count === 1 ? "" : "s"}` +
           (when ? `, synced ${when}` : "") +
           (status.truncated ? " (capped — only the most recently changed were pulled)" : "");
       }
-      chip.appendChild(text);
-      bar.appendChild(chip);
+      chipEl.appendChild(el("span", null, text));
+      bar.appendChild(chipEl);
     }
 
-    const button = document.createElement("button");
+    const button = el("button", null, TRACKERS.syncing ? "Syncing…" : "Sync now");
     button.type = "button";
-    button.textContent = TRACKERS.syncing ? "Syncing…" : "Sync now";
     button.disabled = !!TRACKERS.syncing;
     button.addEventListener("click", () => {
       button.disabled = true;
@@ -1200,47 +1901,35 @@
   function closeTicketPicker() {
     picker.classList.remove("open");
     pickerItem = null;
-    pickerResults.innerHTML = "";
+    pickerResults.textContent = "";
   }
 
   function searchTickets(query) {
     fetch(`/trackers/tickets?q=${encodeURIComponent(query)}&limit=50`)
       .then((r) => r.json())
       .then(({ tickets }) => {
-        pickerResults.innerHTML = "";
+        pickerResults.textContent = "";
         if (!tickets.length) {
-          const empty = document.createElement("div");
-          empty.className = "lens-empty";
-          empty.textContent = TRACKERS.trackers.some((t) => t.ticket_count)
-            ? "No synced ticket matches that. You can still paste a full URL or key above."
-            : "Nothing synced yet — run a sync, or paste a ticket URL or key above.";
-          pickerResults.appendChild(empty);
+          pickerResults.appendChild(el("div", "lens-empty",
+            TRACKERS.trackers.some((t) => t.ticket_count)
+              ? "No synced ticket matches that. You can still paste a full URL or key above."
+              : "Nothing synced yet — run a sync, or paste a ticket URL or key above."));
           return;
         }
         for (const ticket of tickets) {
-          const row = document.createElement("button");
+          const row = el("button", "picker-row");
           row.type = "button";
-          row.className = "picker-row";
-          row.appendChild(ticketBadge({ ...ticket, url: "" }));
-          const title = document.createElement("span");
-          title.className = "row-title";
-          title.textContent = ticket.title || "(no title)";
-          row.appendChild(title);
+          row.appendChild(ticketBadge({ ...ticket, url: "" }, false));
+          row.appendChild(el("span", "row-title", ticket.title || "(no title)"));
           // Already-linked tickets are shown but unpickable: seeing that PROJ-12 is taken
           // is more useful than it silently missing from the list.
           const alreadyThis = pickerItem && pickerItem.ticket && pickerItem.ticket.key === ticket.key
             && pickerItem.ticket.tracker_id === ticket.tracker_id;
           if (ticket.linked && !alreadyThis) {
-            const taken = document.createElement("span");
-            taken.className = "row-taken";
-            taken.textContent = "linked elsewhere";
-            row.appendChild(taken);
+            row.appendChild(el("span", "row-taken", "linked elsewhere"));
             row.disabled = true;
           } else if (alreadyThis) {
-            const taken = document.createElement("span");
-            taken.className = "row-taken";
-            taken.textContent = "current";
-            row.appendChild(taken);
+            row.appendChild(el("span", "row-taken", "current"));
           }
           row.addEventListener("click", () => submitLink({ tracker_id: ticket.tracker_id, ticket_key: ticket.key }));
           pickerResults.appendChild(row);

@@ -1,8 +1,10 @@
 import json
+import re
 import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass
+from datetime import date
 from pathlib import Path
 from typing import Callable, Literal
 
@@ -23,6 +25,66 @@ Status = Literal["pending", "in_progress", "done"]
 # [products] table (TOML order is display order). Empty when the target repo hasn't
 # declared products yet - sessions then run unpinned with no per-product boards.
 PRODUCTS: dict[str, str] = CONFIG.products
+
+# Schedule dates are stored as "YYYY-MM-DD" STRINGS, unlike created_at/updated_at/
+# shipped_at, which are epoch floats. The difference is deliberate and not worth
+# "tidying" into one type: those three are instants - the moment something happened -
+# while a start or a target is a calendar date somebody committed to. Stored as an
+# epoch, a target of 2026-09-30 is really 2026-09-30T00:00:00 in some zone, and renders
+# as the 29th for every reader west of it. A date string means the same day everywhere.
+_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def parse_date(value: str | None, field: str) -> str | None:
+    """Normalises a schedule date for storage. "" (or whitespace) clears it to None;
+    anything else must be an ISO calendar date. Raises ValueError naming the field, so
+    the message is usable straight back to a PM's curl or the board.
+
+    The regex is not redundant with date.fromisoformat: since 3.11 that also accepts
+    "20260930" and full datetimes, and one stored format is what keeps every reader -
+    the board, the PM context block, a JSON diff - comparing like with like.
+    """
+    text = (value or "").strip()
+    if not text:
+        return None
+    if not _DATE_PATTERN.match(text):
+        raise ValueError(f"{field} must be a date as YYYY-MM-DD (got {value!r})")
+    try:
+        date.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError(f"{field} is not a real date: {text}") from exc
+    return text
+
+
+def _check_order(start: str | None, target: str | None) -> None:
+    """Checked against the RESULTING pair, never just the incoming one - a PATCH that
+    sets only `start_at` can invert an order the item already had."""
+    if start and target and start > target:  # ISO dates sort lexicographically
+        raise ValueError(
+            f"start_at ({start}) is after target_at ({target}) - a change cannot be "
+            "scheduled to finish before it begins"
+        )
+
+
+def _schedule_note(item: dict) -> str:
+    """The schedule as a PM reads it in its context block. Says OVERDUE loudly and gives
+    the day count, because "target 2026-09-30" next to a date the model has to work out
+    for itself is exactly the kind of thing it will get wrong or skip."""
+    start, target = item.get("start_at"), item.get("target_at")
+    if not start and not target:
+        return ""
+    if item.get("is_overdue"):
+        late = (date.today() - date.fromisoformat(target)).days
+        return f" [OVERDUE - target was {target}, {late}d ago]"
+    parts = []
+    if start:
+        parts.append(f"starts {start}")
+    if target:
+        parts.append(f"target {target}")
+        if item.get("status") != "done":
+            left = (date.fromisoformat(target) - date.today()).days
+            parts.append("due today" if left == 0 else f"{left}d left")
+    return f" [{', '.join(parts)}]"
 
 
 class TicketAlreadyLinked(Exception):
@@ -82,9 +144,39 @@ class RoadmapItem:
     # is what keeps existing roadmap JSON loading untouched.
     tracker_id: str | None = None
     ticket_key: str | None = None
+    # The schedule, as "YYYY-MM-DD" (see parse_date above). Both optional and both
+    # independently optional: a change can have a target with no start ("due by the
+    # 30th", a milestone), a start with no target ("began on the 1st, no committed end"),
+    # or neither - in which case the timeline falls back to the Now/Next/Later horizon
+    # and says so. Undated is the default and stays a first-class state: this board's
+    # unit of planning is the horizon, and dates are the sharper thing you reach for
+    # when a change actually has a commitment behind it.
+    start_at: str | None = None
+    target_at: str | None = None
+
+    @property
+    def is_overdue(self) -> bool:
+        """Past its target and not shipped. Derived, never stored - a stored flag would
+        be wrong by morning."""
+        return bool(
+            self.target_at
+            and self.status != "done"
+            and self.target_at < date.today().isoformat()
+        )
 
     def to_dict(self) -> dict:
+        """The STORED shape - exactly the fields, so `from_dict(to_dict(x)) == x` and
+        the JSON on disk round-trips."""
         return asdict(self)
+
+    def to_public_dict(self) -> dict:
+        """The shape every reader outside the store gets: stored fields plus what is
+        derived from them. Same split as portfolio.py's Initiative/Project, and the
+        reason is the same - `is_overdue` must never reach the JSON file, where it would
+        be stale by morning and would break `from_dict`."""
+        data = self.to_dict()
+        data["is_overdue"] = self.is_overdue
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "RoadmapItem":
@@ -139,14 +231,14 @@ class RoadmapStore:
     def list_all(self) -> dict[str, list[dict]]:
         by_product: dict[str, list[dict]] = {p: [] for p in PRODUCTS}
         for item in self._items.values():
-            by_product.setdefault(item.product, []).append(item.to_dict())
+            by_product.setdefault(item.product, []).append(item.to_public_dict())
         for product_items in by_product.values():
             product_items.sort(key=lambda i: i["created_at"])
         return by_product
 
     def list_product(self, product: str) -> list[dict]:
         return sorted(
-            (i.to_dict() for i in self._items.values() if i.product == product),
+            (i.to_public_dict() for i in self._items.values() if i.product == product),
             key=lambda i: i["created_at"],
         )
 
@@ -155,7 +247,7 @@ class RoadmapStore:
 
     def list_by_project(self, project_id: str) -> list[dict]:
         return sorted(
-            (i.to_dict() for i in self._items.values() if i.project_id == project_id),
+            (i.to_public_dict() for i in self._items.values() if i.project_id == project_id),
             key=lambda i: i["created_at"],
         )
 
@@ -190,7 +282,7 @@ class RoadmapStore:
         """Changes with no parent project. Reported, not blocked: alignment is a
         practice the board surfaces rather than a validation that stops work."""
         return sorted(
-            (i.to_dict() for i in self._items.values() if i.project_id is None),
+            (i.to_public_dict() for i in self._items.values() if i.project_id is None),
             key=lambda i: i["created_at"],
         )
 
@@ -206,12 +298,17 @@ class RoadmapStore:
         origin_product: str | None = None,
         owner: str | None = None,
         project_id: str | None = None,
+        start_at: str | None = None,
+        target_at: str | None = None,
     ) -> RoadmapItem:
         if product not in PRODUCTS:
             raise ValueError(f"Unknown product: {product}")
         origin = origin_product or product
         if origin not in PRODUCTS:
             raise ValueError(f"Unknown origin_product: {origin}")
+        start = parse_date(start_at, "start_at")
+        target = parse_date(target_at, "target_at")
+        _check_order(start, target)
         now = time.time()
         item = RoadmapItem(
             id=uuid.uuid4().hex[:8],
@@ -231,11 +328,13 @@ class RoadmapStore:
             shipped_at=now if status == "done" else None,
             owner=(owner or "").strip() or None,
             project_id=(project_id or "").strip() or None,
+            start_at=start,
+            target_at=target,
         )
         with self._lock:
             self._items[item.id] = item
             self._save_product(product)
-        self._notify({"type": "roadmap_item_upserted", "item": item.to_dict()})
+        self._notify({"type": "roadmap_item_upserted", "item": item.to_public_dict()})
         return item
 
     def update(
@@ -248,11 +347,22 @@ class RoadmapStore:
         description: str | None = None,
         owner: str | None = None,
         project_id: str | None = None,
+        start_at: str | None = None,
+        target_at: str | None = None,
     ) -> RoadmapItem:
         with self._lock:
             item = self._items.get(item_id)
             if item is None:
                 raise KeyError(f"Unknown roadmap item: {item_id}")
+            # Both dates resolved and checked BEFORE anything is written, so a PATCH
+            # carrying an impossible schedule leaves the item exactly as it was rather
+            # than half-applied. Same convention as owner/project_id: None = no change,
+            # "" = clear.
+            start = item.start_at if start_at is None else parse_date(start_at, "start_at")
+            target = item.target_at if target_at is None else parse_date(target_at, "target_at")
+            _check_order(start, target)
+            item.start_at = start
+            item.target_at = target
             if bucket is not None:
                 item.bucket = bucket
             if status is not None:
@@ -274,7 +384,7 @@ class RoadmapStore:
                 item.project_id = project_id.strip() or None
             item.updated_at = time.time()
             self._save_product(item.product)
-        self._notify({"type": "roadmap_item_upserted", "item": item.to_dict()})
+        self._notify({"type": "roadmap_item_upserted", "item": item.to_public_dict()})
         return item
 
     def link_ticket(
@@ -305,7 +415,7 @@ class RoadmapStore:
             item.ticket_key = key
             item.updated_at = time.time()
             self._save_product(item.product)
-        self._notify({"type": "roadmap_item_upserted", "item": item.to_dict()})
+        self._notify({"type": "roadmap_item_upserted", "item": item.to_public_dict()})
         return item
 
     def unlink_ticket(self, item_id: str) -> RoadmapItem:
@@ -319,7 +429,7 @@ class RoadmapStore:
             item.ticket_key = None
             item.updated_at = time.time()
             self._save_product(item.product)
-        self._notify({"type": "roadmap_item_upserted", "item": item.to_dict()})
+        self._notify({"type": "roadmap_item_upserted", "item": item.to_public_dict()})
         return item
 
     def move(
@@ -368,7 +478,7 @@ class RoadmapStore:
         # a delete (remove from the old product's columns) and an upsert (add to the
         # new one) - no new message type needed on the board's websocket handler.
         self._notify({"type": "roadmap_item_deleted", "id": item_id, "product": from_product})
-        self._notify({"type": "roadmap_item_upserted", "item": item.to_dict()})
+        self._notify({"type": "roadmap_item_upserted", "item": item.to_public_dict()})
         return item
 
     def delete(self, item_id: str) -> None:
@@ -409,6 +519,7 @@ class RoadmapStore:
                     f' [EXTERNAL - owned by {i["owner"]}: track it, never dispatch '
                     "dev work for it]"
                 )
+            flag += _schedule_note(i)
             if i.get("ticket_key"):
                 ticket = (
                     ticket_lookup(i["tracker_id"], i["ticket_key"])
@@ -444,6 +555,10 @@ class RoadmapStore:
                 f'[{i["bucket"]}/{i["status"]}]'
                 + (f' (external: {i["owner"]})' if i.get("owner") else "")
                 + f' {i["title"]}'
+                # Only the fact of being late travels into another product's digest -
+                # this view is awareness, and someone else's slipping date is worth
+                # knowing about where their exact start date is not.
+                + (" (OVERDUE)" if i.get("is_overdue") else "")
                 for i in items
             )
             lines.append(f"- {PRODUCTS[product]}: {summary}")

@@ -1404,6 +1404,8 @@ def create_roadmap_item(product: str, request: Request, payload: dict = Body(...
             origin_product=(payload.get("origin_product") or "").strip() or None,
             owner=(payload.get("owner") or "").strip() or None,
             project_id=_resolve_project_id(payload),
+            start_at=payload.get("start_at"),
+            target_at=payload.get("target_at"),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1413,7 +1415,7 @@ def create_roadmap_item(product: str, request: Request, payload: dict = Body(...
     # change is the thing worth keeping, and the error says exactly what to retry.
     if payload.get("ticket") or payload.get("ticket_key"):
         item = _apply_ticket_link(actor, item.id, payload)
-    return _with_ticket(item.to_dict())
+    return _with_ticket(item.to_public_dict())
 
 
 @app.patch("/roadmap/{product}/items/{item_id}")
@@ -1451,27 +1453,34 @@ def update_roadmap_item(product: str, item_id: str, request: Request, payload: d
         _audit(actor, "roadmap.item_moved", item_id, f"{product} -> {move_to}")
         # Joined like every other item response - a move must not hand back a shape whose
         # `ticket` key is missing, or the board would drop the badge until a reload.
-        return _with_ticket(item.to_dict())
+        return _with_ticket(item.to_public_dict())
 
-    item = roadmap_store.update(
-        item_id,
-        bucket=payload.get("bucket"),
-        status=payload.get("status"),
-        triaged=payload.get("triaged"),
-        title=payload.get("title"),
-        description=payload.get("description"),
-        # None = no change; "" = clear external ownership (see RoadmapStore.update).
-        owner=payload.get("owner"),
-        # Same convention: "" detaches the change from its project.
-        project_id=_validated_project_id(payload.get("project_id")),
-    )
+    try:
+        item = roadmap_store.update(
+            item_id,
+            bucket=payload.get("bucket"),
+            status=payload.get("status"),
+            triaged=payload.get("triaged"),
+            title=payload.get("title"),
+            description=payload.get("description"),
+            # None = no change; "" = clear external ownership (see RoadmapStore.update).
+            owner=payload.get("owner"),
+            # Same convention: "" detaches the change from its project.
+            project_id=_validated_project_id(payload.get("project_id")),
+            # And again for the schedule: "" clears a date, a malformed one or a start
+            # after its target is a 400 with the reason, and the item is left untouched.
+            start_at=payload.get("start_at"),
+            target_at=payload.get("target_at"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     # Ticket linking is applied after the ordinary field update so one PATCH can do both,
     # and it is keyed off `ticket` being PRESENT rather than truthy - `"ticket": ""` is how
     # a caller unlinks, matching the `owner`/`project_id` convention above.
     if "ticket" in payload or "ticket_key" in payload:
         item = _apply_ticket_link(actor, item_id, payload)
     _audit(actor, "roadmap.item_updated", f"{product}/{item_id}")
-    return _with_ticket(item.to_dict())
+    return _with_ticket(item.to_public_dict())
 
 
 def _apply_ticket_link(actor: User | None, item_id: str, payload: dict) -> RoadmapItem:

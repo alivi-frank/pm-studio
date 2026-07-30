@@ -10,55 +10,53 @@
  * `data-page` is one of the keys of PAGES below. Session-scoped pages (chat, dashboard)
  * additionally read the session id out of the URL and resolve its title, so the trail
  * says "Sessions > Checkout redesign > Chat" rather than "Sessions > 7f3a91c2".
+ *
+ * The destinations are listed ONCE, in the bar. An earlier version also drew a
+ * Portfolio -> Roadmap -> Sessions flow map in the second row, which re-listed the same
+ * three links directly under themselves; the flow now lives in the bar itself as arrows
+ * BETWEEN those tabs, and the second row says only what the current page is and holds
+ * whatever controls that page mounts into it (see PMNav.ready).
  */
 
 (function () {
   "use strict";
 
-  // The three stops of the work model, in the order intent flows through them. Each is
-  // rendered in the context row as a map of how the pages relate to one another - see
+  // The three stops of the work model, in the order intent flows through them - the
+  // arrows between them in the bar are this relationship, and `what` is the one-line
+  // descriptor the context row shows for whichever stop you are standing on. See
   // docs/ARCHITECTURE.md section 3b for the model this mirrors.
-  var FLOW = [
-    { page: "portfolio", href: "/portfolio", name: "Portfolio", what: "goals · initiatives · projects" },
-    { page: "roadmap", href: "/roadmap", name: "Roadmap", what: "changes · now / next / later" },
-    { page: "sessions", href: "/", name: "Sessions", what: "the work itself" },
+  var CORE_TABS = [
+    { page: "portfolio", href: "/portfolio", label: "Portfolio", what: "goals · initiatives · projects" },
+    { page: "roadmap", href: "/roadmap", label: "Roadmap", what: "changes · now / next / later" },
+    { page: "sessions", href: "/", label: "Sessions", what: "the work itself" },
+  ];
+
+  // The two that sit behind a role. `personal` says whether the page is reachable when
+  // there is no identity at all: Time & cost is (it reports on "this machine"); People
+  // is not - the roster endpoints are enterprise-only, so linking it from a personal
+  // instance would offer a tab whose only content is an error.
+  var ADMIN_TABS = [
+    {
+      page: "costing", href: "/costing", label: "Time & cost", capability: "view_cost", personal: true,
+      what: "each person's session activity, rolled up onto the projects",
+    },
+    {
+      page: "people", href: "/people", label: "People", role: "admin", personal: false,
+      what: "who may see and change everything else",
+    },
   ];
 
   // Per-page chrome. `tab` marks which top-level tab lights up (session-scoped pages
-  // light up "Sessions", because that is where they live). `aside` explains a page that
-  // reads the flow without being a stop on it.
+  // light up "Sessions", because that is where they live).
   var PAGES = {
-    sessions: { tab: "sessions", context: "flow" },
-    portfolio: { tab: "portfolio", context: "flow" },
-    roadmap: { tab: "roadmap", context: "flow" },
-    costing: {
-      tab: "costing",
-      context: "flow",
-      aside: "Time & cost rolls each person's session activity up onto the projects above.",
-    },
-    people: {
-      tab: "people",
-      context: "flow",
-      aside: "People decides who may see and change everything above.",
-    },
+    sessions: { tab: "sessions" },
+    portfolio: { tab: "portfolio" },
+    roadmap: { tab: "roadmap" },
+    costing: { tab: "costing" },
+    people: { tab: "people" },
     chat: { tab: "sessions", context: "session", subtab: "chat" },
     dashboard: { tab: "sessions", context: "session", subtab: "dashboard" },
   };
-
-  // Tabs the whole studio always has, then the two that sit behind a role.
-  var CORE_TABS = [
-    { page: "portfolio", href: "/portfolio", label: "Portfolio" },
-    { page: "roadmap", href: "/roadmap", label: "Roadmap" },
-    { page: "sessions", href: "/", label: "Sessions" },
-  ];
-  // `personal` says whether the page is reachable when there is no identity at all.
-  // Time & cost is (it reports on "this machine"); People is not - the roster endpoints
-  // are enterprise-only, so linking it from a personal instance would offer a tab whose
-  // only content is an error.
-  var ADMIN_TABS = [
-    { page: "costing", href: "/costing", label: "Time & cost", capability: "view_cost", personal: true },
-    { page: "people", href: "/people", label: "People", role: "admin", personal: false },
-  ];
 
   function el(tag, className, text) {
     var node = document.createElement(tag);
@@ -91,7 +89,13 @@
   var auth = getJSON("/auth/me");
   var session = sessionId ? getJSON("/sessions/" + sessionId) : Promise.resolve(null);
 
-  window.PMNav = { auth: auth, session: session, sessionId: sessionId };
+  // Resolves with the context row's controls slot once the nav has rendered. A page puts
+  // its OWN view controls there (the roadmap's lens and view toggles, for instance)
+  // instead of growing a third band of chrome below the nav.
+  var resolveReady;
+  var ready = new Promise(function (resolve) { resolveReady = resolve; });
+
+  window.PMNav = { auth: auth, session: session, sessionId: sessionId, ready: ready };
 
   function visibleAdminTabs(info) {
     if (!info || !info.enterprise || !info.user) {
@@ -114,7 +118,14 @@
     bar.appendChild(link("/", "pmnav-brand", "PM Studio"));
 
     var tabs = el("div", "pmnav-tabs");
-    CORE_TABS.forEach(function (tab) {
+    CORE_TABS.forEach(function (tab, i) {
+      // The work model, drawn where the destinations already are: intent narrowing into
+      // work. Decorative - the tabs are the navigation, the arrow is the relationship.
+      if (i > 0) {
+        var arrow = el("span", "pmnav-arrow", "→");
+        arrow.setAttribute("aria-hidden", "true");
+        tabs.appendChild(arrow);
+      }
       tabs.appendChild(makeTab(tab, current, "pmnav-tab"));
     });
 
@@ -151,32 +162,23 @@
 
   function makeTab(tab, current, className) {
     var a = link(tab.href, className, tab.label);
+    if (tab.what) a.title = tab.label + " — " + tab.what;
     if (tab.page === current) a.setAttribute("aria-current", "page");
     return a;
   }
 
-  function buildFlow(spec) {
+  // Row 2 for an ordinary page: the name of where you are and what it holds. No link
+  // set - the bar above is the only place destinations are listed.
+  function buildPageContext(spec) {
     var row = el("div", "pmnav-context");
-    var list = el("ol", "pmnav-flow");
-    list.setAttribute("aria-label", "How the studio's pages relate");
+    var all = CORE_TABS.concat(ADMIN_TABS);
+    var here = null;
+    all.forEach(function (tab) { if (tab.page === spec.tab) here = tab; });
 
-    FLOW.forEach(function (stop, i) {
-      if (i > 0) {
-        var arrow = el("li", "pmnav-arrow", "→");
-        arrow.setAttribute("aria-hidden", "true");
-        list.appendChild(arrow);
-      }
-      var item = el("li", "pmnav-step" + (stop.page === spec.tab ? " is-here" : ""));
-      var a = link(stop.href, null);
-      a.appendChild(el("span", "pmnav-step-name", stop.name));
-      a.appendChild(el("span", "pmnav-step-what", stop.what));
-      if (stop.page === spec.tab) a.setAttribute("aria-current", "page");
-      item.appendChild(a);
-      list.appendChild(item);
-    });
-
-    row.appendChild(list);
-    if (spec.aside) row.appendChild(el("span", "pmnav-aside", spec.aside));
+    var where = el("div", "pmnav-where");
+    where.appendChild(el("span", "pmnav-where-name", here ? here.label : ""));
+    if (here && here.what) where.appendChild(el("span", "pmnav-where-what", here.what));
+    row.appendChild(where);
     return row;
   }
 
@@ -226,9 +228,16 @@
     auth.then(function (info) {
       mount.textContent = "";
       mount.appendChild(buildBar(spec.tab, info));
-      mount.appendChild(
-        spec.context === "session" ? buildSessionContext(spec) : buildFlow(spec)
-      );
+      var context = spec.context === "session"
+        ? buildSessionContext(spec)
+        : buildPageContext(spec);
+      // Always present, always last in the row, so a page's controls land right-aligned
+      // whether or not it has any - and the row keeps one height either way.
+      var slot = el("div", "pmnav-slot");
+      slot.id = "pm-nav-slot";
+      context.appendChild(slot);
+      mount.appendChild(context);
+      resolveReady(slot);
     });
   }
 

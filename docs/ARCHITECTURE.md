@@ -85,6 +85,32 @@ hiccup must never break a PM turn or dev task. Snapshots are repo-wide; `.gitign
   flagged to PMs as `[EXTERNAL - owned by <owner>: track it, never dispatch dev work
   for it]` in the deep context (and `(external: <owner>)` in the shallow digest);
   PATCH `owner: ""` clears it back to built-here, `owner: null`/absent = no change.
+- **The schedule: `start_at` / `target_at`, both `str|None`, both `"YYYY-MM-DD"`.**
+  Stored as calendar-date **strings**, unlike `created_at`/`updated_at`/`shipped_at`,
+  which are epoch floats — and that split is deliberate, not an inconsistency to tidy
+  away. Those three are *instants*; a start or a target is a *day somebody committed to*.
+  As an epoch, a target of `2026-09-30` is really midnight in some zone and renders as
+  the 29th for every reader west of it. (The board's JS reads them with
+  `new Date(y, m-1, d)` for the same reason — `new Date("2026-09-30")` parses as UTC.)
+  Both are independently optional and all four combinations are legal: a target with no
+  start is a milestone, a start with no target is open-ended work, and **neither is the
+  normal state** — this board plans in horizons first, and dates are the sharper tool you
+  reach for when a change has a real commitment behind it.
+  `parse_date()` normalises on write (`""` clears, `null`/absent = no change, anything
+  else must match `^\d{4}-\d{2}-\d{2}$` *and* be a real date — the regex is not redundant
+  with `date.fromisoformat`, which since 3.11 also accepts `20260930` and full
+  datetimes). `_check_order()` runs against the **resulting** pair, so a PATCH setting
+  only `start_at` cannot invert an order the item already had, and both dates are
+  resolved *before* any field is written so a rejected schedule leaves the item
+  completely untouched rather than half-applied. Both surface as HTTP 400 with the
+  reason.
+- **`is_overdue` is derived, never stored** — `target_at` in the past and `status !=
+  "done"`. Hence the `to_dict()` / `to_public_dict()` split (same convention as
+  `portfolio.py`'s Initiative/Project): `to_dict()` is the stored shape and round-trips
+  through `from_dict`; `to_public_dict()` adds `is_overdue` and is what every read, every
+  API response and every websocket `roadmap_item_upserted` payload hands out. A stored
+  flag would be wrong by morning — and would break `from_dict`. Shipping ends overdue but
+  **keeps** `target_at`, which is what lets the timeline draw the slip.
 - `RoadmapStore`: **server-owned** state — one JSON file per product under
   `<workspace_root>/workspace/roadmap/`, git-ignored, read/written ONLY by the always-running
   server process, never per-worktree. Rationale: every session is its own worktree and
@@ -102,9 +128,14 @@ hiccup must never break a PM turn or dev task. Snapshots are repo-wide; `.gitign
   the old product and an upsert on the new — so clients need no new message type.
 - Context builders for PM turn injection:
   - `describe_own_product(product)` — full depth, open items only (status != done),
-    with `[UNTRIAGED suggestion from <origin> - accept or drop it]` flags.
+    with `[UNTRIAGED suggestion from <origin> - accept or drop it]` flags and the
+    schedule as `[starts <date>, target <date>, <n>d left]`, or
+    `[OVERDUE - target was <date>, <n>d ago]`. The day count is spelled out rather than
+    left as a bare date the model has to difference against today itself.
   - `describe_other_products(exclude)` — one line per product:
     `- <Label>: [bucket/status] Title; [bucket/status] Title; ...`, open items only.
+    Carries `(OVERDUE)` but not the dates themselves: this view is awareness, and another
+    product's slipping date is worth knowing where its exact start is noise.
 
 ## 3b. `portfolio.py` — the work model above the roadmap
 
@@ -468,7 +499,7 @@ background-thread → websocket hops via `loop.call_soon_threadsafe(asyncio.crea
 | `POST /tasks/{id}` `{"task": "..."}` | dispatch dev task (immediate return) |
 | `GET /tasks/{id}`, `GET /tasks/{id}/{tid}` | list / one |
 | `GET /roadmap/data` | `{products, items-by-product}` |
-| `GET/POST /roadmap/{product}/items`, `PATCH/DELETE /roadmap/{product}/items/{item_id}` | board CRUD; PATCH/DELETE verify the URL product OWNS the item (this is what makes own-product-scoped allowlists safe); PATCH with `move_to_product` triggers the move flow |
+| `GET/POST /roadmap/{product}/items`, `PATCH/DELETE /roadmap/{product}/items/{item_id}` | board CRUD; PATCH/DELETE verify the URL product OWNS the item (this is what makes own-product-scoped allowlists safe); PATCH with `move_to_product` triggers the move flow; `start_at`/`target_at` accept `"YYYY-MM-DD"` or `""` to clear, and a malformed or inverted pair is a 400 naming the reason with nothing applied |
 | WS `/ws/chat/{id}`, `/ws/tasks/{id}`, `/ws/sessions`, `/ws/roadmap` | push channels |
 
 Optional: zero-segment aliases to the default session (`/tasks`, `/history`, `/ws/chat`,
@@ -513,20 +544,29 @@ stylesheet and a **non-deferred** `<script>` in `<head>`, plus one element in th
 
 `nav.js` renders two rows, and the split is the design:
 
-1. **The bar** — brand, then the flat set of destinations (Portfolio · Roadmap ·
-   Sessions │ Time & cost · People) with the current one marked by `aria-current="page"`
-   plus weight *and* a tinted chip, so "you are here" survives greyscale. On the right,
-   in enterprise mode, the acting user, their role and **Sign out** — on every page, not
-   just the sessions list. `Time & cost` and `People` are filtered by capability
-   (`view_cost`) and role (`admin`); in personal mode `People` is hidden entirely, since
-   its endpoints are enterprise-only and the tab would lead to nothing but an error.
-   Hiding a tab is orientation, never protection — §7 enforces every capability.
-2. **The context row** — *where* that destination sits. The three pages that make up the
-   work model get a flow map, `Portfolio → Roadmap → Sessions`, with the current stop lit
-   and each stop a link; `/costing` and `/people` render the same map with no stop
-   claimed plus one line on how they relate to it. The pages nested inside a session
-   (`chat`, `dashboard`) instead get a breadcrumb — `Sessions › <session title>` — and
-   the session's sub-tabs, **Chat** / **Dev lifecycle**.
+1. **The bar** — brand, then **the only place destinations are listed**:
+   `Portfolio → Roadmap → Sessions │ Time & cost · People`, current one marked by
+   `aria-current="page"` plus weight *and* a tinted chip, so "you are here" survives
+   greyscale. The arrows between the first three *are* the work model — intent narrowing
+   into work — drawn where the links already are. On the right, in enterprise mode, the
+   acting user, their role and **Sign out** — on every page, not just the sessions list.
+   `Time & cost` and `People` are filtered by capability (`view_cost`) and role
+   (`admin`); in personal mode `People` is hidden entirely, since its endpoints are
+   enterprise-only and the tab would lead to nothing but an error. Hiding a tab is
+   orientation, never protection — §7 enforces every capability.
+2. **The context row** — what the page you are on *holds*, plus a slot it fills itself.
+   An ordinary page gets a label (not a link): its name and one-line descriptor. The
+   pages nested inside a session (`chat`, `dashboard`) get a breadcrumb —
+   `Sessions › <session title>` — and the session's sub-tabs, **Chat** / **Dev
+   lifecycle**. Every page also gets `#pm-nav-slot`, right-aligned, resolved through
+   `PMNav.ready`; roadmap.html puts its grouping and view switches there rather than
+   growing a third band of chrome. `.pmnav-seg` is the one control shape offered for it
+   — a segmented switch whose state is `aria-pressed`, with no parallel "active" class
+   to keep in sync.
+
+   This row used to be a flow map that re-listed row 1's three links directly beneath
+   them. Two lit copies of the same destination read as two menus. **Nothing added here
+   may re-list what the bar already shows.**
 
 Two constraints that are easy to break:
 
@@ -546,7 +586,9 @@ Two constraints that are easy to break:
 
 Page `<header>`s therefore carry only what the page *is* and controls that act on it —
 no per-page link sets, which is what let them drift out of sync and leave
-`/dashboard/{id}` with no inbound link from anywhere at all.
+`/dashboard/{id}` with no inbound link from anywhere at all. A page whose controls fit
+`#pm-nav-slot` can drop its header entirely; roadmap.html does, which is worth ~90 px of
+vertical space on a board that wants it.
 
 - **sessions.html** (`/`) — session cards: title (fallback name → "Untitled session"),
   muted one-line goal, product tag, model selector (POST /model), lifecycle status
@@ -583,12 +625,50 @@ no per-page link sets, which is what let them drift out of sync and leave
   of PM replies is nice-to-have.
 - **dashboard.html** (`/dashboard/{id}`) — the session's task list with statuses,
   durations, results; live via `/ws/tasks/{id}`.
-- **roadmap.html** (`/roadmap`) — one section per product; Now/Next/Later columns;
-  cards show status (pending/in_progress/done), origin badges ("suggested by X" /
-  untriaged flag with accept action), move-to-product control (stakeholder moves pass
-  `triaged:true`); done items collapse into a per-product "recently shipped" strip
-  rather than disappearing. Live via `/ws/roadmap`; stakeholder can add/edit items
-  directly.
+- **roadmap.html** (`/roadmap`) — **two independent axes**, both persisted in
+  `localStorage` and both mounted into the nav's controls slot rather than a page header
+  of their own (the page has no `<h1>`; the lit tab and the context row already say what
+  it is):
+  - *Group by* — `product` (one section per product board) or `initiative` (one section
+    per initiative, computed client-side to mirror `portfolio.group_changes_by_initiative`
+    so it re-groups on a websocket event instead of refetching). Either way a group is
+    `{key, title, flags, changes, omit, addTo}`, and both views render the same shape.
+    `addTo` is null when a section has no unambiguous board to add to — an initiative
+    spanning two products shows no "+" rather than guessing one.
+  - *View* — `board` (Now/Next/Later lanes) or `timeline` (a Gantt).
+
+  A card is **one line collapsed**: a status dot, the title, and a middot-separated meta
+  line (product / project / external owner / ticket badge). Clicking it reveals the
+  description and every control — status, horizon, move-to-product, owner, ticket link,
+  delete. Those controls used to be on every card at all times, four selects and three
+  buttons deep, which is what made the old board ~140 px per change. Open-card state
+  lives in a JS `Set`, not the DOM, because a websocket event re-renders everything.
+
+  The **timeline** shares one axis across every group: one quarter of history plus the
+  three horizons (Now = this quarter, Next = the next, Later = the two after), fifteen
+  months, bars positioned as percentages of real timestamps. A bar carries two
+  independent facts through two independent modifiers — colour (`--bar`: pending / in
+  progress / shipped, or **overdue**, which overrides) and fill (**solid** when the span
+  comes from dates the change actually carries, **hatched** when it is derived from the
+  horizon and claims nothing more). A diamond marks `target_at`; on a shipped change it
+  stays put, so the gap between the bar's end and the diamond *is* the slip, and it turns
+  red when the date was missed. A dotted tail is time spent waiting on the board before
+  the span opens.
+
+  How the span is derived matters, and it is four cases, not one (see `barFor`): both
+  dates → exactly that span; **target only → today → target**, *not* the horizon, because
+  a change bucketed `next` but due in three weeks would otherwise get a bar starting after
+  it was meant to finish; start only → start out to the end of its horizon; neither → the
+  hatched horizon band. An overdue bar is extended to today so the overrun past its
+  diamond is the length of the bar.
+
+  The axis header is deliberately **not** `position: sticky`: the horizontal
+  `overflow-x: auto` wrapper is the nearest scrollport in both axes, so a sticky header
+  there renders `top` pixels down over the first rows and never sticks.
+
+  Cross-product suggestions still surface as an untriaged strip with accept/dismiss, and
+  done items still collapse into a "recently shipped" disclosure. Live via `/ws/roadmap`;
+  a stakeholder can add and edit items directly.
 
 ## 10. Concurrency model (summary)
 
