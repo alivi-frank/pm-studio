@@ -27,4 +27,6 @@ pm-studio = "pm_studio.__main__:main"
 packages = ["pm_studio"]
 
 [tool.setuptools.package-data]
-pm_studio = ["static/*.html"]
+# The pages plus the shared navigation chrome they all pull in - an installed wheel that
+# shipped only the HTML would serve every page without its nav.
+pm_studio = ["static/*.html", "static/*.css", "static/*.js"]

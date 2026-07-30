@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8" />
 <title>PM Studio — Chat</title>
+<link rel="stylesheet" href="/static/nav.css" />
+<script src="/static/nav.js"></script>
 <style>
   :root {
     color-scheme: light dark;
@@ -439,7 +441,10 @@
 </style>
 </head>
 <body>
-<header><a href="/" style="color:var(--muted);text-decoration:none;font-size:0.85em;">&larr; Sessions</a> &middot; <span id="session-title">PM Chat</span><span id="product-badge"></span> <select id="model-select" title="Claude model for this session's PM turns and dev tasks"></select> &middot; <button id="reset-btn" type="button" style="background:none;border:none;color:var(--muted);font:inherit;font-size:0.85em;cursor:pointer;padding:0;text-decoration:underline;">Reset chat</button><div id="session-goal"></div></header>
+<!-- "Sessions › this session" and the Chat / Dev lifecycle sub-tabs come from the shared
+     nav; the header keeps only what acts on this session. -->
+<div id="pm-nav" data-page="chat"></div>
+<header><span id="product-badge"></span><select id="model-select" title="Claude model for this session's PM turns and dev tasks"></select> &middot; <button id="reset-btn" type="button" style="background:none;border:none;color:var(--muted);font:inherit;font-size:0.85em;cursor:pointer;padding:0;text-decoration:underline;">Reset chat</button><div id="session-goal"></div></header>
 <div id="session-strip">
   <button id="strip-summary" type="button" aria-expanded="false" title="Session lifecycle">
     <span id="strip-summary-content"></span>
@@ -479,18 +484,16 @@
   // URL is /chat/{session_id}
   const sessionId = location.pathname.split("/").filter(Boolean).pop();
 
-  const sessionTitleEl = document.getElementById("session-title");
   const sessionGoalEl = document.getElementById("session-goal");
   const productBadgeEl = document.getElementById("product-badge");
   const modelSelectEl = document.getElementById("model-select");
   let availableModels = null; // [{id, label}], once /models resolves
 
   function applySessionMeta(session) {
-    // Prefer the PM-maintained title, falling back to the creation name (consistent with
-    // the sessions list); show the goal as a muted subtitle when present.
-    const heading = (session && (session.title || session.name)) || "PM Chat";
-    sessionTitleEl.textContent = heading;
-    document.title = heading;
+    // The heading itself is the nav's breadcrumb now, so this only names the tab -
+    // repeating the title one line under the trail was pure duplication. Same precedence
+    // as the sessions list: PM-maintained title, then the creation name.
+    document.title = (session && (session.title || session.name)) || "PM Chat";
     const goal = session && (session.goal || "").trim();
     if (goal) {
       sessionGoalEl.textContent = goal;
@@ -526,10 +529,9 @@
     modelSelectEl.value = currentModel;
   }
 
-  fetch(`/sessions/${sessionId}`)
-    .then((r) => (r.ok ? r.json() : null))
-    .then(applySessionMeta)
-    .catch(() => applySessionMeta(null));
+  // The shared nav already fetched this to build the breadcrumb; reuse its promise
+  // rather than asking for the same session a second time.
+  PMNav.session.then(applySessionMeta).catch(() => applySessionMeta(null));
 
   // ---- session lifecycle strip (compact, collapsible, under the header) ----
 

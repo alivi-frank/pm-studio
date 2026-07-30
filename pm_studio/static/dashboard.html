@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8" />
 <title>PM Studio — Dev Lifecycle</title>
+<link rel="stylesheet" href="/static/nav.css" />
+<script src="/static/nav.js"></script>
 <style>
   :root {
     color-scheme: light dark;
@@ -51,8 +53,7 @@
     gap: 10px;
   }
   header h1 { font-size: 1.05em; margin: 0; }
-  header a { color: var(--ink-secondary); font-size: 0.85em; text-decoration: none; }
-  header a:hover { text-decoration: underline; }
+  header p { margin: 0; color: var(--ink-muted); font-size: 0.85em; }
   #empty {
     padding: 48px 24px;
     text-align: center;
@@ -163,9 +164,12 @@
 </style>
 </head>
 <body>
+<!-- The breadcrumb (Sessions › this session) and the Chat / Dev lifecycle sub-tabs are
+     rendered by the shared nav, which resolves the session title for the trail. -->
+<div id="pm-nav" data-page="dashboard"></div>
 <header>
-  <a id="chat-link" href="#">&larr; Back to chat</a>
   <h1>Dev Lifecycle</h1>
+  <p>Every dev task this session has dispatched, with status, duration and result.</p>
 </header>
 <div id="session-banner-wrap"><div id="session-banner"></div></div>
 <div id="empty">No dev tasks yet.</div>
@@ -178,7 +182,6 @@
 
   // URL is /dashboard/{session_id}
   const sessionId = location.pathname.split("/").filter(Boolean).pop();
-  document.getElementById("chat-link").href = `/chat/${sessionId}`;
 
   const BADGE = {
     running: { dot: "●", label: "Running" },

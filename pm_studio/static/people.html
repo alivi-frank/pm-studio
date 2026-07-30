@@ -4,6 +4,8 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>PM Studio — People</title>
+<link rel="stylesheet" href="/static/nav.css" />
+<script src="/static/nav.js"></script>
 <style>
   :root {
     color-scheme: light dark;
@@ -138,10 +140,9 @@
 </style>
 </head>
 <body>
+<div id="pm-nav" data-page="people"></div>
 <header>
   <h1>People</h1>
-  <a href="/">← Sessions</a>
-  <a href="/roadmap">Roadmap</a>
 </header>
 <main>
   <p class="error" id="error"></p>
@@ -368,7 +369,9 @@
   }
 
   async function init() {
-    const info = await api("/auth/me");
+    // The shared nav already fetched this to decide which tabs to show; reuse its
+    // promise so the page makes one /auth/me rather than two.
+    const info = (await PMNav.auth) || {};
     me = info.user;
     roles = info.roles || {};
     const select = document.getElementById("invite-role");

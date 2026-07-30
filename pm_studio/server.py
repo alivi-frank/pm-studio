@@ -416,6 +416,19 @@ async def _ws_reject(websocket: WebSocket, capability: Capability = "view") -> b
     return True
 
 
+# The shared navigation chrome, the only asset more than one page pulls in. Named
+# routes rather than a StaticFiles mount so that the set of files this server will hand
+# out stays an explicit list and no path can be traversed into.
+@app.get("/static/nav.css")
+def nav_css() -> FileResponse:
+    return FileResponse(STATIC_DIR / "nav.css", media_type="text/css")
+
+
+@app.get("/static/nav.js")
+def nav_js() -> FileResponse:
+    return FileResponse(STATIC_DIR / "nav.js", media_type="application/javascript")
+
+
 @app.get("/login")
 def login_page() -> FileResponse:
     return FileResponse(STATIC_DIR / "login.html")

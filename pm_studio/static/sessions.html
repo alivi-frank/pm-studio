@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8" />
 <title>PM Studio — Sessions</title>
+<link rel="stylesheet" href="/static/nav.css" />
+<script src="/static/nav.js"></script>
 <style>
   :root {
     color-scheme: light dark;
@@ -233,17 +235,12 @@
 </style>
 </head>
 <body>
+<!-- Destinations, identity and the flow map all come from the shared nav. What is left
+     here is only what this page is. -->
+<div id="pm-nav" data-page="sessions"></div>
 <header>
-  <h1>PM Studio — Sessions</h1>
+  <h1>Sessions</h1>
   <p>Each session is its own PM conversation on its own git branch/worktree - work on several at once, then merge back when ready.</p>
-  <p>
-    <a href="/roadmap">View product roadmap &rarr;</a>
-    &nbsp;·&nbsp;
-    <a href="/portfolio">Portfolio (goals, initiatives, projects) &rarr;</a>
-    <!-- Populated only in enterprise mode; personal mode leaves this empty, so the
-         header looks exactly as it always has. -->
-    <span id="account-bar"></span>
-  </p>
 </header>
 <main>
   <form id="new-form">
@@ -552,34 +549,18 @@
       .catch(() => { submitBtn.disabled = false; });
   });
 
-  // Account bar: who you are, the roster (admins only), and sign out. In personal
-  // mode /auth/me reports mode "personal" and this renders nothing at all.
-  fetch("/auth/me")
-    .then((r) => r.json())
-    .then((info) => {
-      if (!info.enterprise || !info.user) return;
-      // Hide the controls this role can't use. Cosmetic only - the server enforces
-      // every capability independently, so a hidden form is not the protection.
-      const can = info.capabilities || [];
-      if (!can.includes("manage_session_lifecycle")) {
-        const newForm = document.getElementById("new-form");
-        if (newForm) newForm.style.display = "none";
-      }
-      const bar = document.getElementById("account-bar");
-      const parts = [];
-      if (can.includes("view_cost")) parts.push('<a href="/costing">Time &amp; cost</a>');
-      if (info.user.role === "admin") parts.push('<a href="/people">People</a>');
-      parts.push('<a href="#" id="sign-out">Sign out</a>');
-      bar.innerHTML =
-        ` &nbsp;·&nbsp; ${info.user.name} (${info.user.role_label}) &nbsp;·&nbsp; ` +
-        parts.join(" &nbsp;·&nbsp; ");
-      document.getElementById("sign-out").addEventListener("click", async (event) => {
-        event.preventDefault();
-        await fetch("/auth/logout", { method: "POST" });
-        location.href = "/login";
-      });
-    })
-    .catch(() => {});
+  // Identity, the roster link and sign out now live in the shared nav, on every page.
+  // What stays page-specific is the create form, which only some roles may use.
+  // Reusing PMNav.auth rather than re-fetching keeps this to one /auth/me per load.
+  PMNav.auth.then((info) => {
+    if (!info || !info.enterprise || !info.user) return;
+    // Hiding a control this role can't use is cosmetic only - the server enforces every
+    // capability independently, so a hidden form is not the protection.
+    if (!(info.capabilities || []).includes("manage_session_lifecycle")) {
+      const newForm = document.getElementById("new-form");
+      if (newForm) newForm.style.display = "none";
+    }
+  });
 </script>
 </body>
 </html>

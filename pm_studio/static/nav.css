@@ -1,0 +1,299 @@
+/* Shared chrome for every page in the studio.
+ *
+ * Deliberately self-contained on two axes:
+ *
+ * - It borrows no tokens. Each page declares its own `:root` palette under its own
+ *   names (chat.html uses --bg/--fg/--muted, the board pages use
+ *   --page/--ink-primary/...), so the nav defines --pmnav-* instead and looks identical
+ *   wherever it is mounted.
+ * - It resists the host page's CSS. Several pages style bare elements - portfolio.html
+ *   puts a border and padding on every `li`, for instance - and those rules would
+ *   otherwise land on the nav's own markup. So every selector below is scoped to
+ *   `#pm-nav`, which outranks any class- or type-level rule a page can write, and the
+ *   block right after the tokens neutralises the inherited properties the component
+ *   cares about. Add nothing here that is not `#pm-nav`-prefixed.
+ *
+ * Two rows, and the split is the point:
+ *   1. the bar     - the flat set of destinations, with the current one marked.
+ *   2. the context - WHERE that destination sits. For the three pages that make up the
+ *      work model it is a flow map (Portfolio -> Roadmap -> Sessions) with the current
+ *      stop lit; for the pages nested inside a session it is a breadcrumb trail plus
+ *      that session's sub-tabs. "Where am I" needs the first row; "how do these pages
+ *      relate to each other" needs the second.
+ */
+
+:root {
+  --pmnav-surface: #fcfcfb;
+  --pmnav-context: #f3f2ef;
+  --pmnav-ink: #0b0b0b;
+  --pmnav-ink-secondary: #52514e;
+  --pmnav-ink-muted: #898781;
+  --pmnav-border: rgba(11, 11, 11, 0.12);
+  --pmnav-accent: #2a78d6;
+  --pmnav-active-bg: rgba(42, 120, 214, 0.10);
+  --pmnav-hover-bg: rgba(11, 11, 11, 0.05);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --pmnav-surface: #1a1a19;
+    --pmnav-context: #131312;
+    --pmnav-ink: #ffffff;
+    --pmnav-ink-secondary: #c3c2b7;
+    --pmnav-ink-muted: #898781;
+    --pmnav-border: rgba(255, 255, 255, 0.13);
+    --pmnav-accent: #3987e5;
+    --pmnav-active-bg: rgba(57, 135, 229, 0.16);
+    --pmnav-hover-bg: rgba(255, 255, 255, 0.07);
+  }
+}
+
+/* `flex: 0 0 auto` is for chat.html, whose body is a full-height flex column - without
+   it the nav would be squeezed by the message list. Harmless on the block pages. */
+#pm-nav {
+  flex: 0 0 auto;
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 16px;
+  line-height: 1.4;
+  color: var(--pmnav-ink);
+  background: var(--pmnav-surface);
+  border-bottom: 1px solid var(--pmnav-border);
+}
+
+/* The defensive reset. See the header comment: this is what keeps a page's bare `li`,
+   `button` or `a` rules from reshaping the nav. Every component rule below is also
+   #pm-nav-scoped, so it carries a class and still wins against this. */
+#pm-nav div,
+#pm-nav nav,
+#pm-nav ol,
+#pm-nav li,
+#pm-nav a,
+#pm-nav span,
+#pm-nav button {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  list-style: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  text-decoration: none;
+  text-transform: none;
+  letter-spacing: normal;
+  opacity: 1;
+  box-shadow: none;
+}
+
+/* Nothing renders until the JS knows which links this role may see; reserving the height
+   of the two rows (46px bar + 1px rule + 39px context) keeps the page below from jumping
+   once it does. */
+#pm-nav:empty { min-height: 86px; }
+
+/* ---- row 1: the bar ---- */
+
+#pm-nav .pmnav-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 18px;
+  min-height: 46px;
+}
+
+#pm-nav .pmnav-brand {
+  font-size: 0.92em;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--pmnav-ink);
+  white-space: nowrap;
+}
+
+#pm-nav .pmnav-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-wrap: wrap;
+}
+
+#pm-nav .pmnav-tab {
+  display: block;
+  padding: 5px 11px;
+  border-radius: 7px;
+  font-size: 0.86em;
+  font-weight: 500;
+  color: var(--pmnav-ink-secondary);
+  white-space: nowrap;
+}
+
+#pm-nav .pmnav-tab:hover { background: var(--pmnav-hover-bg); color: var(--pmnav-ink); }
+
+/* The "you are here" marker. Weight plus a tinted chip rather than colour alone, so it
+   survives a colour-blind reader and a greyscale screenshot. */
+#pm-nav .pmnav-tab[aria-current="page"] {
+  background: var(--pmnav-active-bg);
+  color: var(--pmnav-accent);
+  font-weight: 650;
+}
+
+#pm-nav .pmnav-group-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 9px 7px;
+  background: var(--pmnav-border);
+}
+
+#pm-nav .pmnav-spacer { flex: 1 1 auto; }
+
+#pm-nav .pmnav-id {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.82em;
+  color: var(--pmnav-ink-muted);
+  white-space: nowrap;
+}
+
+#pm-nav .pmnav-id-name { color: var(--pmnav-ink-secondary); font-weight: 500; }
+
+#pm-nav .pmnav-role {
+  padding: 1px 7px;
+  border: 1px solid var(--pmnav-border);
+  border-radius: 999px;
+  font-size: 0.92em;
+}
+
+#pm-nav .pmnav-signout {
+  color: var(--pmnav-ink-muted);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+#pm-nav .pmnav-signout:hover { color: var(--pmnav-ink); }
+
+/* ---- row 2: context ---- */
+
+#pm-nav .pmnav-context {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 7px 18px;
+  background: var(--pmnav-context);
+  border-top: 1px solid var(--pmnav-border);
+  font-size: 0.8em;
+}
+
+/* The flow map: Portfolio -> Roadmap -> Sessions, i.e. intent narrowing into work.
+   Every stop is a link, so the map doubles as the shortcut. */
+#pm-nav .pmnav-flow {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+#pm-nav .pmnav-step > a {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 3px 9px;
+  border-radius: 6px;
+  color: var(--pmnav-ink-secondary);
+}
+
+#pm-nav .pmnav-step > a:hover { background: var(--pmnav-hover-bg); }
+
+#pm-nav .pmnav-step-name { font-weight: 600; white-space: nowrap; }
+#pm-nav .pmnav-step-what { color: var(--pmnav-ink-muted); white-space: nowrap; }
+
+#pm-nav .pmnav-step.is-here > a {
+  background: var(--pmnav-active-bg);
+  color: var(--pmnav-accent);
+}
+
+#pm-nav .pmnav-step.is-here .pmnav-step-what { color: var(--pmnav-accent); opacity: 0.85; }
+
+#pm-nav .pmnav-arrow {
+  color: var(--pmnav-ink-muted);
+  padding: 0 3px;
+  user-select: none;
+}
+
+/* Pages that hang off the flow rather than sitting on it (Time & cost, People) explain
+   their relationship to it in words instead of claiming a stop. */
+#pm-nav .pmnav-aside {
+  color: var(--pmnav-ink-muted);
+  padding-left: 12px;
+  border-left: 1px solid var(--pmnav-border);
+}
+
+/* Breadcrumbs, for the genuinely nested pages: a session's chat and its dev lifecycle. */
+#pm-nav .pmnav-crumbs {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+#pm-nav .pmnav-crumbs a { color: var(--pmnav-ink-secondary); }
+#pm-nav .pmnav-crumbs a:hover { text-decoration: underline; color: var(--pmnav-ink); }
+#pm-nav .pmnav-chev { color: var(--pmnav-ink-muted); }
+
+#pm-nav .pmnav-crumb-current {
+  display: block;
+  font-weight: 600;
+  color: var(--pmnav-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 42ch;
+}
+
+/* Sub-tabs move between the two views of one session without leaving it - before this,
+   /dashboard/{id} had no inbound link from anywhere at all. */
+#pm-nav .pmnav-subtabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-left: 12px;
+  border-left: 1px solid var(--pmnav-border);
+}
+
+#pm-nav .pmnav-subtab {
+  padding: 3px 9px;
+  border-radius: 6px;
+  color: var(--pmnav-ink-secondary);
+  font-weight: 500;
+}
+
+#pm-nav .pmnav-subtab:hover { background: var(--pmnav-hover-bg); color: var(--pmnav-ink); }
+
+#pm-nav .pmnav-subtab[aria-current="page"] {
+  background: var(--pmnav-active-bg);
+  color: var(--pmnav-accent);
+  font-weight: 650;
+}
+
+/* ---- narrow screens ---- */
+
+@media (max-width: 900px) {
+  #pm-nav .pmnav-step-what { display: none; }
+  #pm-nav .pmnav-aside { display: none; }
+}
+
+@media (max-width: 640px) {
+  #pm-nav .pmnav-bar { flex-wrap: wrap; gap: 8px; padding: 8px 14px; }
+  #pm-nav .pmnav-spacer { display: none; }
+  #pm-nav .pmnav-context { padding: 7px 14px; }
+  #pm-nav .pmnav-crumb-current { max-width: 24ch; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  #pm-nav .pmnav-tab,
+  #pm-nav .pmnav-subtab,
+  #pm-nav .pmnav-step > a { transition: background 0.12s ease; }
+}

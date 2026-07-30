@@ -443,6 +443,52 @@ version.
 
 ## 9. Static UI (vanilla HTML/JS/CSS, one file per page)
 
+### Shared navigation (`nav.css` + `nav.js`, served at `/static/nav.*`)
+
+The only assets more than one page loads. Every page mounts them the same way — the
+stylesheet and a **non-deferred** `<script>` in `<head>`, plus one element in the body:
+
+```html
+<div id="pm-nav" data-page="roadmap"></div>
+```
+
+`nav.js` renders two rows, and the split is the design:
+
+1. **The bar** — brand, then the flat set of destinations (Portfolio · Roadmap ·
+   Sessions │ Time & cost · People) with the current one marked by `aria-current="page"`
+   plus weight *and* a tinted chip, so "you are here" survives greyscale. On the right,
+   in enterprise mode, the acting user, their role and **Sign out** — on every page, not
+   just the sessions list. `Time & cost` and `People` are filtered by capability
+   (`view_cost`) and role (`admin`); in personal mode `People` is hidden entirely, since
+   its endpoints are enterprise-only and the tab would lead to nothing but an error.
+   Hiding a tab is orientation, never protection — §7 enforces every capability.
+2. **The context row** — *where* that destination sits. The three pages that make up the
+   work model get a flow map, `Portfolio → Roadmap → Sessions`, with the current stop lit
+   and each stop a link; `/costing` and `/people` render the same map with no stop
+   claimed plus one line on how they relate to it. The pages nested inside a session
+   (`chat`, `dashboard`) instead get a breadcrumb — `Sessions › <session title>` — and
+   the session's sub-tabs, **Chat** / **Dev lifecycle**.
+
+Two constraints that are easy to break:
+
+- **The script must not be deferred.** Pages run inline scripts at the end of `<body>`,
+  which execute before any deferred script would. Loading it plainly from `<head>` means
+  `window.PMNav` already exists for them. It exposes `PMNav.auth` and `PMNav.session`
+  (both resolve to `null` instead of rejecting), so a page load makes exactly one
+  `/auth/me` and at most one `/sessions/{id}` however many consumers there are —
+  sessions.html reads `auth` to hide the create form, chat.html reads `session` for its
+  metadata.
+- **Every rule in `nav.css` is scoped to `#pm-nav`,** and the block after the tokens
+  resets the inherited properties the component cares about. Pages style bare elements —
+  portfolio.html puts a border and padding on every `li` — and those rules would
+  otherwise reshape the nav's own markup. The nav also defines its own `--pmnav-*`
+  palette rather than borrowing page tokens, whose names differ per page (chat.html uses
+  `--bg`/`--fg`/`--muted`, the board pages `--page`/`--ink-primary`).
+
+Page `<header>`s therefore carry only what the page *is* and controls that act on it —
+no per-page link sets, which is what let them drift out of sync and leave
+`/dashboard/{id}` with no inbound link from anywhere at all.
+
 - **sessions.html** (`/`) — session cards: title (fallback name → "Untitled session"),
   muted one-line goal, product tag, model selector (POST /model), lifecycle status
   badge, and the LIVE activity signal: pulsing-dot "Working" pill (with the running dev
