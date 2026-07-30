@@ -1,0 +1,586 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PM Studio — Time &amp; cost</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --surface: #fcfcfb;
+    --page: #f9f9f7;
+    --ink-primary: #0b0b0b;
+    --ink-secondary: #52514e;
+    --ink-muted: #898781;
+    --border: rgba(11, 11, 11, 0.10);
+    --accent: #2a78d6;
+    --accent-fg: #ffffff;
+    --error: #d03b3b;
+    --warn: #c77700;
+    --warn-bg: rgba(199, 119, 0, 0.09);
+    --note-bg: rgba(42, 120, 214, 0.07);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface: #1a1a19;
+      --page: #0d0d0d;
+      --ink-primary: #ffffff;
+      --ink-secondary: #c3c2b7;
+      --ink-muted: #898781;
+      --border: rgba(255, 255, 255, 0.10);
+      --accent: #3987e5;
+      --error: #e66767;
+      --warn: #e0a33c;
+      --warn-bg: rgba(224, 163, 60, 0.13);
+      --note-bg: rgba(57, 135, 229, 0.12);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--page);
+    color: var(--ink-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  header { padding: 20px 24px; border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 1.2em; margin: 0; }
+  header p { margin: 4px 0 0; color: var(--ink-muted); font-size: 0.85em; }
+  header nav { margin-top: 8px; display: flex; gap: 14px; font-size: 0.85em; }
+  header nav a { color: var(--accent); text-decoration: none; }
+  main { padding: 24px; max-width: 1100px; }
+  section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+  h2 { font-size: 0.95em; margin: 0 0 3px; }
+  .hint { margin: 0 0 16px; font-size: 0.82em; color: var(--ink-muted); line-height: 1.55; }
+  .note {
+    padding: 11px 13px;
+    margin-bottom: 16px;
+    font-size: 0.83em;
+    line-height: 1.55;
+    color: var(--ink-secondary);
+    background: var(--note-bg);
+    border-radius: 8px;
+  }
+  .note.warn { background: var(--warn-bg); }
+  table { width: 100%; border-collapse: collapse; font-size: 0.87em; }
+  th {
+    text-align: left;
+    font-weight: 500;
+    font-size: 0.85em;
+    color: var(--ink-muted);
+    padding: 0 10px 8px 0;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  th.num, td.num { text-align: right; }
+  td { padding: 9px 10px 9px 0; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  tr:last-child td { border-bottom: 0; }
+  tfoot td { font-weight: 600; border-top: 1px solid var(--border); border-bottom: 0; }
+  .muted { color: var(--ink-muted); }
+  input, select {
+    padding: 6px 8px;
+    font: inherit;
+    font-size: 0.9em;
+    color: var(--ink-primary);
+    background: var(--page);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  input[type="number"] { width: 92px; text-align: right; }
+  button {
+    padding: 7px 12px;
+    font: inherit;
+    font-size: 0.87em;
+    color: var(--accent-fg);
+    background: var(--accent);
+    border: 0;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  button.ghost {
+    color: var(--ink-secondary);
+    background: transparent;
+    border: 1px solid var(--border);
+  }
+  button.ghost:hover { border-color: var(--accent); color: var(--accent); }
+  .week-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
+  .week-bar strong { font-size: 1.05em; }
+  .flag {
+    display: inline-block;
+    padding: 1px 7px;
+    font-size: 0.72em;
+    font-weight: 600;
+    border-radius: 999px;
+    color: var(--warn);
+    background: var(--warn-bg);
+  }
+  .error, .ok {
+    margin-bottom: 14px;
+    padding: 9px 11px;
+    font-size: 0.85em;
+    border-radius: 7px;
+    display: none;
+  }
+  .error { color: var(--error); border: 1px solid var(--error); }
+  .ok { color: var(--ink-secondary); background: var(--note-bg); }
+  .split { font-size: 0.83em; color: var(--ink-secondary); line-height: 1.6; }
+  .split .proj { white-space: nowrap; margin-right: 10px; }
+  .empty { color: var(--ink-muted); font-size: 0.87em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Time &amp; cost</h1>
+  <p>A declared capacity, split across projects by the activity each person generated.</p>
+  <nav>
+    <a href="/">← Sessions</a>
+    <a href="/portfolio">Portfolio</a>
+    <a href="/roadmap">Roadmap</a>
+  </nav>
+</header>
+<main>
+  <p class="error" id="error"></p>
+  <p class="ok" id="ok"></p>
+
+  <div class="note">
+    These hours are a <strong>distribution, not a measurement</strong>. Nobody's screen time
+    is being timed. Each person's declared weekly capacity is split across projects in
+    proportion to the activity they generated, so the totals always reconcile to a real
+    week — and any figure can be overridden below.
+    <br /><br />
+    <strong>Labour and agent cost are kept apart on purpose.</strong> Labour is an estimate
+    (hours × rate). Agent cost is measured from the model's own reported token spend. An
+    agent running for twenty minutes while nobody is at the keyboard is machine time, not
+    someone's afternoon.
+  </div>
+
+  <div class="week-bar">
+    <button class="ghost" id="prev-week">← Previous</button>
+    <strong id="week-label">—</strong>
+    <button class="ghost" id="next-week">Next →</button>
+    <button class="ghost" id="this-week">This week</button>
+  </div>
+
+  <section>
+    <h2>People</h2>
+    <p class="hint" id="roster-hint">Capacity and rate per person. Leave a rate blank to use the blended rate.</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Person</th><th>Role</th>
+          <th class="num">Rate / hour</th>
+          <th class="num">Capacity (h/week)</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="roster"></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Distribution</h2>
+    <p class="hint">How each person's week was split. "Derived" is what the signals suggest; an override replaces the whole week, and both are kept.</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Person</th>
+          <th class="num">Capacity</th>
+          <th>Split</th>
+          <th class="num">Hours</th>
+          <th class="num">Labour cost</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="distribution"></tbody>
+      <tfoot id="distribution-total"></tfoot>
+    </table>
+  </section>
+
+  <section>
+    <h2>By project</h2>
+    <p class="hint">Exact and additive — a change belongs to exactly one project.</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Project</th>
+          <th class="num">Hours</th>
+          <th class="num">Labour cost</th>
+          <th class="num">Agent cost</th>
+          <th class="num">Tokens (in / out)</th>
+        </tr>
+      </thead>
+      <tbody id="by-project"></tbody>
+      <tfoot id="by-project-total"></tfoot>
+    </table>
+  </section>
+
+  <section>
+    <h2>By initiative</h2>
+    <div class="note warn" id="goal-note"></div>
+    <table>
+      <thead>
+        <tr>
+          <th>Initiative</th>
+          <th class="num">Hours</th>
+          <th class="num">Labour cost</th>
+          <th class="num">Agent cost</th>
+          <th>Serves goals</th>
+        </tr>
+      </thead>
+      <tbody id="by-initiative"></tbody>
+    </table>
+  </section>
+</main>
+<script>
+  const UNATTRIBUTED = "__unattributed__";
+  let week = null;
+  let report = null;
+  let rosterData = null;
+
+  const errorBox = document.getElementById("error");
+  const okBox = document.getElementById("ok");
+
+  function flash(box, message) {
+    box.textContent = message;
+    box.style.display = "block";
+    setTimeout(() => { box.style.display = "none"; }, 6000);
+  }
+
+  async function api(path, options) {
+    const response = await fetch(path, options);
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || `Request failed (${response.status})`);
+    }
+    return response.json();
+  }
+
+  const json = (method, body) => ({
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  function money(value) {
+    if (value === null || value === undefined) return "—";
+    const currency = report?.currency || rosterData?.currency || "";
+    return `${currency} ${Number(value).toLocaleString(undefined, {
+      minimumFractionDigits: 2, maximumFractionDigits: 2,
+    })}`;
+  }
+
+  function hours(value) {
+    return `${Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 1 })}h`;
+  }
+
+  function projectName(projectId) {
+    if (projectId === UNATTRIBUTED) return "Unattributed";
+    const found = (report?.portfolio?.projects || []).find((p) => p.id === projectId);
+    return found ? found.title : projectId;
+  }
+
+  function initiativeName(initiativeId) {
+    if (initiativeId === UNATTRIBUTED) return "Unaligned / no initiative";
+    const found = (report?.portfolio?.initiatives || []).find((i) => i.id === initiativeId);
+    return found ? found.title : initiativeId;
+  }
+
+  function personName(userId) {
+    return report?.user_names?.[userId] || userId;
+  }
+
+  function shiftWeek(step) {
+    // Weeks are ISO keys, so step through them by nudging a real date rather than
+    // doing modular arithmetic on the week number (which breaks at year boundaries).
+    const [yearPart, weekPart] = week.split("-W");
+    const monday = new Date(Date.UTC(Number(yearPart), 0, 4));
+    monday.setUTCDate(monday.getUTCDate() - ((monday.getUTCDay() + 6) % 7) + (Number(weekPart) - 1 + step) * 7);
+    const target = new Date(monday);
+    target.setUTCDate(target.getUTCDate() + 3);
+    const firstThursday = new Date(Date.UTC(target.getUTCFullYear(), 0, 4));
+    const isoWeek = 1 + Math.round(
+      ((target - firstThursday) / 86400000 - 3 + ((firstThursday.getUTCDay() + 6) % 7)) / 7
+    );
+    return `${target.getUTCFullYear()}-W${String(isoWeek).padStart(2, "0")}`;
+  }
+
+  function renderRoster() {
+    const body = document.getElementById("roster");
+    body.innerHTML = "";
+    document.getElementById("roster-hint").textContent =
+      rosterData.blended_rate === null
+        ? "Capacity and rate per person. No blended rate is configured, so anyone without an individual rate reports hours only."
+        : `Capacity and rate per person. Leave a rate blank to use the blended rate (${money(rosterData.blended_rate)}).`;
+
+    rosterData.rows.forEach((row) => {
+      const tr = document.createElement("tr");
+
+      const name = document.createElement("td");
+      name.textContent = row.name || row.user_id;
+      if (row.email) {
+        const small = document.createElement("div");
+        small.className = "muted";
+        small.style.fontSize = "0.85em";
+        small.textContent = row.email;
+        name.appendChild(small);
+      }
+      tr.appendChild(name);
+
+      const role = document.createElement("td");
+      role.className = "muted";
+      role.textContent = row.role || "—";
+      tr.appendChild(role);
+
+      const rateCell = document.createElement("td");
+      rateCell.className = "num";
+      const rate = document.createElement("input");
+      rate.type = "number";
+      rate.min = "0";
+      rate.step = "1";
+      rate.placeholder = "blended";
+      if (row.rate_per_hour !== null) rate.value = row.rate_per_hour;
+      rateCell.appendChild(rate);
+      tr.appendChild(rateCell);
+
+      const capCell = document.createElement("td");
+      capCell.className = "num";
+      const capacity = document.createElement("input");
+      capacity.type = "number";
+      capacity.min = "1";
+      capacity.max = "168";
+      capacity.step = "1";
+      capacity.value = row.capacity_hours_per_week;
+      capCell.appendChild(capacity);
+      tr.appendChild(capCell);
+
+      const actions = document.createElement("td");
+      const save = document.createElement("button");
+      save.className = "ghost";
+      save.textContent = "Save";
+      save.addEventListener("click", async () => {
+        try {
+          await api(`/costing/roster/${row.user_id}`, json("POST", {
+            // "" clears an individual rate back to the blended one.
+            rate_per_hour: rate.value === "" ? "" : Number(rate.value),
+            capacity_hours_per_week: Number(capacity.value),
+          }));
+          flash(okBox, `Saved ${row.name || row.user_id}.`);
+          await load();
+        } catch (err) {
+          flash(errorBox, err.message);
+        }
+      });
+      actions.appendChild(save);
+      tr.appendChild(actions);
+
+      body.appendChild(tr);
+    });
+  }
+
+  function renderDistribution() {
+    const body = document.getElementById("distribution");
+    body.innerHTML = "";
+    if (!report.users.length) {
+      body.innerHTML = '<tr><td colspan="6" class="empty">No activity recorded this week.</td></tr>';
+      document.getElementById("distribution-total").innerHTML = "";
+      return;
+    }
+    report.users.forEach((row) => {
+      const tr = document.createElement("tr");
+
+      const name = document.createElement("td");
+      name.textContent = personName(row.user_id);
+      if (row.overridden) {
+        name.appendChild(document.createTextNode(" "));
+        const badge = document.createElement("span");
+        badge.className = "flag";
+        badge.textContent = "overridden";
+        name.appendChild(badge);
+      }
+      tr.appendChild(name);
+
+      const cap = document.createElement("td");
+      cap.className = "num muted";
+      cap.textContent = hours(row.capacity_hours);
+      tr.appendChild(cap);
+
+      const split = document.createElement("td");
+      split.className = "split";
+      const entries = Object.entries(row.effective_hours);
+      if (!entries.length) {
+        split.innerHTML = '<span class="muted">no activity</span>';
+      } else {
+        split.innerHTML = entries
+          .sort((a, b) => b[1] - a[1])
+          .map(([projectId, value]) =>
+            `<span class="proj">${hours(value)} ${projectName(projectId)}</span>`)
+          .join("");
+      }
+      // When a human has overridden the week, show what the system had derived too -
+      // an approximation should never be the only record on screen.
+      if (row.overridden) {
+        const derived = Object.entries(row.derived_hours)
+          .sort((a, b) => b[1] - a[1])
+          .map(([projectId, value]) => `${hours(value)} ${projectName(projectId)}`)
+          .join(", ");
+        const note = document.createElement("div");
+        note.className = "muted";
+        note.style.fontSize = "0.92em";
+        note.textContent = `derived: ${derived || "no activity"}`;
+        split.appendChild(note);
+      }
+      tr.appendChild(split);
+
+      const total = document.createElement("td");
+      total.className = "num";
+      total.textContent = hours(row.total_hours);
+      tr.appendChild(total);
+
+      const cost = document.createElement("td");
+      cost.className = "num";
+      cost.textContent = row.rate_per_hour === null ? "—" : money(row.total_labor_cost);
+      if (row.rate_per_hour !== null) {
+        const small = document.createElement("div");
+        small.className = "muted";
+        small.style.fontSize = "0.85em";
+        small.textContent = `${money(row.rate_per_hour)}/h ${row.rate_source}`;
+        cost.appendChild(small);
+      }
+      tr.appendChild(cost);
+
+      const actions = document.createElement("td");
+      const edit = document.createElement("button");
+      edit.className = "ghost";
+      edit.textContent = row.overridden ? "Reset" : "Override";
+      edit.addEventListener("click", async () => {
+        try {
+          if (row.overridden) {
+            await api("/costing/override", json("POST", {
+              week, user_id: row.user_id, hours_by_project: null,
+            }));
+          } else {
+            const current = Object.entries(row.effective_hours)
+              .map(([projectId, value]) => `${projectName(projectId)}=${value}`)
+              .join(", ");
+            const answer = prompt(
+              "Set this person's whole week, as Project=hours pairs.\n"
+              + "The whole week is replaced, so the total stays meaningful.",
+              current
+            );
+            if (answer === null) return;
+            const byName = {};
+            (report.portfolio.projects || []).forEach((p) => { byName[p.title] = p.id; });
+            byName["Unattributed"] = UNATTRIBUTED;
+            const hoursByProject = {};
+            for (const part of answer.split(",")) {
+              if (!part.trim()) continue;
+              const [label, value] = part.split("=");
+              const key = byName[(label || "").trim()];
+              if (!key) throw new Error(`Unknown project: ${(label || "").trim()}`);
+              hoursByProject[key] = Number((value || "").trim());
+            }
+            await api("/costing/override", json("POST", {
+              week, user_id: row.user_id, hours_by_project: hoursByProject,
+            }));
+          }
+          await load();
+        } catch (err) {
+          flash(errorBox, err.message);
+        }
+      });
+      actions.appendChild(edit);
+      tr.appendChild(actions);
+
+      body.appendChild(tr);
+    });
+
+    document.getElementById("distribution-total").innerHTML =
+      `<tr><td colspan="3">Total</td><td class="num">${hours(report.totals.hours)}</td>`
+      + `<td class="num">${money(report.totals.labor_cost)}</td><td></td></tr>`;
+  }
+
+  function renderByProject() {
+    const body = document.getElementById("by-project");
+    body.innerHTML = "";
+    const rows = Object.entries(report.by_project);
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="5" class="empty">Nothing recorded this week.</td></tr>';
+      document.getElementById("by-project-total").innerHTML = "";
+      return;
+    }
+    rows.sort((a, b) => b[1].hours - a[1].hours).forEach(([projectId, bucket]) => {
+      const tokens = report.tokens_by_project[projectId];
+      const tr = document.createElement("tr");
+      tr.innerHTML =
+        `<td>${projectName(projectId)}</td>`
+        + `<td class="num">${hours(bucket.hours)}</td>`
+        + `<td class="num">${money(bucket.labor_cost)}</td>`
+        + `<td class="num">${money(bucket.agent_cost)}</td>`
+        + `<td class="num muted">${tokens ? `${tokens.input.toLocaleString()} / ${tokens.output.toLocaleString()}` : "—"}</td>`;
+      body.appendChild(tr);
+    });
+    document.getElementById("by-project-total").innerHTML =
+      `<tr><td>Total</td><td class="num">${hours(report.totals.hours)}</td>`
+      + `<td class="num">${money(report.totals.labor_cost)}</td>`
+      + `<td class="num">${money(report.totals.agent_cost)}</td><td></td></tr>`;
+  }
+
+  function renderByInitiative() {
+    document.getElementById("goal-note").textContent = report.rollup.goal_note;
+    const body = document.getElementById("by-initiative");
+    body.innerHTML = "";
+    const rows = Object.entries(report.rollup.initiatives);
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="5" class="empty">Nothing recorded this week.</td></tr>';
+      return;
+    }
+    rows.sort((a, b) => b[1].hours - a[1].hours).forEach(([initiativeId, bucket]) => {
+      const goalCount = (bucket.goal_ids || []).length;
+      const tr = document.createElement("tr");
+      tr.innerHTML =
+        `<td>${initiativeName(initiativeId)}</td>`
+        + `<td class="num">${hours(bucket.hours)}</td>`
+        + `<td class="num">${money(bucket.labor_cost)}</td>`
+        + `<td class="num">${money(bucket.agent_cost)}</td>`
+        // Deliberately a count, not a total per goal: the same spend contributes to
+        // every goal the initiative serves, so per-goal figures must not be summed.
+        + `<td class="muted">${goalCount ? `${goalCount} goal${goalCount === 1 ? "" : "s"}` : "—"}</td>`;
+      body.appendChild(tr);
+    });
+  }
+
+  async function load() {
+    report = await api(`/costing/report?week=${encodeURIComponent(week)}`);
+    rosterData = await api("/costing/roster");
+    week = report.week;
+    document.getElementById("week-label").textContent = week;
+    renderRoster();
+    renderDistribution();
+    renderByProject();
+    renderByInitiative();
+  }
+
+  document.getElementById("prev-week").addEventListener("click", () => {
+    week = shiftWeek(-1);
+    load().catch((err) => flash(errorBox, err.message));
+  });
+  document.getElementById("next-week").addEventListener("click", () => {
+    week = shiftWeek(1);
+    load().catch((err) => flash(errorBox, err.message));
+  });
+  document.getElementById("this-week").addEventListener("click", () => {
+    week = "";
+    load().catch((err) => flash(errorBox, err.message));
+  });
+
+  week = "";
+  load().catch((err) => flash(errorBox, err.message));
+</script>
+</body>
+</html>

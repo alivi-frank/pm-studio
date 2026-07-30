@@ -29,6 +29,13 @@ from .authz import (
     role_has,
 )
 from .config import CONFIG
+from .costing import (
+    KIND_DEV_TASK,
+    KIND_PM_TURN,
+    CostingError,
+    CostingStore,
+    current_week,
+)
 from .models import list_models
 from .portfolio import (
     DEFAULT_CATCH_ALL_PROJECT,
@@ -60,6 +67,18 @@ portfolio_store = PortfolioStore()
 # has to branch on mode just to reach the store.
 account_store = AccountStore()
 audit_log = AuditLog()
+costing_store = CostingStore(
+    blended_rate=CONFIG.costing.blended_rate,
+    default_capacity_hours=CONFIG.costing.default_capacity_hours,
+    weights=CONFIG.costing.weights,
+    currency=CONFIG.costing.currency,
+)
+
+# task_id -> the user who dispatched it. A dev task's token spend is only known when it
+# finishes, by which time the request that started it is long gone, so the dispatcher is
+# remembered here. In-process is enough: a task outliving the process is marked errored
+# on restart anyway (see TaskRegistry's startup sweep).
+_dev_task_dispatchers: dict[str, str] = {}
 
 # Reachable without a session cookie. Everything else needs one when enterprise mode
 # is on; in personal mode this set is irrelevant because auth is skipped entirely.
@@ -165,6 +184,19 @@ def _on_task_update(session_id: str, task: dict) -> None:
     # Only ordinary dev tasks re-engage the PM - a merge-conflict resolution isn't part
     # of its own plan (see tasks.py's "kind" field) and finishing one shouldn't make it
     # start narrating an unrelated merge to the stakeholder.
+    if task.get("status") in ("done", "error"):
+        usage = task.get("agent_usage") or {}
+        if usage.get("cost_usd") or usage.get("input_tokens"):
+            # Measured spend, recorded against the dispatcher but carrying no extra
+            # labour weight of its own (the dispatch signal above already did that).
+            _record_signal(
+                None,
+                KIND_DEV_TASK,
+                session_id,
+                usage={**usage, "cost_usd": usage.get("cost_usd", 0.0)},
+                user_id="",
+            )
+        _dev_task_dispatchers.pop(task.get("id", ""), None)
     if task.get("kind") == "dev" and task.get("status") in ("done", "error"):
         threading.Thread(target=_auto_continue_pm, args=(session_id, task), daemon=True).start()
 
@@ -212,6 +244,11 @@ def _auto_continue_pm(session_id: str, task: dict) -> None:
         other_ctx = sessions.describe_other_active_sessions(session_id)
         roadmap_ctx = _roadmap_context_for(session_id)
         for event in runtime.pm_agent.handle_task_completion(task, other_ctx, roadmap_ctx):
+            # user_id="" - nobody was at the keyboard for an auto-continuation, so its
+            # tokens count and its labour weight must not.
+            _record_signal(
+                None, KIND_PM_TURN, session_id, usage=event.get("agent_usage"), user_id=""
+            )
             _broadcast_chat_event_threadsafe(session_id, {**event, "auto": True})
     except Exception as exc:
         _broadcast_chat_event_threadsafe(
@@ -592,8 +629,9 @@ def create_session(request: Request, payload: dict = Body(default={})) -> dict:
     name = (payload.get("name") or "").strip() or None
     product = (payload.get("product") or "").strip() or None
     model = (payload.get("model") or "").strip() or None
+    project_id = _validated_project_id(payload.get("project_id"))
     try:
-        session = sessions.create(name, product, model)
+        session = sessions.create(name, product, model, project_id=project_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _audit(actor, "session.created", session.id, session.name)
@@ -638,6 +676,146 @@ def set_session_meta(session_id: str, request: Request, payload: dict = Body(...
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return _public_session(session)
+
+
+@app.post("/sessions/{session_id}/project")
+def set_session_project(session_id: str, request: Request, payload: dict = Body(...)) -> dict:
+    """Points a session's work at a Project in the work model. `project_id: ""` clears
+    it, after which the session's activity falls back to the catch-all project."""
+    actor = _require(request, "run_session")
+    project_id = _validated_project_id(payload.get("project_id"))
+    try:
+        session = sessions.set_project(session_id, project_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _audit(actor, "session.project_set", session_id, project_id or "(cleared)")
+    return _public_session(session)
+
+
+# ---- time & cost attribution (admin only) ----
+
+
+@app.get("/costing")
+def costing_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "costing.html")
+
+
+@app.get("/costing/roster")
+def costing_roster(request: Request) -> dict:
+    """Rates and capacities, joined to the user roster so the screen can show names.
+
+    Admin-only via `view_cost`: this is compensation data, and it stays the narrowest
+    grant in the matrix even though the roadmap it hangs off is visible to everyone.
+    """
+    _require(request, "view_cost")
+    configured = {row["user_id"]: row for row in costing_store.list_roster()}
+    people = account_store.list_users() if CONFIG.is_enterprise else [
+        {"id": "local", "name": "This machine", "email": "", "role": "admin"}
+    ]
+    rows = []
+    for person in people:
+        entry = costing_store.entry_for(person["id"])
+        rows.append(
+            {
+                "user_id": person["id"],
+                "name": person.get("name"),
+                "email": person.get("email"),
+                "role": person.get("role"),
+                "rate_per_hour": entry.rate_per_hour,
+                "capacity_hours_per_week": entry.capacity_hours_per_week,
+                "configured": person["id"] in configured,
+            }
+        )
+    return {
+        "currency": CONFIG.costing.currency,
+        "blended_rate": CONFIG.costing.blended_rate,
+        "default_capacity_hours": CONFIG.costing.default_capacity_hours,
+        "rows": rows,
+    }
+
+
+@app.post("/costing/roster/{user_id}")
+def set_costing_entry(user_id: str, request: Request, payload: dict = Body(...)) -> dict:
+    """`rate_per_hour: ""` (or null with clear_rate) drops back to the blended rate."""
+    actor = _require(request, "view_cost")
+    raw_rate = payload.get("rate_per_hour")
+    clear_rate = raw_rate is not None and str(raw_rate).strip() == ""
+    try:
+        entry = costing_store.set_entry(
+            user_id,
+            rate_per_hour=None if clear_rate or raw_rate is None else float(raw_rate),
+            capacity_hours_per_week=(
+                float(payload["capacity_hours_per_week"])
+                if payload.get("capacity_hours_per_week") not in (None, "")
+                else None
+            ),
+            clear_rate=clear_rate,
+        )
+    except (CostingError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # Deliberately no rate in the audit detail - the log is readable by every admin.
+    _audit(actor, "costing.entry_updated", user_id)
+    return entry.to_dict()
+
+
+@app.get("/costing/report")
+def costing_report(request: Request, week: str | None = None) -> dict:
+    """A week's distribution, plus the initiative rollup.
+
+    Hours are an approximation by construction: a declared capacity split by signal
+    share. What makes them usable is that they reconcile - they always sum to a real
+    week - not that they are precise.
+    """
+    _require(request, "view_cost")
+    target = (week or "").strip() or current_week()
+    known = (
+        [u["id"] for u in account_store.list_users()] if CONFIG.is_enterprise else ["local"]
+    )
+    try:
+        report = costing_store.distribute_week(target, user_ids=known)
+    except CostingError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    report["rollup"] = costing_store.rollup_to_initiatives(
+        report["by_project"], portfolio_store
+    )
+    report["portfolio"] = {
+        "projects": portfolio_store.list_projects(),
+        "initiatives": portfolio_store.list_initiatives(),
+    }
+    if CONFIG.is_enterprise:
+        report["user_names"] = {
+            u["id"]: u.get("name") or u.get("email") for u in account_store.list_users()
+        }
+    else:
+        report["user_names"] = {"local": "This machine"}
+    return report
+
+
+@app.post("/costing/override")
+def set_costing_override(request: Request, payload: dict = Body(...)) -> dict:
+    """Replaces one person's whole week.
+
+    Whole-week rather than per-project on purpose: the distribution's useful property is
+    that it sums to a real week, and overriding a single project in isolation would
+    silently break that. The derived figures are kept alongside, so a report always
+    shows what the system thought as well as what a human decided.
+    """
+    actor = _require(request, "view_cost")
+    week = (payload.get("week") or "").strip() or current_week()
+    user_id = (payload.get("user_id") or "").strip()
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id required")
+    hours = payload.get("hours_by_project")
+    try:
+        if hours is None:
+            costing_store.clear_override(week, user_id)
+        else:
+            costing_store.set_override(week, user_id, hours)
+    except (CostingError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit(actor, "costing.override" if hours is not None else "costing.override_cleared",
+           f"{week}/{user_id}")
+    return {"status": "ok", "week": week, "user_id": user_id}
 
 
 @app.get("/models")
@@ -755,6 +933,48 @@ def dashboard_page(session_id: str) -> FileResponse:
 
 
 # ---- roadmap board (cross-session, cross-product - not scoped to one session) ----
+
+def _actor_id(actor: User | None) -> str:
+    """Who to attribute activity to. In personal mode there is no identity, so a single
+    stable id is used - a solo user still gets a useful token-cost report, and nothing
+    has to branch on mode at every call site."""
+    return actor.id if actor is not None else "local"
+
+
+def _session_project_id(session_id: str) -> str | None:
+    """Which Project a session's activity counts towards: its own if it has one, else
+    the catch-all if the deployment declared one, else nothing. This mirrors how a
+    change with no project lands in the catch-all - unplanned work is attributed rather
+    than silently dropped."""
+    session = sessions.get(session_id)
+    if session is not None and session.project_id:
+        return session.project_id
+    return portfolio_store.catch_all_project_id
+
+
+def _record_signal(
+    actor: User | None,
+    kind: str,
+    session_id: str,
+    usage: dict | None = None,
+    user_id: str | None = None,
+) -> None:
+    """Records one activity signal. Failures are swallowed on purpose: cost
+    bookkeeping must never be able to break a PM turn or a dispatch."""
+    usage = usage or {}
+    try:
+        costing_store.record(
+            user_id=user_id if user_id is not None else _actor_id(actor),
+            kind=kind,
+            project_id=_session_project_id(session_id),
+            session_id=session_id,
+            agent_cost_usd=usage.get("cost_usd", 0.0),
+            input_tokens=usage.get("input_tokens", 0),
+            output_tokens=usage.get("output_tokens", 0),
+        )
+    except Exception:
+        pass
+
 
 def _validated_project_id(raw) -> str | None:
     """Passes through None ("no change") and "" ("detach"), but rejects an unknown id -
@@ -1136,6 +1356,10 @@ def create_task(session_id: str, request: Request, payload: dict = Body(...)) ->
         return {"error": "task description required"}
     task = _get_runtime(session_id).task_registry.start_task(description)
     _audit(actor, "dev_task.dispatched", session_id, description[:300])
+    # Dispatching is the strongest signal of human intent in the system - it is a
+    # decision to build something - so it carries the most weight in the split.
+    _record_signal(actor, KIND_DEV_TASK, session_id)
+    _dev_task_dispatchers[task["id"]] = _actor_id(actor)
     return task
 
 
@@ -1182,6 +1406,14 @@ async def _run_chat_ws(websocket: WebSocket, session_id: str) -> None:
         await websocket.close()
         return
 
+    # Who is driving this socket, for activity attribution. Resolved once at connect:
+    # the cookie cannot change mid-connection.
+    ws_user = (
+        account_store.resolve_login(websocket.cookies.get(SESSION_COOKIE_NAME))
+        if CONFIG.is_enterprise
+        else None
+    )
+
     loop = asyncio.get_event_loop()
     # Registered so a dev-task completion firing while this connection is just sitting
     # idle on receive_text() can still push the PM's auto-continuation reply here - see
@@ -1220,6 +1452,13 @@ async def _run_chat_ws(websocket: WebSocket, session_id: str) -> None:
                 event = await queue.get()
                 if event is None:
                     break
+                # One signal per completed turn, carrying that turn's measured token
+                # spend. A turn the stakeholder actually took, so it counts toward
+                # their week - unlike an auto-continuation (see _auto_continue_pm).
+                if event.get("agent_usage") is not None:
+                    _record_signal(
+                        ws_user, KIND_PM_TURN, session_id, usage=event["agent_usage"]
+                    )
                 async with send_lock:
                     await websocket.send_text(json.dumps(event))
             await future

@@ -67,6 +67,13 @@ class Session:
     # unchanged and fall back to `name` in the UI until the PM sets them.
     title: str | None = None
     goal: str | None = None
+    # Which Project in the work model (see portfolio.py) this session's work counts
+    # towards. Optional and additive so older sessions.json records load unchanged.
+    # This is what lets time/cost attribution place a PM turn or a dev task: sessions
+    # are pinned to a PRODUCT, and a product is not a level in the work model, so
+    # without this there is nothing to attribute activity to. A session with no
+    # project falls back to the catch-all (see server.py's _session_project_id).
+    project_id: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -273,7 +280,13 @@ class SessionManager:
 
     # ---- session lifecycle ----
 
-    def create(self, name: str | None, product: str | None = None, model: str | None = None) -> Session:
+    def create(
+        self,
+        name: str | None,
+        product: str | None = None,
+        model: str | None = None,
+        project_id: str | None = None,
+    ) -> Session:
         if product is not None and product not in PRODUCTS:
             raise ValueError(f"Unknown product: {product}")
         model = validate_model(model) if model is not None else DEFAULT_MODEL
@@ -299,6 +312,7 @@ class SessionManager:
                 is_default=False,
                 product=product,
                 model=model,
+                project_id=project_id,
             )
             self._sessions[session_id] = session
             self._save()
@@ -683,6 +697,18 @@ class SessionManager:
                 session.title = title.strip()[:60]
             if goal is not None and goal.strip():
                 session.goal = goal.strip()[:200]
+            self._save()
+        self._broadcast({"type": "session_updated", "session": session.to_dict()})
+        return session
+
+    def set_project(self, session_id: str, project_id: str | None) -> Session:
+        """Points this session's work at a Project in the work model, or clears it with
+        None. Drives where the session's activity signals are attributed (see
+        costing.py) - the caller validates that the project exists, since the session
+        registry has no business knowing about the portfolio store."""
+        with self._registry_lock:
+            session = self._require(session_id)
+            session.project_id = project_id or None
             self._save()
         self._broadcast({"type": "session_updated", "session": session.to_dict()})
         return session

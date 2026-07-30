@@ -132,6 +132,53 @@ reviewer workflow itself is not implemented yet.
 The matrix lives in one table in `pm_studio/authz.py` — that is the single place to
 read or change what a role can do.
 
+### Time &amp; cost attribution
+
+Optional `[costing]` table:
+
+```toml
+[costing]
+blended_rate = 120.0            # fallback hourly rate for anyone with no individual one
+default_capacity_hours = 40.0   # default declared capacity per person per week
+currency = "USD"                # label only; no conversion is done
+weights = { pm_turn = 1.0, dev_task = 3.0, review = 1.0 }   # signal weights
+```
+
+**This is a distribution mechanism, not a stopwatch.** Nothing times anybody's screen.
+Each person's *declared capacity* is split across projects in proportion to the activity
+signals they generated, so a week always reconciles:
+
+> Dana, 2026-W31: 28.4h Signup rewrite, 11.6h Billing — 40h total
+
+That reconciliation is the point. Capacity is the input and signals only decide the
+proportions, so the total is always a real week and the denominator isn't arguable.
+Because it is explicitly an approximation, an admin can **override** any person's week
+(whole-week, so the total stays meaningful) and the derived figures are kept alongside
+the override — an estimate is never the only record.
+
+**Two cost streams, never conflated:**
+
+- **Labour** — distributed hours × rate (individual, else blended). An *estimate*.
+- **Agent** — token/API spend, read from the Claude CLI's own JSON output. *Measured*.
+
+An agent grinding for twenty minutes while nobody is at the keyboard is machine time,
+not somebody's afternoon — so an auto-continuation's tokens are counted while its labour
+weight is deliberately zero.
+
+Rates and capacities live in `<workspace_root>/workspace/costing.json` (written `0600`,
+never git-tracked); the activity log is append-only at `workspace/activity.jsonl`.
+**Rates are the deployment's own compensation data** and never ship in the package. Rate
+changes are audited, but the rate value itself is deliberately kept out of the audit
+detail, since every admin can read that log.
+
+Attribution needs a project, and sessions are pinned to a *product* (which is not a
+level in the work model), so a session can be pointed at a **Project** — its PM turns
+and dev tasks then count towards it. A session with no project falls back to the
+catch-all, the same way an unparented change does.
+
+Cost is visible to `admin` only (`view_cost`), and is additive **up to initiative**;
+goal-level figures overlap and are never summed. See `/costing`.
+
 ### Audit log
 
 Consequential actions (dispatches, session lifecycle changes, roadmap writes, role and
