@@ -481,29 +481,53 @@ async def _ws_reject(websocket: WebSocket, capability: Capability = "view") -> b
 # The shared navigation chrome, the only asset more than one page pulls in. Named
 # routes rather than a StaticFiles mount so that the set of files this server will hand
 # out stays an explicit list and no path can be traversed into.
+#
+# `no-cache` is load-bearing, not boilerplate. FileResponse sends ETag and Last-Modified
+# but no Cache-Control, and a browser given neither a max-age nor a no-cache directive
+# falls back to HEURISTIC caching: it reuses a subresource for a fraction of its age
+# WITHOUT revalidating. A page is a navigation and gets revalidated; nav.js is a
+# subresource and does not - so an upgrade could pair a freshly-fetched page with a
+# stale nav.js from cache. That combination is not merely cosmetic: a page calling a
+# `window.PMNav` API the cached nav.js predates throws during its inline script and
+# renders NOTHING AT ALL - an empty board under a working nav bar.
+#
+# Every asset here is served from disk and carries no version in its URL, so there is
+# nothing to cache-bust with and the only safe answer is to revalidate. Note that a bare
+# FileResponse does not implement conditional requests (that lives in StaticFiles, which
+# this deliberately isn't), so revalidation re-sends the body rather than 304-ing. That
+# is the right trade here and nowhere near a general one: this server binds to localhost
+# for one user, and the whole set is well under 100 KB.
+def _app_asset(name: str, media_type: str | None = None) -> FileResponse:
+    return FileResponse(
+        STATIC_DIR / name,
+        media_type=media_type,
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
 @app.get("/static/nav.css")
 def nav_css() -> FileResponse:
-    return FileResponse(STATIC_DIR / "nav.css", media_type="text/css")
+    return _app_asset("nav.css", "text/css")
 
 
 @app.get("/static/nav.js")
 def nav_js() -> FileResponse:
-    return FileResponse(STATIC_DIR / "nav.js", media_type="application/javascript")
+    return _app_asset("nav.js", "application/javascript")
 
 
 @app.get("/login")
 def login_page() -> FileResponse:
-    return FileResponse(STATIC_DIR / "login.html")
+    return _app_asset("login.html")
 
 
 @app.get("/setup")
 def setup_page() -> FileResponse:
-    return FileResponse(STATIC_DIR / "setup.html")
+    return _app_asset("setup.html")
 
 
 @app.get("/accept-invite")
 def accept_invite_page() -> FileResponse:
-    return FileResponse(STATIC_DIR / "accept-invite.html")
+    return _app_asset("accept-invite.html")
 
 
 @app.get("/auth/me")
@@ -683,14 +707,14 @@ def read_audit(request: Request, limit: int = 200) -> list[dict]:
 @app.get("/people")
 def people_page() -> FileResponse:
     """The admin roster screen: users, roles, invites."""
-    return FileResponse(STATIC_DIR / "people.html")
+    return _app_asset("people.html")
 
 
 # ---- session picker / lifecycle ----
 
 @app.get("/")
 def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "sessions.html")
+    return _app_asset("sessions.html")
 
 
 @app.get("/sessions")
@@ -772,7 +796,7 @@ def set_session_project(session_id: str, request: Request, payload: dict = Body(
 
 @app.get("/costing")
 def costing_page() -> FileResponse:
-    return FileResponse(STATIC_DIR / "costing.html")
+    return _app_asset("costing.html")
 
 
 @app.get("/costing/roster")
@@ -999,12 +1023,12 @@ async def sessions_ws(websocket: WebSocket) -> None:
 
 @app.get("/chat/{session_id}")
 def chat_page(session_id: str) -> FileResponse:
-    return FileResponse(STATIC_DIR / "chat.html")
+    return _app_asset("chat.html")
 
 
 @app.get("/dashboard/{session_id}")
 def dashboard_page(session_id: str) -> FileResponse:
-    return FileResponse(STATIC_DIR / "dashboard.html")
+    return _app_asset("dashboard.html")
 
 
 # ---- roadmap board (cross-session, cross-product - not scoped to one session) ----
@@ -1083,7 +1107,7 @@ def _resolve_project_id(payload: dict) -> str | None:
 
 @app.get("/portfolio")
 def portfolio_page() -> FileResponse:
-    return FileResponse(STATIC_DIR / "portfolio.html")
+    return _app_asset("portfolio.html")
 
 
 @app.get("/portfolio/data")
@@ -1242,7 +1266,7 @@ def delete_project(project_id: str, request: Request) -> dict:
 
 @app.get("/roadmap")
 def roadmap_page() -> FileResponse:
-    return FileResponse(STATIC_DIR / "roadmap.html")
+    return _app_asset("roadmap.html")
 
 
 # ---- external trackers (Jira / Azure DevOps) ----

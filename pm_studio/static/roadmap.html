@@ -968,7 +968,18 @@
     }));
   }
 
-  PMNav.ready.then(mountControls);
+  /* Guarded, because this runs BEFORE loadBoard() at the bottom of the script and an
+     uncaught throw here would take the whole board with it - a blank page under a
+     working nav bar, which is a genuinely baffling thing to debug. `PMNav.ready` is
+     newer than `PMNav` itself, so a browser holding a cached older nav.js has the
+     object without the promise. The server now sends `Cache-Control: no-cache` on the
+     shared chrome so that pairing should not arise; this is the belt to that's braces,
+     and the rule generalises - the board must never depend on the nav to render. */
+  if (window.PMNav && PMNav.ready && typeof PMNav.ready.then === "function") {
+    PMNav.ready.then(mountControls);
+  } else {
+    console.warn("PM Studio: nav controls slot unavailable — reload to pick up /static/nav.js.");
+  }
 
   // ---- linked tickets (Jira / Azure DevOps) ----
 
