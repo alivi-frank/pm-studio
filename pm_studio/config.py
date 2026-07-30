@@ -12,7 +12,7 @@ The split is deliberate and is the package's core contract:
 Layout in the target repo (all optional - missing pieces fall back to defaults):
 
     pm_studio_local/
-      config.toml           # [project], [server], [products], [models]
+      config.toml           # [project], [server], [products], [models], [enterprise], [smtp]
       PM_INSTRUCTIONS.md    # appended to every PM system prompt
       DEV_INSTRUCTIONS.md   # appended to every dev-agent dispatch
       knowledge/*.md        # local reference docs; the PM is pointed at them
@@ -21,6 +21,7 @@ The repo root is the process working directory (`python -m pm_studio` is run fro
 target repo's root), NOT this package's install location.
 """
 
+import os
 import sys
 import tomllib
 from dataclasses import dataclass, field
@@ -37,6 +38,15 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 DEFAULT_SESSION_NAME = "Main"
 
+# The two operating modes. `personal` is the historical single-trusted-user tool and
+# stays the default forever: an existing deployment that upgrades the package must not
+# suddenly demand a login. `enterprise` turns on accounts, invites and roles.
+MODE_PERSONAL = "personal"
+MODE_ENTERPRISE = "enterprise"
+MODES = (MODE_PERSONAL, MODE_ENTERPRISE)
+
+DEFAULT_SMTP_PORT = 587
+
 # Shown in the PM system prompt when the target repo hasn't described its own source
 # layout yet - honest about not knowing, and points at the fix.
 DEFAULT_REPO_LAYOUT = (
@@ -45,6 +55,24 @@ DEFAULT_REPO_LAYOUT = (
     "sources live, and suggest the stakeholder fill in the `layout` setting so future "
     "sessions start oriented.)"
 )
+
+
+@dataclass(frozen=True)
+class SmtpConfig:
+    """Outbound mail for enterprise invites. Entirely optional: with no [smtp] table
+    PM Studio never tries to send anything and the invite flow falls back to a
+    copyable link, so no deployment is forced to stand up a mail server."""
+
+    host: str
+    port: int
+    from_address: str
+    username: str = ""
+    password: str = ""
+    use_tls: bool = True
+
+    @property
+    def is_usable(self) -> bool:
+        return bool(self.host and self.from_address)
 
 
 @dataclass(frozen=True)
@@ -70,6 +98,15 @@ class Config:
     dev_instructions: str = ""
     # Repo-root-relative paths of local knowledge docs the PM should know exist.
     knowledge_files: tuple[str, ...] = ()
+    # "personal" (default) or "enterprise" - see MODES. Personal mode keeps the
+    # historical no-accounts behavior byte for byte.
+    mode: str = MODE_PERSONAL
+    # None unless the deployment configured [smtp].
+    smtp: SmtpConfig | None = None
+
+    @property
+    def is_enterprise(self) -> bool:
+        return self.mode == MODE_ENTERPRISE
 
     @property
     def base_url(self) -> str:
@@ -99,6 +136,46 @@ def _read_optional(path: Path) -> str:
     if path.is_file():
         return path.read_text().strip()
     return ""
+
+
+def _parse_mode(raw: dict, config_path: Path) -> str:
+    """Reads [enterprise] mode / enabled. A typo here decides whether the whole
+    instance requires authentication, so an unrecognized value is fatal rather than
+    silently falling back to the permissive default."""
+    enterprise = raw.get("enterprise", {})
+    mode = str(enterprise.get("mode", "")).strip().lower()
+    if not mode:
+        # Convenience form: `enabled = true` is the same as `mode = "enterprise"`.
+        mode = MODE_ENTERPRISE if bool(enterprise.get("enabled", False)) else MODE_PERSONAL
+    if mode not in MODES:
+        print(
+            f"[pm_studio] FATAL: {config_path} has [enterprise] mode = {mode!r}; "
+            f"must be one of: {', '.join(MODES)}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return mode
+
+
+def _parse_smtp(raw: dict) -> SmtpConfig | None:
+    """Reads the optional [smtp] table. The password may be given inline, but
+    `password_env` (the name of an environment variable to read it from) is preferred
+    so the secret never has to sit in a file."""
+    smtp = raw.get("smtp")
+    if not isinstance(smtp, dict) or not smtp:
+        return None
+    password = str(smtp.get("password", ""))
+    password_env = str(smtp.get("password_env", "")).strip()
+    if password_env:
+        password = os.environ.get(password_env, "")
+    return SmtpConfig(
+        host=str(smtp.get("host", "")).strip(),
+        port=int(smtp.get("port", DEFAULT_SMTP_PORT)),
+        from_address=str(smtp.get("from_address", "")).strip(),
+        username=str(smtp.get("username", "")).strip(),
+        password=password,
+        use_tls=bool(smtp.get("use_tls", True)),
+    )
 
 
 def load_config(repo_root: Path | None = None) -> Config:
@@ -153,6 +230,8 @@ def load_config(repo_root: Path | None = None) -> Config:
         pm_instructions=_read_optional(local_dir / PM_INSTRUCTIONS_NAME),
         dev_instructions=_read_optional(local_dir / DEV_INSTRUCTIONS_NAME),
         knowledge_files=knowledge_files,
+        mode=_parse_mode(raw, config_path),
+        smtp=_parse_smtp(raw),
     )
 
 

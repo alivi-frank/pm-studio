@@ -116,12 +116,39 @@ Claude Code in the target repo.
 - [docs/MIGRATION.md](docs/MIGRATION.md) — migrate a locally-built `pm_agent/` to
   this package.
 
+## Operating modes
+
+PM Studio runs in one of two modes, set by `[enterprise]` in
+`pm_studio_local/config.toml` (see [docs/CONFIGURATION.md](docs/CONFIGURATION.md)):
+
+- **`personal`** (default) — the tool described above: one trusted user, no accounts,
+  no login. Omitting the setting entirely keeps this behavior, so upgrading the
+  package never suddenly asks an existing deployment for a password.
+- **`enterprise`** — adds user accounts, email invites and roles
+  (`admin`/`pm`/`reviewer`/`viewer`) on top of the identical core loop. The first
+  visit creates the owner account; admins invite the rest from `/people`. Invites are
+  mailed when `[smtp]` is configured and always produce a copyable link, so no mail
+  server is required. Converting from personal to enterprise migrates no data.
+
+  Reads are open to every role — the whole roadmap is visible to everyone, by design.
+  Roles restrict what you can *do*: only `admin` and `pm` may work sessions, change
+  the roadmap, or dispatch dev agents; only `admin` manages people. Consequential
+  actions are recorded in an audit log with the actor who performed them.
+
 ## Security model
 
-Single-trusted-user, local-only tool: everything binds to 127.0.0.1 and dev agents
-run with bypassed permissions inside your repo. Do not expose the port. PM agents run
-under a strict literal-match Bash allowlist that structurally scopes them to their own
-session and their own product's board.
+In `personal` mode this is a single-trusted-user, local-only tool: everything binds to
+127.0.0.1 and dev agents run with bypassed permissions inside your repo. Do not expose
+the port. PM agents run under a strict literal-match Bash allowlist that structurally
+scopes them to their own session and their own product's board.
+
+`enterprise` mode adds authentication so a shared instance can serve a team: every
+request needs a session cookie, credentials are stored as PBKDF2 hashes outside git,
+and login/invite tokens are persisted only as hashes. The dev agents still run with
+bypassed permissions, so **being able to dispatch one is equivalent to code execution
+on the host** — grant the `pm` role accordingly, and treat `admin` as a trusted
+operator role. Enterprise mode makes a networked deployment possible; it does not make
+exposing the port to an untrusted network a good idea.
 
 ## License
 

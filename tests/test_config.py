@@ -1,12 +1,20 @@
 """Tests for pm_studio_local/ config loading: defaults with nothing present, a full
-config.toml, and the append-only local instruction fragments."""
+config.toml, the append-only local instruction fragments, and the [enterprise]/[smtp]
+tables that decide the operating mode."""
 
+import os
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from pm_studio.config import DEFAULT_REPO_LAYOUT, load_config
+from pm_studio.config import (
+    DEFAULT_REPO_LAYOUT,
+    MODE_ENTERPRISE,
+    MODE_PERSONAL,
+    load_config,
+)
 
 
 class ConfigLoadingTest(unittest.TestCase):
@@ -79,6 +87,106 @@ class ConfigLoadingTest(unittest.TestCase):
         (local / "config.toml").write_text("not [valid toml")
         with self.assertRaises(SystemExit):
             load_config(self.root)
+
+
+class OperatingModeTest(unittest.TestCase):
+    """`[enterprise]` decides whether the whole instance requires a login, so its
+    parsing is deliberately strict and its default deliberately permissive: an existing
+    deployment that upgrades the package must not suddenly demand accounts."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.local = self.root / "pm_studio_local"
+        self.local.mkdir()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _write(self, body: str) -> None:
+        (self.local / "config.toml").write_text(textwrap.dedent(body))
+
+    def test_personal_is_the_default(self) -> None:
+        cfg = load_config(self.root)
+        self.assertEqual(cfg.mode, MODE_PERSONAL)
+        self.assertFalse(cfg.is_enterprise)
+        self.assertIsNone(cfg.smtp)
+
+    def test_explicit_mode(self) -> None:
+        self._write("""\
+            [enterprise]
+            mode = "enterprise"
+        """)
+        self.assertTrue(load_config(self.root).is_enterprise)
+
+    def test_enabled_shorthand(self) -> None:
+        self._write("""\
+            [enterprise]
+            enabled = true
+        """)
+        cfg = load_config(self.root)
+        self.assertEqual(cfg.mode, MODE_ENTERPRISE)
+
+    def test_unknown_mode_is_fatal(self) -> None:
+        """A typo must not silently leave the instance wide open."""
+        self._write("""\
+            [enterprise]
+            mode = "entrprise"
+        """)
+        with self.assertRaises(SystemExit):
+            load_config(self.root)
+
+
+class SmtpConfigTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.local = self.root / "pm_studio_local"
+        self.local.mkdir()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _write(self, body: str) -> None:
+        (self.local / "config.toml").write_text(textwrap.dedent(body))
+
+    def test_full_smtp_table(self) -> None:
+        self._write("""\
+            [smtp]
+            host = "smtp.example.com"
+            port = 2525
+            from_address = "studio@example.com"
+            username = "studio"
+            password = "hunter2hunter2"
+            use_tls = false
+        """)
+        smtp = load_config(self.root).smtp
+        self.assertEqual(smtp.host, "smtp.example.com")
+        self.assertEqual(smtp.port, 2525)
+        self.assertFalse(smtp.use_tls)
+        self.assertTrue(smtp.is_usable)
+
+    def test_password_env_is_preferred_over_inline(self) -> None:
+        """So the secret never has to sit in a file the operator might commit."""
+        self._write("""\
+            [smtp]
+            host = "smtp.example.com"
+            from_address = "studio@example.com"
+            password = "in-the-file"
+            password_env = "PM_STUDIO_TEST_SMTP_PASSWORD"
+        """)
+        with mock.patch.dict(os.environ, {"PM_STUDIO_TEST_SMTP_PASSWORD": "from-the-env"}):
+            self.assertEqual(load_config(self.root).smtp.password, "from-the-env")
+
+    def test_incomplete_smtp_is_not_usable(self) -> None:
+        """A half-filled table must degrade to copyable invite links, not crash."""
+        self._write("""\
+            [smtp]
+            port = 587
+        """)
+        smtp = load_config(self.root).smtp
+        self.assertIsNotNone(smtp)
+        self.assertFalse(smtp.is_usable)
 
 
 if __name__ == "__main__":

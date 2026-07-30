@@ -240,6 +240,9 @@
     <a href="/roadmap">View product roadmap &rarr;</a>
     &nbsp;·&nbsp;
     <a href="/portfolio">Portfolio (goals, initiatives, projects) &rarr;</a>
+    <!-- Populated only in enterprise mode; personal mode leaves this empty, so the
+         header looks exactly as it always has. -->
+    <span id="account-bar"></span>
   </p>
 </header>
 <main>
@@ -548,6 +551,34 @@
       })
       .catch(() => { submitBtn.disabled = false; });
   });
+
+  // Account bar: who you are, the roster (admins only), and sign out. In personal
+  // mode /auth/me reports mode "personal" and this renders nothing at all.
+  fetch("/auth/me")
+    .then((r) => r.json())
+    .then((info) => {
+      if (!info.enterprise || !info.user) return;
+      // Hide the controls this role can't use. Cosmetic only - the server enforces
+      // every capability independently, so a hidden form is not the protection.
+      const can = info.capabilities || [];
+      if (!can.includes("manage_session_lifecycle")) {
+        const newForm = document.getElementById("new-form");
+        if (newForm) newForm.style.display = "none";
+      }
+      const bar = document.getElementById("account-bar");
+      const parts = [];
+      if (info.user.role === "admin") parts.push('<a href="/people">People</a>');
+      parts.push('<a href="#" id="sign-out">Sign out</a>');
+      bar.innerHTML =
+        ` &nbsp;·&nbsp; ${info.user.name} (${info.user.role_label}) &nbsp;·&nbsp; ` +
+        parts.join(" &nbsp;·&nbsp; ");
+      document.getElementById("sign-out").addEventListener("click", async (event) => {
+        event.preventDefault();
+        await fetch("/auth/logout", { method: "POST" });
+        location.href = "/login";
+      });
+    })
+    .catch(() => {});
 </script>
 </body>
 </html>
