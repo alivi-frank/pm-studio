@@ -104,15 +104,23 @@ hiccup must never break a PM turn or dev task. Snapshots are repo-wide; `.gitign
   pre-system. `TRANSITIONAL_IDS` holds ids declared as **both** a product and a system,
   the explicit temporary state of reclassifying one into the other (its product board
   stays live so its changes can be re-homed; see CONFIGURATION.md § Systems).
+- `requires_system(product)` scopes attribution **per product**: a product is in scope
+  once it declares what it touches, and untouched until then. This is what makes the
+  layer adoptable one product at a time — declaring `[systems]` is deployment-wide, but a
+  taxonomy is not migrated in one sitting, and requiring attribution everywhere the
+  moment the first system exists would force every board to attribute to whichever
+  systems happened to be declared yet: wrong data instead of missing data.
+  `products_missing_systems()` lists those still outside, so "not yet declared" stays
+  visible rather than becoming a silent permanent exemption.
 - `validate_system(product, system, *, required)` is the one place attribution is
-  decided: no `[systems]` means the only valid value is none at all; otherwise a system
-  is required and must be declared **and** touched by the product — unless that product
-  declares none, in which case any declared system is accepted, because enforcing an
-  empty list would reject every value and make the board unusable
-  (`products_missing_systems()` reports those). There is deliberately **no** `""`-clears
-  convention, unlike `owner`/`project_id`: a change cannot go back to having no system.
-  `unattributed_report()` counts the changes that still do — reported, never blocked,
-  the same call `portfolio.unaligned_report()` makes.
+  decided: no `[systems]` means the only valid value is none at all; a system is required
+  only where `requires_system` holds; and a system that *is* named must be declared and
+  touched by the product — except on an out-of-scope product, which accepts any declared
+  system (permissive, not refused). There is deliberately **no** `""`-clears convention,
+  unlike `owner`/`project_id`: a change cannot go back to having no system.
+  `unattributed_report()` counts the in-scope changes that still lack one — reported,
+  never blocked, the same call `portfolio.unaligned_report()` makes — and reports
+  out-of-scope ones separately as `not_yet_in_scope`.
 - `RoadmapItem` dataclass: `id` (8-hex), `product`, `system: str|None`, `title`, `description`,
   `bucket` ("now"|"next"|"later"), `status` ("pending"|"in_progress"|"done"),
   `origin_product`, `triaged: bool`, `created_at`, `updated_at`,

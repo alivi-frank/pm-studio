@@ -349,10 +349,25 @@ class AttributionTest(unittest.TestCase):
             self.store.create("portal", "Ship it", system="rides")
         self.assertIn("claims", str(caught.exception))
 
-    def test_product_declaring_no_systems_widens_instead_of_deadlocking(self) -> None:
-        """Enforcing an empty list would reject every value and make Ops unusable."""
+    def test_a_product_declaring_no_systems_is_out_of_scope(self) -> None:
+        """Attribution is scoped per product, which is what makes the layer adoptable one
+        product at a time. Ops declares nothing, so Ops requires nothing - the alternative
+        (requiring it everywhere the moment any system exists) forces every board to
+        attribute to whichever systems happen to be declared yet, inventing wrong data."""
+        self.assertFalse(roadmap_module.requires_system("ops"))
+        item = self.store.create("ops", "Ship it")
+        self.assertIsNone(item.system)
+
+    def test_an_out_of_scope_product_still_accepts_an_explicit_system(self) -> None:
+        """Permissive rather than refused: attributing while the edge is undeclared is
+        useful and harmless, and this codebase reports gaps instead of blocking work."""
         item = self.store.create("ops", "Ship it", system="rides")
         self.assertEqual(item.system, "rides")
+
+    def test_scope_follows_the_declaration_not_the_deployment(self) -> None:
+        self.assertTrue(roadmap_module.requires_system("checkout"))
+        self.assertTrue(roadmap_module.requires_system("portal"))
+        self.assertFalse(roadmap_module.requires_system("ops"))
 
     def test_update_reattributes(self) -> None:
         item = self.store.create("checkout", "Ship it", system="claims")
@@ -497,6 +512,22 @@ class RestructureTest(unittest.TestCase):
         self.assertEqual(report["changes"][0]["id"], self.legacy.id)
         # The config half of the same gap.
         self.assertEqual(report["products_missing_systems"], ["ops"])
+
+    def test_out_of_scope_changes_are_counted_apart_from_debt(self) -> None:
+        """The load-bearing scoping rule. Ops declares no systems, so a system-less change
+        there measures missing CONFIG, not owed attribution - no amount of attributing
+        would bring it down, so it must not inflate the number the banner shouts."""
+        self.store.create("ops", "Nothing owed here")
+        report = self.store.unattributed_report()
+        self.assertEqual(report["count"], 1)  # still just the in-scope one
+        self.assertEqual(report["not_yet_in_scope"], 1)
+        self.assertNotIn("ops", [c["product"] for c in report["changes"]])
+
+    def test_context_block_stays_quiet_on_an_out_of_scope_board(self) -> None:
+        """A PM on a board whose edge is undeclared is not told to attribute (see
+        agent.py), so its context block must not shout about it either."""
+        self.store.create("ops", "Nothing owed here")
+        self.assertNotIn("[NO SYSTEM", self.store.describe_own_product("ops"))
 
     def test_shipped_work_is_not_restructure_debt(self) -> None:
         self.store.update(self.legacy.id, status="done")
@@ -655,6 +686,19 @@ class SystemPromptTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             prompt = self._agent("checkout", Path(tmp)).system_prompt
         self.assertNotIn('"system"', prompt)
+
+    def test_the_block_is_absent_on_an_out_of_scope_product(self) -> None:
+        """Systems exist, but this product declares none. Telling its PM to attribute would
+        make it pick from whatever systems happen to exist - wrong data, not missing data.
+        The prompt and roadmap.requires_system are two statements of one rule."""
+        roadmap_module.PRODUCTS = {"checkout": "Checkout", "ops": "Ops"}
+        roadmap_module.PRODUCT_SYSTEMS = {"checkout": ("claims",)}
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt = self._agent("ops", Path(tmp)).system_prompt
+        self.assertNotIn('"system"', prompt)
+        # ...while the in-scope sibling on the same deployment still gets it.
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIn('"system"', self._agent("checkout", Path(tmp)).system_prompt)
 
 
 if __name__ == "__main__":

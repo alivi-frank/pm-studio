@@ -268,9 +268,23 @@ for. Grouping a system's own changes is a filter on the board, not a board of it
 
 ### Turning it on, and what changes
 
-**Declaring `[systems]` is the switch.** With no `[systems]` table, a deployment behaves
-exactly as it did before this feature existed: no attribution is required, no Systems
-tab appears, and nothing new shows on the board. Once the table exists:
+**Declaring `[systems]` shows the tab; declaring a product's `systems = [...]` is what
+puts that product in scope.** With no `[systems]` table at all, a deployment behaves
+exactly as it did before this feature existed: no attribution, no Systems tab, nothing
+new on the board.
+
+Attribution is then scoped **per product**, not per deployment — which is what makes the
+layer adoptable one product at a time. A product that declares no systems requires
+nothing, and its board looks exactly as it did before. Bring products in scope as you
+work out their systems; the Systems page lists the ones still outside.
+
+That scoping is deliberate, not laziness. A deployment with two dozen products and
+thousands of existing changes would otherwise, the moment its first system was declared,
+require every board to attribute to whichever systems happened to exist yet — which is
+worse than not attributing at all, because it manufactures wrong data instead of leaving
+data missing.
+
+For a product that **is** in scope:
 
 - Every **new** change must name its system — from the board's create form, or
   `"system": "<id>"` in a PM's `POST`. A create without one is a 400 listing the valid
@@ -283,10 +297,12 @@ tab appears, and nothing new shows on the board. Once the table exists:
 - A change's system can be corrected, never removed: `"system": ""` is refused rather
   than treated as a reset.
 
-A product that declares **no** `systems` cannot constrain what its changes attribute to,
-so any declared system is accepted there and the product is listed on the Systems page
-as configuration still to do. Enforcing an empty list would reject every possible value
-and make that board unusable.
+An **out-of-scope** product (no `systems` declared) requires nothing, and its system-less
+changes are counted separately from the debt above — they measure missing *config*, not
+owed attribution, and no amount of attributing would bring that number down. Such a
+product will still *accept* an explicit system if you give it one: permissive rather than
+refused, since attributing a change while its product's edge is undeclared is useful and
+harmless.
 
 ### Reclassifying a product that was really a system
 
