@@ -1343,10 +1343,11 @@ def systems_page() -> FileResponse:
 def systems_data() -> dict:
     """The systems view's dataset: one row per declared system, plus the restructure gap.
 
-    Readable by anyone who can see the roadmap, and gated by nothing: this is the
-    technology taxonomy and the products built on it, which is the same
+    Readable by anyone who can see the roadmap, and behind no CAPABILITY grant: this is
+    the technology taxonomy and the products built on it, which is the same
     visible-to-everyone transparency the board itself has. No cost data passes through
-    here, so there is no `view_cost` grant to respect.
+    here, so there is no `view_cost` grant to respect. Authentication still applies in
+    enterprise mode - the blanket middleware covers this route like any other.
 
     `declared: false` (no [systems] table) is a first-class answer, not an empty error -
     the page renders an explanation of what a system is and how to declare one, rather
