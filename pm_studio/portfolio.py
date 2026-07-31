@@ -27,6 +27,13 @@ the cross-cutting flexibility for free - an initiative spans products because it
 projects' changes each carry their own product, and a product appears in many
 initiatives for the same reason. No association records needed.
 
+That is also what lets a *session* be scoped to an initiative rather than pinned to one
+product (see sessions.Session.initiative_id): the set of products an initiative touches
+is derived from its changes, so it can be discovered as the work goes instead of declared
+up front. Such a session has no project of its own at first, which is what
+`ensure_initiative_catch_all` exists for - see the note there on why its spend gets a
+real project rather than being recorded against the initiative directly.
+
 Products are persistent (they come from config). Goals, Initiatives and Projects are
 temporary: they open and close, so each carries a lifecycle status.
 
@@ -138,10 +145,25 @@ class Project:
     # The single catch-all. Unplanned work lands here rather than floating unparented.
     # Cannot be deleted; there is at most one.
     is_catch_all: bool = False
+    # Set (to that initiative's id) on the per-initiative catch-all: where an
+    # initiative-scoped session's activity is attributed while it has no project of its
+    # own. Distinct from `is_catch_all`, and the reason it must be: the global catch-all
+    # hangs off the MAINTENANCE initiative, so reusing it for a session pinned to some
+    # other initiative would bill that initiative's spend to maintenance. Identified by
+    # this field rather than by title so renaming it can't orphan the attribution.
+    # Optional and defaulted, so portfolio.json files written before it existed load
+    # unchanged.
+    catch_all_for_initiative: str | None = None
 
     @property
     def is_unaligned(self) -> bool:
         return self.initiative_id is None
+
+    @property
+    def is_any_catch_all(self) -> bool:
+        """True for the global catch-all and for any per-initiative one. What the delete
+        guards test: both are auto-created plumbing, neither is a project someone made."""
+        return self.is_catch_all or self.catch_all_for_initiative is not None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -254,6 +276,82 @@ class PortfolioStore:
             if project.is_catch_all:
                 return project.id
         return None
+
+    def catch_all_project_for_initiative(self, initiative_id: str | None) -> str | None:
+        """The per-initiative catch-all's project id, or None if there isn't one yet.
+
+        A pure read, deliberately: this is called on the hot path that records every
+        activity signal (see server.py's _session_project_id), which must never write,
+        lock for long, or broadcast. `ensure_initiative_catch_all` does the creating, once,
+        when a session is pinned to the initiative.
+        """
+        if initiative_id is None:
+            return None
+        for project in self._projects.values():
+            if project.catch_all_for_initiative == initiative_id:
+                return project.id
+        return None
+
+    def ensure_initiative_catch_all(self, initiative_id: str) -> Project:
+        """Finds or creates the project an initiative-scoped session's work is attributed
+        to while it has no project of its own. Idempotent.
+
+        Why a real project rather than attributing to the initiative directly: the additive
+        tree's exactness rests on Change -> Project -> Initiative being a unique path (see
+        this module's docstring). Recording spend one level up would leave the by-project
+        rollup with a hole that the by-initiative totals don't have. A per-initiative
+        catch-all keeps one code path, one shape, and rollups that still sum.
+        """
+        with self._lock:
+            initiative = self._initiatives.get(initiative_id)
+            if initiative is None:
+                raise PortfolioError(f"Unknown initiative: {initiative_id}")
+            for project in self._projects.values():
+                if project.catch_all_for_initiative == initiative_id:
+                    return project
+            project = Project(
+                id=_new_id(),
+                title=f"Unplanned work — {initiative.title}",
+                description=(
+                    "Auto-created. Holds work done in a session scoped to this "
+                    "initiative before it names a specific project."
+                ),
+                status="open",
+                initiative_id=initiative_id,
+                created_at=_now(),
+                updated_at=_now(),
+                catch_all_for_initiative=initiative_id,
+            )
+            self._projects[project.id] = project
+            self._save()
+        self._notify({"type": "portfolio_changed", "entity": "project", "id": project.id})
+        return project
+
+    def initiative_scope(self, initiative_id: str) -> dict | None:
+        """What an initiative-scoped session needs to know about its own initiative:
+        the initiative itself, the goals it serves, and its projects in creation order.
+
+        Returned as plain data so the caller can join it against the roadmap's changes
+        without this module learning what a change is (see roadmap.describe_initiative).
+        None for an unknown id - a session can outlive the initiative it was pinned to,
+        and every reader of this treats that as "unscoped", not as an error.
+        """
+        initiative = self._initiatives.get(initiative_id)
+        if initiative is None:
+            return None
+        return {
+            "initiative": initiative.to_public_dict(),
+            "goals": [
+                {"id": g.id, "title": g.title}
+                for g in self._sorted(self._goals)
+                if g.id in initiative.goal_ids
+            ],
+            "projects": [
+                p.to_public_dict()
+                for p in self._sorted(self._projects)
+                if p.initiative_id == initiative_id
+            ],
+        }
 
     def unaligned_report(self) -> dict:
         """Projects with no initiative, and initiatives serving no goal. Alignment is
@@ -462,8 +560,19 @@ class PortfolioStore:
                 raise PortfolioError(f"Unknown initiative: {initiative_id}")
             if initiative.is_maintenance:
                 raise PortfolioError("The maintenance initiative cannot be deleted.")
+            # Its own auto-created catch-all doesn't count as a reason to refuse - it was
+            # never a project anyone declared, and demanding it be moved first would make
+            # every initiative that ever hosted a scoped session undeletable. It goes with
+            # the initiative. A catch-all still holding changes is caught below, since
+            # those changes need a real home either way.
+            own_catch_all = [
+                p for p in self._projects.values()
+                if p.catch_all_for_initiative == initiative_id
+            ]
             children = [
-                p.title for p in self._projects.values() if p.initiative_id == initiative_id
+                p.title for p in self._projects.values()
+                if p.initiative_id == initiative_id
+                and p.catch_all_for_initiative != initiative_id
             ]
             if children:
                 raise PortfolioError(
@@ -471,6 +580,8 @@ class PortfolioStore:
                     + ", ".join(children)
                     + ". Move or delete them first."
                 )
+            for project in own_catch_all:
+                del self._projects[project.id]
             del self._initiatives[initiative_id]
             self._save()
         self._notify(
@@ -551,6 +662,11 @@ class PortfolioStore:
                 raise PortfolioError(f"Unknown project: {project_id}")
             if project.is_catch_all:
                 raise PortfolioError("The catch-all project cannot be deleted.")
+            if project.catch_all_for_initiative is not None:
+                raise PortfolioError(
+                    "This is an initiative's catch-all project - it is removed with the "
+                    "initiative itself, not on its own."
+                )
             if change_count:
                 raise PortfolioError(
                     f"{change_count} change(s) still belong to this project. "

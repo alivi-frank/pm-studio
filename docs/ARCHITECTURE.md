@@ -154,12 +154,26 @@ hiccup must never break a PM turn or dev task. Snapshots are repo-wide; `.gitign
     board at the same depth under its own heading (`<Label> (sub-product of <its own
     parent>, id \`x\`)`, so a grandchild names the board it actually hangs off), since a
     parent PM owns the family; a leaf gets exactly what it always got.
-  - `describe_other_products(exclude)` — one line per product:
+  - `describe_other_products(exclude, exclude_item_ids=None)` — one line per product:
     `- <Path label>: [bucket/status] Title; [bucket/status] Title; ...`, open items only.
     Excludes the **whole subtree** of `exclude`, not just that one product, so nothing
-    covered at full depth comes back a second time as a one-liner. Carries `(OVERDUE)`
-    but not the dates themselves: this view is awareness, and another product's slipping
-    date is worth knowing where its exact start is noise.
+    covered at full depth comes back a second time as a one-liner. `exclude` accepts a
+    list, for a session owning several unrelated boards. `exclude_item_ids` applies the
+    same rule one level down, to individual changes — an initiative's changes are read at
+    full depth wherever they live, including on boards the session does not own, and
+    without this each would reappear as a one-liner immediately below; a board with
+    nothing left to report drops out entirely. Carries `(OVERDUE)` but not the dates
+    themselves: this view is awareness, and another product's slipping date is worth
+    knowing where its exact start is noise.
+  - `describe_initiative(heading, groups, ticket_lookup)` — the **other lens**, for an
+    initiative-scoped session: full depth grouped `Project → Change`, every change naming
+    its own board (`[on <Path label>'s board]`), because in this view consecutive changes
+    routinely sit on different ones. `groups` is assembled by the caller
+    (`server._initiative_context`) since it joins portfolio knowledge with roadmap
+    knowledge and neither store may reach into the other.
+- `owned_subtrees(products)` — the union of several products' subtrees in display order,
+  each named once, unknown ids dropped. The generalization of `subtree_products` for a
+  session that owns more than one root (§6).
 
 ## 3b. `portfolio.py` — the work model above the roadmap
 
@@ -181,7 +195,10 @@ Goals  ⇄  Initiative  →  Project  →  Change
 - **Products are not a level.** Product hangs off the Change. That is what makes the
   cross-cutting relationships free: an initiative spans products because its projects'
   changes each carry their own product, and a product appears in many initiatives for
-  the same reason. No association records exist or are needed.
+  the same reason. No association records exist or are needed. It is also what lets a
+  *session* be scoped to an initiative rather than pinned to a product (§6): the set of
+  products an initiative touches is **derived** from its changes, so it can be discovered
+  as the work goes.
 - Goals, Initiatives and Projects each carry a `status` of `"open"|"closed"` plus a
   `closed_at` stamp. Products are persistent (they come from config); everything in
   the chain is temporary.
@@ -204,6 +221,26 @@ project needs a parent. So `ensure_maintenance_scaffold()` (exposed as
 exists) declares the trio once, explicitly, with deployment-chosen names. From then on
 a change created with no `project_id` lands in the catch-all instead of floating. The
 catch-all project and its maintenance initiative cannot be closed or deleted.
+
+### Per-initiative catch-alls
+
+The global catch-all hangs off the **maintenance** initiative, so it is the wrong home for
+an initiative-scoped session that has no project of its own: falling through to it would
+bill that session's every turn against maintenance, silently, in the one report that exists
+to answer "what did this initiative cost". So `ensure_initiative_catch_all(initiative_id)`
+creates one catch-all per initiative on demand (when a session is pinned to it — see
+`POST /sessions/{id}/initiative`), marked by `Project.catch_all_for_initiative` rather than
+by title, so a rename cannot orphan the attribution.
+
+Attribution stays a **real project** rather than being recorded one level up at the
+initiative, because the additive tree's exactness rests on `Change → Project → Initiative`
+being a unique path; recording above Project would leave the by-project rollup with a hole
+the by-initiative totals don't have.
+
+Two guards follow: an initiative's own catch-all cannot be deleted on its own (it goes with
+the initiative), and it does **not** count as a reason to refuse deleting that initiative —
+otherwise every initiative that ever hosted a scoped session would be undeletable, blocked
+by a project nobody created. A declared project still refuses, as before.
 
 `PortfolioStore` mirrors `RoadmapStore`'s conventions: one server-owned JSON file at
 `<workspace_root>/workspace/portfolio.json`, single lock around mutations, subscriber
@@ -244,7 +281,25 @@ changing any item.
 Deleting is refused rather than silently cascading: a goal an initiative still serves,
 an initiative that still has projects, a project that still has changes. The change
 count is passed *in* by the server (`roadmap_store.count_by_project`) so this module
-never reaches across into the roadmap store.
+never reaches across into the roadmap store. An initiative a live (non-archived) session
+is still scoped to is refused too — checked in `server.py`, since the portfolio has no
+business knowing sessions exist, and the sessions are **named** in the error, because a
+session losing its scope mid-conversation is something the person clicking delete should
+decide knowingly.
+
+### Session scope report
+
+`_session_scope_report()` (on `GET /portfolio/data`, rendered as a banner on the portfolio
+page) reports sessions whose scope has drifted. Never blocking — the same choice the model
+makes about an unaligned project — but never silent either, because each of these makes a
+cost figure quietly mean something other than what it says:
+
+- `missing` — scoped to an initiative that no longer exists.
+- `closed` — scoped to one that was closed while the session ran on.
+- `mismatch` — has **both** a project and an initiative, and the project belongs to a
+  different initiative. Attribution follows the **project** (the more specific statement,
+  and the only one the additive rollup can use), so the initiative pin is the part that is
+  lying.
 
 ## 3c. `trackers.py` — external issue trackers (Jira / Azure DevOps)
 
@@ -358,19 +413,40 @@ Constants: `PM_TIMEOUT_SECONDS = 1800`, `MAX_AUTO_CONTINUE_STREAK = 6`,
 ### System prompt & allowlist
 Built per session from the templates in PROMPTS.md, with these session-scoped URLs baked
 in: `tasks_base_url = http://<host>:<port>/tasks/<session_id>`,
-`session_meta_url = http://<host>:<port>/sessions/<session_id>/meta`. The allowlist is
+`session_meta_url = http://<host>:<port>/sessions/<session_id>/meta`,
+`scope_url = http://<host>:<port>/sessions/<session_id>/scope`. The allowlist is
 the security model — literal prefix matching means a PM structurally cannot touch
-another session or another product's board:
+another session or a board outside its own ownership:
 
 ```
 Bash(curl -s -X POST {tasks_base_url}*)
 Bash(curl -s {tasks_base_url}*)
 Bash(curl -s -X POST {session_meta_url}*)
-# product-pinned sessions only:
+# initiative-scoped sessions only:
+Bash(curl -s -X POST {scope_url}*)                  # adopt/release a board for ITSELF
+# sessions that own a board, OR are initiative-scoped:
 Bash(curl -s -X POST {ROADMAP_BASE_URL}/*)          # POST broad: cross-product handoff is intended
-Bash(curl -s -X PATCH {ROADMAP_BASE_URL}/{product}/*)  # PATCH own product only
+# one entry per OWNED board (Session.owned_products()):
+Bash(curl -s -X PATCH {ROADMAP_BASE_URL}/{owned}/*)
 Write Read WebSearch WebFetch
 ```
+
+Note the POST grant: an initiative-scoped session that owns nothing yet still gets it,
+because suggesting work on another board is its only way to reach one, and the prompt
+promises exactly that. The default session (no product, no initiative) gets neither POST
+nor PATCH, as before.
+
+`_refresh_scope()` builds the prompt and the allowlist **together**, from one
+`owned_products()` call, and `set_scope(initiative_id, adopted_products)` re-runs it on a
+live agent. They are two statements of one rule: building them apart is how a PM ends up
+told it owns a board it cannot write to, or handed one it was never told about.
+
+An initiative-scoped session's prompt gets `INITIATIVE_GUIDANCE_TEMPLATE` prepended,
+including one line that changes as it widens — `NO_BOARDS_OWNED_YET` (stated as the
+correct starting state, not a limit to route around) or `BOARDS_OWNED_TEMPLATE` listing
+what it has adopted. The initiative's own title, description and goals are deliberately
+**not** baked into the prompt: they arrive in the per-turn context block, which is rebuilt
+from the store every turn, so a rename cannot go stale here.
 
 ### Turn execution
 `_run_pm_turn(text)` runs:
@@ -425,7 +501,52 @@ computation.
 `merge_result: dict|None`, `sync_result: dict|None` (separate — a failed sync never
 changes status), `product: str|None`, `archived: bool` (visibility flag, independent of
 lifecycle), `model` (defaults so old records load), `title: str|None`,
-`goal: str|None` (PM-maintained, nullable so old records fall back to `name`).
+`goal: str|None` (PM-maintained, nullable so old records fall back to `name`),
+`project_id: str|None` (which Project its activity is attributed to),
+`initiative_id: str|None` and `adopted_products: list[str]` (see below).
+
+### Scope: two orthogonal axes
+
+A session's scope is two independent things, and keeping them apart is the whole design:
+
+| | field | means |
+|---|---|---|
+| **Authority** | `product` + `adopted_products` | which boards this session may **write** to — enforced by the allowlist, not by convention |
+| **Scope** | `initiative_id` | what the session is **about**, and where its cost lands |
+
+All four combinations are meaningful, none is a special case:
+
+- **product only** — a single product's PM. Unchanged from before this existed.
+- **initiative only** — work that deliberately spans several integrated products. Which
+  ones is *discovered as the session goes*, not declared up front.
+- **both** — this board's share of that initiative.
+- **neither** — the default session's shallow awareness of everything.
+
+`Session.owned_products()` is the single definition of authority:
+`owned_subtrees([product, *adopted_products])` — a union of subtrees, so adopting a parent
+adopts its children exactly as pinning one always has. It feeds **both** the roadmap
+context a turn is given and the allowlist that enforces it, so the two cannot disagree
+about what a session owns.
+
+**Breadth is not authority.** An initiative-scoped session sees its whole initiative at
+full depth from turn one but starts able to write **nowhere**. It widens only by adopting
+a board explicitly — `POST /sessions/{id}/scope {"adopt_product": ...}`, which the PM may
+call for itself (the URL carries its own session id, so it can never widen another
+session's authority) and which the stakeholder sees happen in the conversation.
+`release_product` hands a board back. Adoption is an **event**, never passive discovery,
+precisely because it rebuilds the PATCH allowlist.
+
+`set_initiative` / `adopt_product` / `release_product` push the new scope into the live
+`PMAgent` via `set_scope` (see §5) rather than rebuilding the runtime, which would drop
+the PM's turn lock and its dev-task registry. Effective from the **next** turn: the CLI
+subprocess for a turn already in flight was launched with the old `--allowedTools`, and
+the prompt says so outright, or the PM tries its PATCH immediately and reports itself
+blocked.
+
+Validation of `initiative_id` and `project_id` lives in `server.py`, not here — the
+session registry has no business knowing the portfolio store exists. A session can outlive
+the initiative it names; every reader treats an id that no longer resolves as *unscoped*
+rather than an error, and `_session_scope_report` surfaces it.
 
 `Status = active | merging | merged | conflict | archived`.
 
@@ -510,10 +631,13 @@ background-thread → websocket hops via `loop.call_soon_threadsafe(asyncio.crea
 |---|---|
 | `GET /` | sessions.html |
 | `GET /sessions` | list of `_public_session` dicts (session + derived `activity`) |
-| `POST /sessions` | create `{name?, product?, model?}` |
+| `POST /sessions` | create `{name?, product?, initiative_id?, project_id?, model?}`; an initiative-scoped session with no product is named after its initiative, and its catch-all project is created up front |
 | `GET /sessions/{id}` | one session |
 | `POST /sessions/{id}/model` | live model switch |
 | `POST /sessions/{id}/meta` | PM-maintained title/goal; returns `_public_session` |
+| `POST /sessions/{id}/project` | attribution target; `""` clears |
+| `POST /sessions/{id}/initiative` | scope to an initiative; `""` clears. Ensures that initiative's catch-all project exists, so the attribution read on the signal path stays a read |
+| `POST /sessions/{id}/scope` | `{"adopt_product"}` or `{"release_product"}` (exactly one). Refused for a session with no initiative — a product-pinned session's boards are the stakeholder's to set. Called by the PM itself as well as the UI |
 | `GET /models` | the allow-list |
 | `POST /sessions/{id}/merge` / `/sync` / `/terminate` / `/cleanup` / `/archive` / `/unarchive`, `DELETE /sessions/{id}` | lifecycle (background threads for merge/sync/terminate) |
 | `GET /chat/{id}`, `GET /dashboard/{id}`, `GET /roadmap` | static pages |
@@ -531,8 +655,11 @@ Optional: zero-segment aliases to the default session (`/tasks`, `/history`, `/w
 
 ### Chat websocket flow
 On message `{text, attachments[]}`: build `other_ctx =
-describe_other_active_sessions(id)` and `roadmap_ctx = _roadmap_context_for(id)` (own
-product deep + others digest for pinned sessions; digest-of-all for unpinned), run
+describe_other_active_sessions(id)` and `roadmap_ctx = _roadmap_context_for(id)` — own
+product deep + others digest for pinned sessions; digest-of-all for unpinned; and for an
+initiative-scoped session the **initiative first** at full depth (its changes cut across
+boards, so leading with one product's roadmap would bury the actual scope), then one
+full-depth block per owned root, then the digest of everything not already shown — run
 `handle_user_message` in an executor, stream events back through an asyncio queue.
 **Per-connection send lock**: two producers can push to one socket (the normal turn
 loop, and an auto-continuation broadcast firing at an arbitrary time) and concurrent
@@ -619,10 +746,18 @@ vertical space on a board that wants it.
   badge, and the LIVE activity signal: pulsing-dot "Working" pill (with the running dev
   task's description when reason=dev_task), a loud amber left-border + tinted
   background + "⏳ Waiting for you" badge for waiting (with a reduced-motion guard),
-  ordering waiting → working → rest. Create form: optional name ("leave blank to
-  auto-title"), product picker, model picker. Per-card actions: open chat, merge, sync,
-  terminate, cleanup/delete, archive toggle (+ "show archived" filter). Live via
-  `/ws/sessions`; initial `GET /sessions`.
+  ordering waiting → working → rest. A card also shows its **initiative** (accented, above
+  the product tag — for a cross-product session that is the primary scope and the boards
+  are the derived thing), falling back to the raw id plus "no longer exists" rather than
+  going blank, since that is exactly the case worth seeing; and its boards as
+  `Pinned · Other (adopted)`, so authority arriving by a different route is visible at a
+  glance. Create form: optional name ("leave blank to auto-title"), product picker,
+  **initiative picker** (hidden until the deployment has open initiatives, so an instance
+  not using the work model gets no permanently empty control), model picker. Per-card
+  actions: open chat, merge, sync, terminate, cleanup/delete, archive toggle (+ "show
+  archived" filter). Live via `/ws/sessions`; initial `GET /sessions`, plus
+  `GET /portfolio/data` for initiative titles. Changing scope after creation is API-only
+  (`/initiative`, `/scope`), matching how `project_id` already worked.
 - **chat.html** (`/chat/{id}`) — ONE chronological timeline, everything reading
   oldest→newest with newest at bottom (no second list sorted the other way — that was
   a real stakeholder complaint that forced a redesign). Chat messages (user / pm /

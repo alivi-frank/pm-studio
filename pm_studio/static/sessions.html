@@ -66,13 +66,26 @@
     margin: 0 auto;
     padding: 24px;
   }
+  /* Wraps rather than overflows. A <select> defaults to `min-width: auto`, meaning as wide
+     as its longest option - so a row of them sized by their content (an initiative title
+     can be a sentence) overflowed `main`'s column to the right instead of shrinking, and on
+     a narrower viewport the button left the page entirely. Every control below therefore
+     gets an explicit flex basis and `min-width: 0`, which is what lets the row shrink at
+     all, and the row wraps to a second line before anything is squashed unreadable. */
   #new-form {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
     margin-bottom: 24px;
   }
   #new-form input {
-    flex: 1;
+    /* Its own full-width row, so the pickers below get the whole column to share. Four
+       controls plus the button never fit one 720px line without squeezing the selects to
+       where their labels are unreadable - and the free-text field is the one that actually
+       benefits from the width. Two deliberate rows beat one cramped row that wraps
+       differently depending on how long a deployment's initiative titles happen to be. */
+    flex: 1 1 100%;
+    min-width: 0;
     padding: 10px 14px;
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -81,19 +94,49 @@
     font: inherit;
   }
   #new-form select {
+    /* An explicit basis, so the longest option's width no longer drives the layout. */
+    flex: 1 1 150px;
+    min-width: 0;
+    max-width: 100%;
     padding: 10px 14px;
     border: 1px solid var(--border);
     border-radius: 8px;
     background: var(--surface);
     color: var(--ink-primary);
     font: inherit;
+    /* A long initiative title is clipped in the closed control rather than widening it;
+       the full text is still in the open list and in the `title` tooltip. */
+    text-overflow: ellipsis;
   }
-  .card .product-badge {
+  /* The model picker holds short fixed labels - no reason to give it a share of the
+     leftover space the two long-labelled pickers can use. */
+  #new-form #new-model { flex: 0 1 auto; }
+  /* Both badges follow .goal's one-line-with-ellipsis rule rather than wrapping. Each can
+     now hold a long string - an initiative title is a phrase, and the board line lists every
+     adopted board - and in the narrow column this card gives them, wrapping turned a 240px
+     card into a 420px one stacked a word per line. The full text stays available as the
+     element's `title`. */
+  .card .product-badge,
+  .card .initiative-badge {
     font-size: 0.78em;
-    color: var(--ink-muted);
     margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
   }
+  .card .product-badge { color: var(--ink-muted); }
+  /* The initiative a session works IN, distinct from the board(s) it can write to -
+     accented, because for a cross-product session this is the primary scope and the
+     product badge is the derived one. */
+  .card .initiative-badge { color: var(--accent); }
   #new-form button {
+    /* Never shrinks and never wraps its own label: squeezed to fit it broke into
+       "+ New / session" two lines high, which dragged the whole row's height with it.
+       When the row does wrap, this sits at the end of the last line. */
+    flex: 0 0 auto;
+    margin-left: auto;
+    white-space: nowrap;
     padding: 10px 18px;
     border: none;
     border-radius: 8px;
@@ -246,6 +289,12 @@
   <form id="new-form">
     <input id="new-name" type="text" placeholder="Session name (optional — the PM will auto-title this session)" />
     <select id="new-product"><option value="">General (no specific product)</option></select>
+    <!-- Hidden until the deployment actually has initiatives to pick: on an instance not
+         using the work model this would be a permanently empty control. -->
+    <select id="new-initiative" hidden
+            title="Work IN an initiative instead of on one product. Leave the product as General when the initiative spans several - the session finds out which as it goes, and adopts those boards then.">
+      <option value="">No initiative</option>
+    </select>
     <select id="new-model"></select>
     <button id="new-submit" type="submit">+ New session</button>
   </form>
@@ -262,6 +311,7 @@
   const form = document.getElementById("new-form");
   const nameInput = document.getElementById("new-name");
   const productSelect = document.getElementById("new-product");
+  const initiativeSelect = document.getElementById("new-initiative");
   const modelSelect = document.getElementById("new-model");
   const submitBtn = document.getElementById("new-submit");
   const showArchivedCheckbox = document.getElementById("show-archived");
@@ -269,6 +319,9 @@
   let PRODUCTS = {};
   // child product id -> parent id (see config._parse_products); empty on a flat taxonomy.
   let PRODUCT_PARENTS = {};
+  // initiative id -> title, for the picker and the per-card badge. Empty on a deployment
+  // that hasn't declared any, which is why the picker starts hidden.
+  let INITIATIVES = {};
 
   // Every product above this one, nearest first ([] for a top-level one). `seen` guards a
   // cyclic taxonomy the same way roadmap.ancestors_of does - the server refuses one at
@@ -313,6 +366,27 @@
         productSelect.appendChild(opt);
       }
       renderList(); // re-render with product labels now known
+    })
+    .catch(() => {});
+
+  // Only OPEN initiatives are offered: starting a session in a closed one is a mistake
+  // every time, and an existing session pinned to one is reported rather than hidden (see
+  // server.py's _session_scope_report).
+  fetch("/portfolio/data")
+    .then((r) => (r.ok ? r.json() : null))
+    .then((data) => {
+      if (!data) return;
+      for (const initiative of data.initiatives || []) {
+        INITIATIVES[initiative.id] = initiative.title;
+        if (initiative.status !== "open") continue;
+        const opt = document.createElement("option");
+        opt.value = initiative.id;
+        opt.textContent = initiative.title;
+        opt.title = initiative.description || initiative.title;
+        initiativeSelect.appendChild(opt);
+      }
+      if (initiativeSelect.options.length > 1) initiativeSelect.hidden = false;
+      renderList(); // re-render with initiative titles now known
     })
     .catch(() => {});
 
@@ -410,7 +484,8 @@
         <div class="name"></div>
         ${goal ? `<div class="goal"></div>` : ""}
         <div class="branch"></div>
-        ${session.product ? `<div class="product-badge"></div>` : ""}
+        ${session.initiative_id ? `<div class="initiative-badge"></div>` : ""}
+        ${session.product || (session.adopted_products || []).length ? `<div class="product-badge"></div>` : ""}
         ${note ? `<div class="result-note"></div>` : ""}
       </a>
       <div class="actions"></div>
@@ -423,8 +498,29 @@
     branchEl.textContent = session.branch;
     const activityEl = buildActivityEl(activity);
     if (activityEl) branchEl.insertAdjacentElement("afterend", activityEl);
-    if (session.product) {
-      card.querySelector(".product-badge").textContent = productPathLabel(session.product);
+    if (session.initiative_id) {
+      // The id is the fallback, not a blank: a session can outlive the initiative it names
+      // (see _session_scope_report), and showing nothing would hide exactly that case.
+      const title = INITIATIVES[session.initiative_id];
+      const badge = card.querySelector(".initiative-badge");
+      badge.textContent = title
+        ? `Initiative: ${title}`
+        : `Initiative: ${session.initiative_id} (no longer exists)`;
+      // The badge is one line with an ellipsis, so the untruncated text lives here.
+      badge.title = badge.textContent;
+    }
+    const adopted = session.adopted_products || [];
+    if (session.product || adopted.length) {
+      // Pinned board first, then whatever this session adopted as it found out which
+      // products its initiative touches - the adopted ones marked, since "can write here"
+      // arrived by a different route and is worth being able to see at a glance.
+      const boards = [
+        ...(session.product ? [productPathLabel(session.product)] : []),
+        ...adopted.map((p) => `${productPathLabel(p)} (adopted)`),
+      ];
+      const badge = card.querySelector(".product-badge");
+      badge.textContent = boards.join(" · ");
+      badge.title = badge.textContent;
     }
     if (note) card.querySelector(".result-note").textContent = note;
 
@@ -575,7 +671,12 @@
     fetch("/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: nameInput.value.trim(), product: productSelect.value, model: modelSelect.value }),
+      body: JSON.stringify({
+        name: nameInput.value.trim(),
+        product: productSelect.value,
+        initiative_id: initiativeSelect.value,
+        model: modelSelect.value,
+      }),
     })
       .then((r) => r.json())
       .then((session) => {

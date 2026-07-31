@@ -384,8 +384,16 @@ class OwnedBoardsTest(unittest.TestCase):
         """A PMAgent built far enough to hold its prompt and allowlist. Only the fields
         __init__ reads are needed, so a stub session keeps this off the session store."""
         session = dataclasses.make_dataclass(
-            "StubSession", ["id", "product", "model", "worktree_path"]
-        )(id="s1", product=product, model="claude-opus-5", worktree_path=str(tmp))
+            "StubSession",
+            ["id", "product", "initiative_id", "adopted_products", "model", "worktree_path"],
+        )(
+            id="s1",
+            product=product,
+            initiative_id=None,
+            adopted_products=[],
+            model="claude-opus-5",
+            worktree_path=str(tmp),
+        )
         import threading
 
         return agent_module.PMAgent(session, threading.Lock())

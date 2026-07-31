@@ -181,6 +181,7 @@
   <p class="error" id="error"></p>
   <div id="bootstrap"></div>
   <div id="unaligned"></div>
+  <div id="session-scope"></div>
 
   <div class="columns">
     <section>
@@ -216,7 +217,11 @@
   </div>
 </main>
 <script>
-  let data = { goals: [], initiatives: [], projects: [], unaligned: { projects: [], initiatives: [] } };
+  let data = {
+    goals: [], initiatives: [], projects: [],
+    unaligned: { projects: [], initiatives: [] },
+    session_scope: [],
+  };
   const errorBox = document.getElementById("error");
 
   function showError(message) {
@@ -512,10 +517,49 @@
     host.appendChild(banner);
   }
 
+  // Sessions whose scope has drifted from the work model (see server.py's
+  // _session_scope_report). Same principle as the unaligned banner: never blocking, but
+  // never silent either - each of these makes a cost figure quietly mean something other
+  // than what it says.
+  const SCOPE_ISSUE_TEXT = {
+    missing: (row) =>
+      `"${row.label}" is scoped to an initiative that no longer exists. Re-scope it, or ` +
+      "its work keeps landing in the general catch-all.",
+    closed: (row) =>
+      `"${row.label}" is still working in "${row.initiative}", which is closed. Reopen the ` +
+      "initiative or move the session to a current one.",
+    mismatch: (row) =>
+      `"${row.label}" is scoped to "${row.initiative}" but its project "${row.project}" ` +
+      "belongs to a different initiative. Cost follows the project, so the initiative " +
+      "pin is the part that is wrong.",
+  };
+
+  function renderSessionScope() {
+    const host = document.getElementById("session-scope");
+    host.innerHTML = "";
+    const rows = data.session_scope || [];
+    if (!rows.length) return;
+    const banner = document.createElement("div");
+    banner.className = "banner";
+    const heading = document.createElement("strong");
+    heading.textContent = `Session scope needs attention (${rows.length}):`;
+    banner.appendChild(heading);
+    const list = document.createElement("ul");
+    for (const row of rows) {
+      const li = document.createElement("li");
+      const describe = SCOPE_ISSUE_TEXT[row.issue];
+      li.textContent = describe ? describe(row) : `"${row.label}": ${row.issue}`;
+      list.appendChild(li);
+    }
+    banner.appendChild(list);
+    host.appendChild(banner);
+  }
+
   async function load() {
     data = await api("/portfolio/data");
     renderBootstrap();
     renderUnaligned();
+    renderSessionScope();
     renderGoals();
     renderInitiatives();
     renderProjects();

@@ -188,7 +188,10 @@ three things and nothing else:
   them. A session pinned to `auth` gets `auth` and `sso`; `web` reaches it as a
   one-line digest like any other product. Nothing outside the subtree is writable —
   that stays a suggestion (`origin_product`), enforced by the agent's own URL
-  allowlist. A product in the middle is told it is both a parent and a child.
+  allowlist. A product in the middle is told it is both a parent and a child. (The one
+  way a session reaches beyond its pinned subtree is by *adopting* another board, which
+  only an initiative-scoped session can do, and only explicitly — see the README's
+  "Sessions that work in an initiative".)
 - **Names disambiguate.** Wherever a product is named with no section around it, it
   reads as its full path: `Web App / Auth & Identity / SSO`.
 

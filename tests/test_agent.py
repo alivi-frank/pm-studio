@@ -20,6 +20,8 @@ def _make_agent(worktree: Path) -> PMAgent:
     session = types.SimpleNamespace(
         id="testsess",
         product=None,
+        initiative_id=None,
+        adopted_products=[],
         model="claude-sonnet-5",
         worktree_path=str(worktree),
     )

@@ -51,6 +51,7 @@ from .roadmap import (
     RoadmapItem,
     RoadmapStore,
     TicketAlreadyLinked,
+    parent_of,
 )
 from .sessions import DEFAULT_SESSION_ID, SessionManager, SessionRuntime
 from .trackers import TrackerError, TrackerStore, normalize_key
@@ -155,22 +156,120 @@ def _with_ticket(item: dict) -> dict:
     }
 
 
+def _initiative_context(initiative_id: str) -> tuple[str, list[str]] | None:
+    """The initiative block for an initiative-scoped session: what the initiative is,
+    which goals it serves, and every open change under its projects at full depth.
+
+    Composed here rather than in either store, because it is a join across both: which
+    projects belong to the initiative is the portfolio's knowledge, which changes belong
+    to a project is the roadmap's. Returns None for an id that no longer resolves, so a
+    session that outlived its initiative degrades to the plain product view instead of
+    erroring on every turn.
+
+    Returns the block and the ids of every change it rendered, so the awareness digest can
+    leave those out - an initiative's changes sit on boards the session may not own, and
+    without this each one would reappear as a one-liner immediately below.
+    """
+    scope = portfolio_store.initiative_scope(initiative_id)
+    if scope is None:
+        return None
+    initiative = scope["initiative"]
+    by_project: dict[str, list[dict]] = {}
+    for items in roadmap_store.list_all().values():
+        for change in items:
+            if change.get("project_id"):
+                by_project.setdefault(change["project_id"], []).append(change)
+
+    goals = ", ".join(g["title"] for g in scope["goals"]) or "none yet (unaligned)"
+    heading = (
+        f'INITIATIVE: "{initiative["title"]}" [{initiative["status"]}] - this session\'s scope.\n'
+        f"Serves: {goals}."
+    )
+    if initiative.get("description"):
+        heading += f'\n{initiative["description"]}'
+
+    groups = []
+    for project in scope["projects"]:
+        changes = by_project.get(project["id"], [])
+        # The initiative's auto-created catch-all is plumbing, not a project anyone
+        # planned, so an empty one is left out entirely rather than shown as a project
+        # with no changes - it exists to hold cost, and reading it back as work would
+        # invite the PM to treat it as part of the plan. Once something has actually
+        # landed in it, it shows like any other group: that IS unplanned work worth
+        # seeing.
+        if project.get("catch_all_for_initiative") and not changes:
+            continue
+        groups.append(
+            (
+                f'Project "{project["title"]}" [{project["status"]}] (id `{project["id"]}`)',
+                changes,
+            )
+        )
+    if not groups:
+        return (
+            f"{heading}\n\nNo projects under this initiative yet - so there are no changes "
+            "to show. Establishing what it is made of is part of this session's job.",
+            [],
+        )
+    # Only the changes describe_initiative actually renders - it drops done ones, and a
+    # change already shipped is exactly the kind of thing the digest should still be free
+    # to mention on another board's line.
+    shown = [
+        change["id"]
+        for _, changes in groups
+        for change in changes
+        if change["status"] != "done"
+    ]
+    return (
+        roadmap_store.describe_initiative(heading, groups, ticket_lookup=_lookup_ticket),
+        shown,
+    )
+
+
 def _roadmap_context_for(session_id: str) -> str:
     """Builds the roadmap block injected into a PM's turn: full depth on its own
     product SUBTREE (the pinned product and, for a parent, its child products - see
     roadmap.subtree_products), a one-line digest of every product outside that subtree
     for general awareness only. A session with no pinned product (e.g. the default
     session) gets the shallow digest of every product and nothing deep - see sessions.py's
-    Session.product."""
+    Session.product.
+
+    An initiative-scoped session (Session.initiative_id) gets its initiative at full depth
+    FIRST, then the same product blocks for whichever boards it owns - the initiative is
+    what that session is accountable for, and its changes cut across boards, so leading
+    with one product's roadmap would bury the actual scope. Ownership is the union of its
+    pinned and adopted subtrees (Session.owned_products), so a session that has adopted
+    several boards reads each at full depth and still gets a digest of everything else.
+    """
     session = sessions.get(session_id)
-    product = session.product if session is not None else None
-    if product:
-        own = roadmap_store.describe_own_product(product, ticket_lookup=_lookup_ticket)
-        others = roadmap_store.describe_other_products(product)
-        if others:
-            return f"{own}\n\nOther products (brief, for awareness only):\n{others}"
-        return own
-    return roadmap_store.describe_other_products("")
+    if session is None:
+        return roadmap_store.describe_other_products("")
+
+    owned = session.owned_products()
+    blocks: list[str] = []
+    shown_ids: list[str] = []
+    if session.initiative_id:
+        rendered = _initiative_context(session.initiative_id)
+        if rendered is not None:
+            initiative_block, shown_ids = rendered
+            blocks.append(initiative_block)
+    # Each owned ROOT, not each owned product: describe_own_product already covers a
+    # product's whole subtree, so passing every owned id would repeat a child's changes
+    # under its own heading and again under its parent's.
+    for root in [p for p in owned if parent_of(p) not in owned]:
+        blocks.append(
+            roadmap_store.describe_own_product(root, ticket_lookup=_lookup_ticket)
+        )
+
+    others = roadmap_store.describe_other_products(owned or "", exclude_item_ids=shown_ids)
+    if not blocks:
+        # Owns nothing and has no initiative to lead with: the default session, whose
+        # whole context IS the digest. Returned bare, with no "other products" heading -
+        # there is no "own" block for them to be other than.
+        return others
+    if others:
+        blocks.append(f"Other products (brief, for awareness only):\n{others}")
+    return "\n\n".join(blocks)
 
 
 def _public_session(session) -> dict:
@@ -737,8 +836,29 @@ def create_session(request: Request, payload: dict = Body(default={})) -> dict:
     product = (payload.get("product") or "").strip() or None
     model = (payload.get("model") or "").strip() or None
     project_id = _validated_project_id(payload.get("project_id"))
+    initiative_id = (payload.get("initiative_id") or "").strip() or None
+    initiative = None
+    if initiative_id is not None:
+        initiative = portfolio_store.get_initiative(initiative_id)
+        if initiative is None:
+            raise HTTPException(
+                status_code=400, detail=f"Unknown initiative: {initiative_id}"
+            )
+        # Same reason as set_session_initiative: the attribution fallback is a pure read,
+        # so the project it falls back to has to exist before the first turn runs.
+        try:
+            portfolio_store.ensure_initiative_catch_all(initiative_id)
+        except PortfolioError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # An initiative-scoped session with no product has no product label to be named
+    # after, and "Session 4f2a1b" tells nobody anything - so it takes the initiative's
+    # title, which is exactly what it is about.
+    if name is None and product is None and initiative is not None:
+        name = initiative.title
     try:
-        session = sessions.create(name, product, model, project_id=project_id)
+        session = sessions.create(
+            name, product, model, project_id=project_id, initiative_id=initiative_id
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _audit(actor, "session.created", session.id, session.name)
@@ -796,6 +916,81 @@ def set_session_project(session_id: str, request: Request, payload: dict = Body(
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     _audit(actor, "session.project_set", session_id, project_id or "(cleared)")
+    return _public_session(session)
+
+
+@app.post("/sessions/{session_id}/initiative")
+def set_session_initiative(session_id: str, request: Request, payload: dict = Body(...)) -> dict:
+    """Scopes a session to an Initiative - work that spans several products rather than
+    sitting on one board. `initiative_id: ""` clears it.
+
+    Creates that initiative's catch-all project as a side effect, so the session's turns
+    are attributed to the initiative it is actually working in from the very first one,
+    rather than to maintenance (see _session_project_id). Done here, once, because the
+    read on the signal-recording path must stay a read.
+    """
+    actor = _require(request, "run_session")
+    initiative_id = (payload.get("initiative_id") or "").strip() or None
+    if initiative_id is not None:
+        if portfolio_store.get_initiative(initiative_id) is None:
+            raise HTTPException(
+                status_code=400, detail=f"Unknown initiative: {initiative_id}"
+            )
+        try:
+            portfolio_store.ensure_initiative_catch_all(initiative_id)
+        except PortfolioError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        session = sessions.set_initiative(session_id, initiative_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _audit(actor, "session.initiative_set", session_id, initiative_id or "(cleared)")
+    return _public_session(session)
+
+
+@app.post("/sessions/{session_id}/scope")
+def set_session_scope(session_id: str, request: Request, payload: dict = Body(...)) -> dict:
+    """Adopts or releases one product board for this session - how an initiative-scoped
+    session widens as it works out which products its initiative actually touches.
+
+    Called by the PM itself (see agent.py's INITIATIVE_GUIDANCE_TEMPLATE) as well as from
+    the sessions page, which is why the URL carries the session id: the PM's allowlist
+    grants this exact literal prefix, so a session can only ever widen ITS OWN authority.
+    Refused for a session with no initiative - a product-pinned session's scope is the
+    stakeholder's to change, not something the PM talks itself into.
+    """
+    actor = _require(request, "run_session")
+    adopt = (payload.get("adopt_product") or "").strip() or None
+    release = (payload.get("release_product") or "").strip() or None
+    if bool(adopt) == bool(release):
+        raise HTTPException(
+            status_code=400,
+            detail="Pass exactly one of adopt_product or release_product.",
+        )
+    session = sessions.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}")
+    if not session.initiative_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This session is not scoped to an initiative, so its product boards are "
+                "fixed. Pin it to an initiative first if it needs to span products."
+            ),
+        )
+    try:
+        if adopt:
+            session = sessions.adopt_product(session_id, adopt)
+        else:
+            session = sessions.release_product(session_id, release)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit(
+        actor,
+        "session.product_adopted" if adopt else "session.product_released",
+        session_id,
+        adopt or release,
+    )
     return _public_session(session)
 
 
@@ -1049,13 +1244,27 @@ def _actor_id(actor: User | None) -> str:
 
 
 def _session_project_id(session_id: str) -> str | None:
-    """Which Project a session's activity counts towards: its own if it has one, else
-    the catch-all if the deployment declared one, else nothing. This mirrors how a
-    change with no project lands in the catch-all - unplanned work is attributed rather
-    than silently dropped."""
+    """Which Project a session's activity counts towards: its own if it has one, else its
+    initiative's catch-all if it is initiative-scoped, else the global catch-all if the
+    deployment declared one, else nothing. This mirrors how a change with no project lands
+    in the catch-all - unplanned work is attributed rather than silently dropped.
+
+    The middle step is not optional. The global catch-all hangs off the MAINTENANCE
+    initiative, so falling straight through to it would bill every turn of a session
+    scoped to some other initiative against maintenance - silently, and in the one report
+    that exists to answer "what did this initiative cost". The per-initiative catch-all is
+    created when the session is pinned (see set_session_initiative); this path only reads,
+    since it runs on every recorded signal.
+    """
     session = sessions.get(session_id)
-    if session is not None and session.project_id:
+    if session is None:
+        return portfolio_store.catch_all_project_id
+    if session.project_id:
         return session.project_id
+    if session.initiative_id:
+        scoped = portfolio_store.catch_all_project_for_initiative(session.initiative_id)
+        if scoped is not None:
+            return scoped
     return portfolio_store.catch_all_project_id
 
 
@@ -1118,12 +1327,59 @@ def portfolio_page() -> FileResponse:
     return _app_asset("portfolio.html")
 
 
+def _session_scope_report() -> list[dict]:
+    """Sessions whose scope doesn't hold together, one entry each.
+
+    Reported, never blocked - the same choice the work model makes about an unaligned
+    project (see portfolio.py): nobody should be stopped mid-conversation because their
+    initiative got closed underneath them, but nobody should have to discover it from a
+    cost report either. Three ways it can drift:
+
+    - `missing`: pinned to an initiative that no longer exists.
+    - `closed`: pinned to one that has been closed while the session runs on.
+    - `mismatch`: has BOTH a project and an initiative, and the project belongs to a
+      different initiative. Attribution follows the project (it is the more specific
+      statement, and the only one the additive rollup can use), so the initiative pin is
+      the part that is lying.
+
+    Computed here because it joins sessions against the portfolio, and only this module
+    knows about both.
+    """
+    report: list[dict] = []
+    for session in sessions.list_sessions():
+        if session.archived or not session.initiative_id:
+            continue
+        entry = {
+            "session_id": session.id,
+            "label": session.title or session.name,
+            "initiative_id": session.initiative_id,
+        }
+        initiative = portfolio_store.get_initiative(session.initiative_id)
+        if initiative is None:
+            report.append({**entry, "issue": "missing"})
+            continue
+        if initiative.status == "closed":
+            report.append({**entry, "issue": "closed", "initiative": initiative.title})
+        if session.project_id:
+            project = portfolio_store.get_project(session.project_id)
+            if project is not None and project.initiative_id != session.initiative_id:
+                report.append({
+                    **entry,
+                    "issue": "mismatch",
+                    "initiative": initiative.title,
+                    "project": project.title,
+                    "attributed_to": project.initiative_id,
+                })
+    return report
+
+
 @app.get("/portfolio/data")
 def portfolio_data() -> dict:
     """Goals, initiatives, projects, the catch-all id, and the unaligned report."""
     return {
         **portfolio_store.snapshot(),
         "unassigned_changes": roadmap_store.unassigned_items(),
+        "session_scope": _session_scope_report(),
     }
 
 
@@ -1217,6 +1473,24 @@ def update_initiative(initiative_id: str, request: Request, payload: dict = Body
 @app.delete("/portfolio/initiatives/{initiative_id}")
 def delete_initiative(initiative_id: str, request: Request) -> dict:
     _require(request, "manage_roadmap")
+    # Checked here rather than in the store, for the same reason project validation lives
+    # in this module: the portfolio has no business knowing sessions exist. Sessions are
+    # named rather than silently unpinned, because a live session losing its scope
+    # mid-conversation is exactly the kind of thing whoever clicked delete should decide
+    # about knowingly.
+    scoped = [
+        s for s in sessions.list_sessions()
+        if s.initiative_id == initiative_id and not s.archived
+    ]
+    if scoped:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Sessions are still scoped to this initiative: "
+                + ", ".join(f'"{s.title or s.name}"' for s in scoped)
+                + ". Re-scope or archive them first."
+            ),
+        )
     try:
         portfolio_store.delete_initiative(initiative_id)
     except PortfolioError as exc:

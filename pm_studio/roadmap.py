@@ -6,7 +6,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Callable, Iterable, Literal
 
 from .config import CONFIG
 
@@ -85,6 +85,27 @@ def subtree_products(product: str) -> list[str]:
 
     walk(product)
     return family
+
+
+def owned_subtrees(products: Iterable[str]) -> list[str]:
+    """The union of several products' subtrees, in display order, each named once.
+
+    One pinned product is the common case, but an initiative-scoped session owns a *set*
+    of boards that grows as it identifies which products an initiative touches (see
+    sessions.Session.adopted_products). Ownership still means "this product and
+    everything below it", so the set is a union of subtrees rather than a flat list -
+    adopting a parent brings its children with it, exactly as pinning one always has.
+
+    Unknown ids are dropped rather than raising: a board can outlive the config line
+    that named it, and this runs inside a PM's turn where a short answer beats an
+    exception. Order follows PRODUCTS (declaration order), not adoption order, so the
+    context block and the allowlist read as the taxonomy does.
+    """
+    owned: set[str] = set()
+    for product in products:
+        if product in PRODUCTS:
+            owned.update(subtree_products(product))
+    return [p for p in PRODUCTS if p in owned]
 
 
 def product_label(product: str) -> str:
@@ -595,14 +616,22 @@ class RoadmapStore:
         item: dict,
         owning_product: str,
         ticket_lookup: Callable[[str, str], dict | None] | None = None,
+        show_product: bool = False,
     ) -> str:
         """One change, at full depth, as its owning PM reads it.
 
         `owning_product` is the board the item sits on - which is what decides whether
         its origin makes it an untriaged suggestion, so it is passed rather than assumed
         to be the session's own product: a parent's context block covers several boards.
+
+        `show_product` names that board inline. Off by default because a product-pinned
+        session reads its changes under a product heading that already says so; on for
+        the initiative view, where consecutive changes in one project routinely sit on
+        different boards and the heading cannot say which.
         """
         flag = ""
+        if show_product:
+            flag += f" [on {product_path_label(owning_product)}'s board]"
         if item["origin_product"] != owning_product and not item["triaged"]:
             origin_label = product_path_label(item["origin_product"])
             flag = f" [UNTRIAGED suggestion from {origin_label} - accept or drop it]"
@@ -695,7 +724,11 @@ class RoadmapStore:
                 lines.append(self._describe_item(i, owned, ticket_lookup))
         return "\n".join(lines)
 
-    def describe_other_products(self, exclude_product: str) -> str:
+    def describe_other_products(
+        self,
+        exclude_product: str | Iterable[str],
+        exclude_item_ids: Iterable[str] | None = None,
+    ) -> str:
         """Shallow, title-only digest of every product OUTSIDE the pinned product's
         subtree - general awareness without depth: just bucket/status/title, no
         descriptions.
@@ -706,13 +739,33 @@ class RoadmapStore:
         meaning "somebody else's work". Passing an exclude_product that matches nothing
         (e.g. "") returns a digest of every product, for a session with no product of its
         own.
+
+        Several products may be excluded, for a session that owns several boards rather
+        than one subtree (an initiative-scoped session that has adopted products - see
+        owned_subtrees). Same rule, applied to each: full depth anywhere means no digest
+        line here.
+
+        `exclude_item_ids` applies that same rule one level down, to individual changes.
+        An initiative-scoped session reads its initiative's changes at full depth wherever
+        they live, including on boards it does not own - without this, every one of them
+        would come back as a digest one-liner on the very next line. A board whose every
+        open change was already shown drops out of the digest entirely, which is correct:
+        it has nothing left to make the PM aware of.
         """
-        excluded = set(subtree_products(exclude_product)) if exclude_product in PRODUCTS else set()
+        if isinstance(exclude_product, str):
+            roots = [exclude_product]
+        else:
+            roots = list(exclude_product)
+        excluded = set(owned_subtrees(roots)) | set(roots)
+        already_shown = set(exclude_item_ids or ())
         lines = []
         for product in PRODUCTS:
-            if product in excluded or product == exclude_product:
+            if product in excluded:
                 continue
-            items = [i for i in self.list_product(product) if i["status"] != "done"]
+            items = [
+                i for i in self.list_product(product)
+                if i["status"] != "done" and i["id"] not in already_shown
+            ]
             if not items:
                 continue
             summary = "; ".join(
@@ -728,4 +781,40 @@ class RoadmapStore:
             # The parent is named too, so a digest line reads unambiguously on a
             # deployment where two parents each have a "Billing".
             lines.append(f"- {product_path_label(product)}: {summary}")
+        return "\n".join(lines)
+
+    def describe_initiative(
+        self,
+        heading: str,
+        groups: list[tuple[str, list[dict]]],
+        ticket_lookup: Callable[[str, str], dict | None] | None = None,
+    ) -> str:
+        """Full-depth view of one initiative's work, grouped Project -> Change, for
+        injection into an initiative-scoped session (see sessions.Session.initiative_id).
+
+        The other lens on the same changes. `describe_own_product` slices by board and
+        answers "what is on my roadmap"; this slices by the work model and answers "what
+        is this initiative made of" - which is the question a cross-product initiative
+        actually poses, since its changes are scattered across boards no single product
+        view brings together.
+
+        `groups` is `[(project heading, [items])]`, assembled by the caller: which
+        projects belong to an initiative is the portfolio store's knowledge, and which
+        changes belong to a project is this store's, so neither reaches into the other
+        (same reason `ticket_lookup` is injected). Every change names its own board,
+        because in this view consecutive changes routinely sit on different ones.
+        """
+        lines = [heading]
+        for project_heading, items in groups:
+            open_items = [i for i in items if i["status"] != "done"]
+            if not open_items:
+                lines.append(f"\n{project_heading} - no open changes.")
+                continue
+            lines.append(f"\n{project_heading}:")
+            for item in open_items:
+                lines.append(
+                    self._describe_item(
+                        item, item["product"], ticket_lookup, show_product=True
+                    )
+                )
         return "\n".join(lines)

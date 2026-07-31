@@ -103,6 +103,25 @@ rather than dropping out of view.
 Entirely optional and entirely additive: existing boards load unchanged, and a
 deployment that ignores `/portfolio` behaves exactly as before.
 
+### Sessions that work in an initiative
+
+A session can be pinned to a product, scoped to an **initiative**, or both. The second is
+for enterprise work that genuinely spans several integrated products, where pinning one
+board would be a lie about the scope.
+
+Such a session reads its whole initiative every turn — its projects and their changes,
+across every board they sit on — but starts able to **write** nowhere. Which products an
+initiative actually touches is something the PM works out as the conversation goes; when
+it establishes that one is affected, it **adopts** that board, says so, and gains write
+access to it from the next turn. Adopting a parent adopts its sub-products, same as
+pinning always has.
+
+The two axes stay separate on purpose: the initiative is what the session is *about* and
+where its cost lands, the products are what it may *change*. Its turns are attributed to
+that initiative from the very first one, not to maintenance — and a session whose scope
+drifts (initiative closed, deleted, or disagreeing with its project) is reported on
+`/portfolio` rather than silently making a cost figure mean something else.
+
 ## Migrating an existing locally-built pm_agent
 
 Systems that built the earlier `pm_agent/` module from the reproduction pack can move
@@ -168,7 +187,10 @@ In `personal` mode this is a single-trusted-user, local-only tool: everything bi
 127.0.0.1 and dev agents run with bypassed permissions inside your repo. Do not expose
 the port. PM agents run under a strict literal-match Bash allowlist that structurally
 scopes them to their own session and to the product boards they own — their own, plus
-their sub-products' if they are pinned to a parent, and nothing else.
+their sub-products' if they are pinned to a parent, plus any board an initiative-scoped
+session has explicitly adopted, and nothing else. Adoption widens that allowlist, which is
+why it is an explicit call a PM makes for its own session and never something inferred
+from the conversation.
 
 Credential-bearing state (`accounts.json`, `costing.json`, `audit.jsonl`,
 `activity.jsonl`) is **unstaged from every snapshot commit unconditionally**, not merely

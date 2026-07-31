@@ -15,6 +15,7 @@ from .config import CONFIG, LOCAL_DIR_NAME
 from .costing import agent_usage
 from .roadmap import (
     PRODUCTS,
+    owned_subtrees,
     parent_of,
     product_label,
     product_path_label,
@@ -149,9 +150,15 @@ that is really about {child_example_label} belongs on `{child_example}`, not on 
 {product_label} because you happen to be pinned there. Keep each board for work that spans \
 what is below it or belongs to none of them in particular. A change filed in the wrong place \
 is not lost - move it with `move_to_product` as shown above.
-- Nothing outside this family is yours. Every OTHER product still gets the one-line digest \
-only, and reaching it means a suggestion (POST with `"origin_product"`), never a direct edit.
+- Nothing outside the boards you own is yours. Every OTHER product still gets the one-line \
+digest only, and reaching it means a suggestion (POST with `"origin_product"`), never a \
+direct edit.
 """
+# "the boards you own" rather than "this family": for a product-pinned session those are the
+# same thing (the bullets above just listed the family), but an initiative-scoped session
+# can own a second, unrelated subtree it adopted - and "nothing outside this family" would
+# then contradict the initiative block that just told it otherwise. A prompt that argues
+# with itself is worse than either statement alone.
 
 # Appended for a PM pinned to a product that HAS a parent - including one that is itself a
 # parent, which is why this is not exclusive with the template above. Short on purpose: a
@@ -200,6 +207,59 @@ digest of every product's roadmap for general context. You don't have write acce
 product's roadmap from here - if the stakeholder wants a roadmap item added or changed, tell \
 them to do it from the board at /roadmap, or from a session pinned to that specific product.
 """
+
+
+# Prepended for a session scoped to an INITIATIVE (see sessions.Session.initiative_id) -
+# work that deliberately spans several integrated products rather than sitting on one
+# board. It comes before the product guidance, not instead of it: an initiative session
+# may also be pinned to a home product, and may adopt more boards as it goes, at which
+# point everything the product templates say about those boards applies unchanged.
+#
+# The one thing this template has to get across is that breadth is not authority. The
+# session sees the whole initiative at full depth from turn one, but starts able to WRITE
+# only to the boards it owns - so identifying an affected product and claiming it are two
+# separate acts, and the second one is a curl.
+INITIATIVE_GUIDANCE_TEMPLATE = """\
+- You are working IN an initiative, not on a single product - the one named at the top of your \
+context block, with its goals and its description. Every turn opens with that initiative at \
+full depth: its projects and every change under them, each labelled with the board it sits on, \
+because those changes are scattered across products and no single product's roadmap brings them \
+together. The initiative is the thing you are accountable for here; a product is where a piece \
+of it happens to land.
+- Initiatives here are deliberately cross-product: several of this deployment's products are \
+integrated, so the work genuinely lands in more than one of them. Do NOT force the work onto \
+one board to make it fit. Which products an initiative touches is something you WORK OUT as \
+you go, and it is a real product decision - make it explicitly, with the stakeholder, rather \
+than assuming from the first thing they mention.
+- When you have established that a product is genuinely affected, ADOPT its board. That is what \
+gives you write access to it - until you do, you can suggest work there but not edit it:
+  curl -s -X POST {scope_url}{auth_header} -H "Content-Type: application/json" \
+-d '{{"adopt_product": "<product_id>"}}'
+  (valid product ids: {product_ids}). Adopting a product with sub-products adopts those too. \
+Say in the conversation that you're doing it and why - the stakeholder is watching the scope of \
+this session widen, and it should never be a surprise. If you were wrong, hand the board back \
+the same way with `{{"release_product": "<product_id>"}}`.
+  Adoption takes effect on your NEXT turn, not the one you run the curl in - so adopt, tell the \
+stakeholder, and do the writing to that board afterwards. Don't try the PATCH immediately and \
+report it as blocked.
+- {ownership_now}
+"""
+
+# The one line of INITIATIVE_GUIDANCE_TEMPLATE that changes as the session widens: what it
+# owns right now. Kept as two literals rather than a conditional inside the template so
+# the "you own nothing yet" case reads as its own instruction - it is the state a fresh
+# initiative session is actually in, and the one most likely to be misread as an error.
+NO_BOARDS_OWNED_YET = """\
+Right now you own NO product board, which is the correct starting state for this kind of \
+session and not a problem to route around. You can still POST suggestions to any board (with \
+`"origin_product"`, as below) and you can read every product's digest. What you cannot do yet \
+is edit an existing change anywhere. Work the initiative, find out where it lands, adopt as \
+that becomes clear."""
+
+BOARDS_OWNED_TEMPLATE = """\
+Boards you have adopted so far, and may write to directly: {owned_summary}. Everything the \
+guidance below says about your own board applies to each of them. Every other product is still \
+digest-only - suggest, don't edit."""
 
 
 PM_SYSTEM_PROMPT_TEMPLATE = """You are the Product Manager for a software product being built for a single \
@@ -372,6 +432,12 @@ class PMAgent:
     def __init__(self, session: "Session", git_lock: threading.Lock) -> None:
         self.session_id = session.id
         self.product = session.product
+        # The mutable half of this PM's scope (see set_scope): an initiative-scoped
+        # session widens what it owns as it works out which products are affected, so
+        # unlike `product` these two change over the session's life and the prompt and
+        # allowlist derived from them are rebuilt when they do.
+        self.initiative_id = session.initiative_id
+        self.adopted_products = list(session.adopted_products)
         self.model = session.model
         self.repo_root = Path(session.worktree_path)
         # workspace_rel, not the primary checkout's absolute workspace_dir: this
@@ -395,102 +461,17 @@ class PMAgent:
         self.project_index_path = self.repo_root / "PROJECT_INDEX.md"
         self.git_lock = git_lock
 
-        tasks_base_url = f"{CONFIG.base_url}/tasks/{session.id}"
+        self.tasks_base_url = f"{CONFIG.base_url}/tasks/{session.id}"
         # Session-scoped, exactly like tasks_base_url: the id is baked into the URL, so
         # the literal-prefix allowlist entry below structurally guarantees a PM can only
         # set its OWN session's title/goal, never another session's.
-        session_meta_url = f"{CONFIG.base_url}/sessions/{session.id}/meta"
+        self.session_meta_url = f"{CONFIG.base_url}/sessions/{session.id}/meta"
+        # Same construction, same guarantee, for the one call that changes this session's
+        # own scope: a PM can adopt a board for ITSELF and can never widen another
+        # session's authority.
+        self.scope_url = f"{CONFIG.base_url}/sessions/{session.id}/scope"
 
-        roadmap_tools = ""
-        if self.product:
-            # Every board this session owns: its own product first, then any children
-            # (see roadmap.subtree_products). One list, used for the prompt AND for the
-            # allowlist below, so the two can never drift apart.
-            owned_products = subtree_products(self.product)
-            roadmap_guidance = ROADMAP_GUIDANCE_TEMPLATE.format(
-                product=self.product,
-                product_label=product_label(self.product),
-                # Ids with their place in the taxonomy: on a deployment with many child
-                # products, a bare list of ids doesn't tell the PM whose "billing" it is
-                # about to suggest work to.
-                product_ids=", ".join(
-                    f"{pid} (sub-product of {parent_of(pid)})" if parent_of(pid) else pid
-                    for pid in PRODUCTS
-                ),
-                roadmap_base_url=ROADMAP_BASE_URL,
-                auth_header=agent_auth_header(),
-            )
-            # Everything below this product, not just its direct children: the allowlist
-            # grants the whole subtree, so the prompt has to name the whole subtree or the
-            # PM has write access to a board it was never told about. Each is named by its
-            # path, which is what tells a three-level family apart from a wide two-level one.
-            descendants = owned_products[1:]
-            if descendants:
-                roadmap_guidance += PARENT_PRODUCT_GUIDANCE_TEMPLATE.format(
-                    product_label=product_label(self.product),
-                    child_summary=", ".join(
-                        f"{product_path_label(d)} (id `{d}`)" for d in descendants
-                    ),
-                    child_example=descendants[0],
-                    child_example_label=product_path_label(descendants[0]),
-                    roadmap_base_url=ROADMAP_BASE_URL,
-                    auth_header=agent_auth_header(),
-                )
-            # Not an elif: a product in the middle of a three-level family is both a
-            # parent and a child, and each fact tells the PM something different - what it
-            # may write, and who is already reading it.
-            if parent_of(self.product):
-                roadmap_guidance += CHILD_PRODUCT_GUIDANCE_TEMPLATE.format(
-                    product=self.product,
-                    product_label=product_label(self.product),
-                    parent_label=product_label(parent_of(self.product)),
-                )
-            if CONFIG.trackers:
-                roadmap_guidance += TRACKER_GUIDANCE_TEMPLATE.format(
-                    product=self.product,
-                    roadmap_base_url=ROADMAP_BASE_URL,
-                    auth_header=agent_auth_header(),
-                    tracker_summary=", ".join(
-                        f"{t.label} — {t.provider}, projects "
-                        + (", ".join(t.projects) or "none configured")
-                        for t in CONFIG.trackers
-                    ),
-                )
-            # POST is deliberately broad (any product) - suggesting work for another
-            # product is the intended cross-product handoff. PATCH is scoped to the
-            # boards this session OWNS - its own product, plus its children if it is a
-            # parent - one literal-URL-prefix entry each, the same enforcement
-            # tasks_base_url above relies on: it is structurally impossible for this PM
-            # to reach into and mutate the existing items of a product outside its own
-            # subtree. This is the enforcement half of PARENT_PRODUCT_GUIDANCE_TEMPLATE,
-            # and both are built from owned_products so they cannot disagree.
-            roadmap_tools = f"Bash(curl -s -X POST {ROADMAP_BASE_URL}/*) " + "".join(
-                f"Bash(curl -s -X PATCH {ROADMAP_BASE_URL}/{owned}/*) "
-                for owned in owned_products
-            )
-        else:
-            roadmap_guidance = GENERAL_ROADMAP_GUIDANCE
-
-        self.system_prompt = PM_SYSTEM_PROMPT_TEMPLATE.format(
-            tasks_base_url=tasks_base_url,
-            session_meta_url=session_meta_url,
-            spec_path=self.spec_path,
-            project_status_path=self.project_status_path,
-            project_index_path=self.project_index_path,
-            roadmap_guidance=roadmap_guidance,
-            repo_layout=CONFIG.repo_layout,
-            workspace_rel=CONFIG.workspace_rel,
-            default_session_name=CONFIG.default_session_name,
-            local_instructions=_local_instructions_block(),
-            auth_header=agent_auth_header(),
-        )
-        self.allowed_tools = (
-            f"Bash(curl -s -X POST {tasks_base_url}*) "
-            f"Bash(curl -s {tasks_base_url}*) "
-            f"Bash(curl -s -X POST {session_meta_url}*) "
-            f"{roadmap_tools}"
-            "Write Read WebSearch WebFetch"
-        )
+        self._refresh_scope()
 
         # The Claude CLI's own resumable conversation id - unrelated to our
         # app-level session concept (worktree/branch), hence the distinct name.
@@ -515,6 +496,183 @@ class PMAgent:
         # Consecutive auto-triggered turns with no real stakeholder message between them -
         # see MAX_AUTO_CONTINUE_STREAK. Reset on every genuine handle_user_message call.
         self._auto_continue_streak = 0
+
+    def set_scope(
+        self, initiative_id: str | None, adopted_products: list[str]
+    ) -> None:
+        """Live update of this PM's scope, called by SessionManager after a session is
+        pinned to an initiative or adopts/releases a board.
+
+        Takes effect on the NEXT turn, not the current one: `_run_pm_turn` reads
+        system_prompt and allowed_tools fresh each call, but the CLI subprocess already
+        running was launched with the old --allowedTools, so a PM that adopts a board
+        mid-turn still cannot write to it until that turn ends. That is a real constraint
+        rather than a rough edge, and INITIATIVE_GUIDANCE_TEMPLATE tells the PM so
+        directly - otherwise it tries the PATCH immediately and reports itself blocked.
+        """
+        self.initiative_id = initiative_id
+        self.adopted_products = list(adopted_products)
+        self._refresh_scope()
+
+    def owned_products(self) -> list[str]:
+        """The boards this PM may write to - its pinned product's subtree plus every
+        adopted subtree. Mirrors Session.owned_products; this copy exists because the
+        agent holds the live scope and the persisted Session may already be one edit
+        behind it."""
+        pinned = [self.product] if self.product else []
+        return owned_subtrees([*pinned, *self.adopted_products])
+
+    def _refresh_scope(self) -> None:
+        """(Re)builds the two scope-derived values - the system prompt and the Bash
+        allowlist - from `product`, `initiative_id` and `adopted_products`.
+
+        One function, called from __init__ and from set_scope, because these two must
+        always be built together: the prompt tells the PM which boards are its own and the
+        allowlist is what makes that true. Building them in separate places is how a PM
+        ends up either told it owns a board it cannot write to, or handed write access to
+        one it was never told about.
+        """
+        owned_products = self.owned_products()
+
+        if owned_products:
+            # The board the product-guidance block is written about: the pinned product
+            # when there is one, otherwise the first board adopted, which is the closest
+            # thing an initiative-scoped session has to a home.
+            home = self.product or owned_products[0]
+            roadmap_guidance = ROADMAP_GUIDANCE_TEMPLATE.format(
+                product=home,
+                product_label=product_label(home),
+                # Ids with their place in the taxonomy: on a deployment with many child
+                # products, a bare list of ids doesn't tell the PM whose "billing" it is
+                # about to suggest work to.
+                product_ids=", ".join(
+                    f"{pid} (sub-product of {parent_of(pid)})" if parent_of(pid) else pid
+                    for pid in PRODUCTS
+                ),
+                roadmap_base_url=ROADMAP_BASE_URL,
+                auth_header=agent_auth_header(),
+            )
+            # Everything below the home product, not just its direct children: the
+            # allowlist grants the whole subtree, so the prompt has to name the whole
+            # subtree or the PM has write access to a board it was never told about. Each
+            # is named by its path, which is what tells a three-level family apart from a
+            # wide two-level one. Derived from `home`'s own subtree rather than from
+            # owned_products, which for an initiative session also holds unrelated adopted
+            # roots - those are somebody else's family, not this product's children, and
+            # are listed by the initiative block instead.
+            descendants = [p for p in subtree_products(home) if p != home]
+            if descendants:
+                roadmap_guidance += PARENT_PRODUCT_GUIDANCE_TEMPLATE.format(
+                    product_label=product_label(home),
+                    child_summary=", ".join(
+                        f"{product_path_label(d)} (id `{d}`)" for d in descendants
+                    ),
+                    child_example=descendants[0],
+                    child_example_label=product_path_label(descendants[0]),
+                    roadmap_base_url=ROADMAP_BASE_URL,
+                    auth_header=agent_auth_header(),
+                )
+            # Not an elif: a product in the middle of a three-level family is both a
+            # parent and a child, and each fact tells the PM something different - what it
+            # may write, and who is already reading it.
+            if parent_of(home):
+                roadmap_guidance += CHILD_PRODUCT_GUIDANCE_TEMPLATE.format(
+                    product=home,
+                    product_label=product_label(home),
+                    parent_label=product_label(parent_of(home)),
+                )
+            if CONFIG.trackers:
+                roadmap_guidance += TRACKER_GUIDANCE_TEMPLATE.format(
+                    product=home,
+                    roadmap_base_url=ROADMAP_BASE_URL,
+                    auth_header=agent_auth_header(),
+                    tracker_summary=", ".join(
+                        f"{t.label} — {t.provider}, projects "
+                        + (", ".join(t.projects) or "none configured")
+                        for t in CONFIG.trackers
+                    ),
+                )
+        else:
+            # No board of its own: the default session, and an initiative-scoped session
+            # that hasn't adopted anything yet. Both get awareness without write access,
+            # and the initiative block prepended below is what tells the second kind that
+            # this is a starting state it can change rather than a permanent limit.
+            roadmap_guidance = GENERAL_ROADMAP_GUIDANCE
+
+        if self.initiative_id:
+            roadmap_guidance = self._initiative_guidance(owned_products) + roadmap_guidance
+
+        # POST is deliberately broad (any product) - suggesting work for another product is
+        # the intended cross-product handoff, and for an initiative session that owns
+        # nothing yet it is the ONLY way to reach a board, which is why it is granted on
+        # `initiative_id` too and not only on ownership. PATCH is scoped to the boards this
+        # session OWNS - its pinned product's subtree plus each adopted one - one
+        # literal-URL-prefix entry each, the same enforcement tasks_base_url relies on: it
+        # is structurally impossible for this PM to mutate the existing items of a board
+        # outside that set. This is the enforcement half of the guidance above, built from
+        # the same owned_products, so the two cannot disagree about what is writable.
+        roadmap_tools = ""
+        if owned_products or self.initiative_id:
+            roadmap_tools = f"Bash(curl -s -X POST {ROADMAP_BASE_URL}/*) " + "".join(
+                f"Bash(curl -s -X PATCH {ROADMAP_BASE_URL}/{owned}/*) "
+                for owned in owned_products
+            )
+
+        self.system_prompt = PM_SYSTEM_PROMPT_TEMPLATE.format(
+            tasks_base_url=self.tasks_base_url,
+            session_meta_url=self.session_meta_url,
+            spec_path=self.spec_path,
+            project_status_path=self.project_status_path,
+            project_index_path=self.project_index_path,
+            roadmap_guidance=roadmap_guidance,
+            repo_layout=CONFIG.repo_layout,
+            workspace_rel=CONFIG.workspace_rel,
+            default_session_name=CONFIG.default_session_name,
+            local_instructions=_local_instructions_block(),
+            auth_header=agent_auth_header(),
+        )
+        # The scope call is granted only to a session that HAS an initiative: adopting a
+        # board is how a cross-product initiative widens as it learns, and it is the only
+        # context where widening is a PM decision at all. A product-pinned session's scope
+        # is the stakeholder's to change, from the sessions page.
+        scope_tool = (
+            f"Bash(curl -s -X POST {self.scope_url}*) " if self.initiative_id else ""
+        )
+        self.allowed_tools = (
+            f"Bash(curl -s -X POST {self.tasks_base_url}*) "
+            f"Bash(curl -s {self.tasks_base_url}*) "
+            f"Bash(curl -s -X POST {self.session_meta_url}*) "
+            f"{scope_tool}"
+            f"{roadmap_tools}"
+            "Write Read WebSearch WebFetch"
+        )
+
+    def _initiative_guidance(self, owned_products: list[str]) -> str:
+        """The initiative block, including the one line that says what this session owns
+        right now.
+
+        The initiative's title, description and goals are deliberately NOT baked in here:
+        they come from the context block injected on every turn (server.py's
+        _roadmap_context_for), which is rebuilt from the store each time, while this prompt
+        is rebuilt only on a scope change. Naming them here would let a renamed or
+        re-goaled initiative stay stale in the prompt until the next adoption."""
+        if owned_products:
+            ownership_now = BOARDS_OWNED_TEMPLATE.format(
+                owned_summary=", ".join(
+                    f"{product_path_label(p)} (id `{p}`)" for p in owned_products
+                )
+            )
+        else:
+            ownership_now = NO_BOARDS_OWNED_YET
+        return INITIATIVE_GUIDANCE_TEMPLATE.format(
+            scope_url=self.scope_url,
+            auth_header=agent_auth_header(),
+            product_ids=", ".join(
+                f"{pid} (sub-product of {parent_of(pid)})" if parent_of(pid) else pid
+                for pid in PRODUCTS
+            ),
+            ownership_now=ownership_now,
+        )
 
     def set_model(self, model: str) -> None:
         """Live update, called by SessionManager.set_model - takes effect on the
