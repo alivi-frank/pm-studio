@@ -20,9 +20,9 @@ from .roadmap import (
     parent_of,
     product_label,
     product_path_label,
+    requires_system,
     subtree_products,
     system_label,
-    systems_declared,
     systems_of_product,
 )
 
@@ -634,11 +634,12 @@ class PMAgent:
                 )
             # Before the tracker block: what a change IS attributed to matters more to the
             # PM's next call than where it is mirrored.
-            if systems_declared():
-                # The systems the HOME product touches, falling back to every declared
-                # system when it declares none - the same widening validate_system does, so
-                # the prompt cannot offer an id the server would then refuse.
-                offered = systems_of_product(home) or list(SYSTEMS)
+            #
+            # Gated on the HOME product being in scope, not merely on [systems] existing.
+            # A PM told to attribute on a board whose edge is undeclared would have to pick
+            # from whatever systems happen to exist, which invents wrong attribution rather
+            # than leaving it missing - the same reason requires_system is per product.
+            if requires_system(home):
                 roadmap_guidance += SYSTEM_GUIDANCE_TEMPLATE.format(
                     product=home,
                     product_label=product_label(home),
@@ -646,7 +647,9 @@ class PMAgent:
                     auth_header=agent_auth_header(),
                     # Where the code lives, not just the label: the PM's next move after
                     # filing the change is often to dispatch a dev task into that tree.
-                    system_summary=", ".join(_describe_system(s) for s in offered),
+                    system_summary=", ".join(
+                        _describe_system(s) for s in systems_of_product(home)
+                    ),
                 )
             if CONFIG.trackers:
                 roadmap_guidance += TRACKER_GUIDANCE_TEMPLATE.format(

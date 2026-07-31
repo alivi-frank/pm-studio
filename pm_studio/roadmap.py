@@ -206,18 +206,40 @@ def products_of_system(system: str) -> list[str]:
     return [p for p in PRODUCTS if system in PRODUCT_SYSTEMS.get(p, ())]
 
 
+def requires_system(product: str) -> bool:
+    """Whether a change on this product must name a system.
+
+    Attribution is scoped PER PRODUCT, not per deployment, and this is the predicate that
+    says so - asked by the store, the PM prompt and the board alike so "in scope" means
+    one thing everywhere.
+
+    The distinction is what makes the layer adoptable one product at a time. Declaring
+    [systems] is a deployment-wide switch, but a taxonomy is not migrated in one sitting:
+    on a deployment with two dozen products and thousands of existing changes, requiring
+    attribution everywhere the moment the first system is declared would force every board
+    to attribute to whichever systems happen to exist yet - which is worse than not
+    attributing at all, because it manufactures wrong data instead of missing data.
+
+    So a product is IN SCOPE once it declares what it touches, and untouched until then.
+    products_missing_systems() reports the ones still outside, so "not yet declared" stays
+    visible rather than becoming a silent permanent exemption.
+    """
+    return systems_declared() and bool(systems_of_product(product))
+
+
 def validate_system(product: str, system: str | None, *, required: bool = True) -> str | None:
     """Resolves the `system` for a change on `product`, or raises ValueError saying why.
 
     Three rules, in order:
-      1. No [systems] declared -> the only valid value is none at all. Naming one would
+      1. No [systems] declared at all -> the only valid value is none. Naming one would
          silently attribute a change to a taxonomy this deployment does not have.
-      2. Otherwise a system is REQUIRED and must be declared.
-      3. And it must be one the product declares it touches - UNLESS the product declares
-         no systems at all. That exception matters: enforcing an empty list would reject
-         every possible value and make the board unusable, so a product with nothing
-         declared accepts any declared system and is reported as config still to do
-         (see products_missing_systems) rather than deadlocked.
+      2. A system is REQUIRED only where the product declares what it touches (see
+         requires_system). Elsewhere none is a legitimate answer, not a violation.
+      3. A system that IS named must be declared, and must be one the product touches -
+         unless the product declares none, in which case any declared system is accepted.
+         That last case is deliberately permissive rather than refused: attributing a
+         change while its product's edge is still undeclared is useful and harmless, and
+         this codebase reports gaps rather than blocking work.
 
     Note there is deliberately no ""-clears convention here, unlike `owner` and
     `project_id`: dropping a change's system would manufacture exactly the inconsistency
@@ -232,19 +254,18 @@ def validate_system(product: str, system: str | None, *, required: bool = True) 
                 f"{LOCAL_DIR_NAME}/{CONFIG_FILE_NAME} first."
             )
         return None
+    declared = systems_of_product(product)
     if value is None:
-        if not required:
+        if not required or not declared:
             return None
-        allowed = systems_of_product(product) or list(SYSTEMS)
         raise ValueError(
             f"A change must name the one system it is contained within. "
-            f"{product_label(product)} touches: {', '.join(allowed)}"
+            f"{product_label(product)} touches: {', '.join(declared)}"
         )
     if value not in SYSTEMS:
         raise ValueError(
             f"Unknown system: {value} (declared: {', '.join(SYSTEMS) or 'none'})"
         )
-    declared = systems_of_product(product)
     if declared and value not in declared:
         raise ValueError(
             f"{product_label(product)} does not touch system {value!r}; it touches: "
@@ -257,9 +278,11 @@ def validate_system(product: str, system: str | None, *, required: bool = True) 
 def products_missing_systems() -> list[str]:
     """Declared products that touch no declared system, in display order.
 
-    Only meaningful once [systems] exists, and it is the config half of the restructure
-    gap that unattributed changes are the data half of: these products cannot constrain
-    what their changes attribute to (see validate_system rule 3), so the view names them.
+    The config half of the restructure gap that unattributed changes are the data half of.
+    These products are OUTSIDE the scope of attribution (see requires_system): their
+    changes are not required to name a system and are not counted as debt. Listing them is
+    what keeps that from becoming a silent permanent exemption - it is the remaining work,
+    stated.
     """
     if not systems_declared():
         return []
@@ -502,31 +525,49 @@ class RoadmapStore:
         )
 
     def unattributed_report(self) -> dict:
-        """Changes carrying no system, once this deployment declares [systems].
+        """Changes that OUGHT to name a system and do not.
 
         The data half of the restructure gap (products_missing_systems is the config
         half). Reported, never blocked - same call portfolio.unaligned_report makes for
         alignment: attribution is mandatory as a practice, so the gap is surfaced rather
         than used to refuse the board that shows it.
 
-        Empty by construction on a deployment with no [systems]: there is nothing to
-        attribute to, so nothing is missing.
+        Scoped by requires_system, which is the load-bearing part. Counting every
+        system-less change on every board would make the first declared system light up
+        thousands of changes across products whose edge nobody has declared yet - a number
+        that measures how much config is missing, not how much attribution is owed, and
+        which no amount of attributing could bring down. So changes on out-of-scope
+        products are counted separately as `not_yet_in_scope`: visible, not debt.
+
+        Empty by construction on a deployment with no [systems] at all.
         """
         if not systems_declared():
-            return {"changes": [], "count": 0, "products_missing_systems": []}
-        pending = [
-            {
-                "id": i.id,
-                "product": i.product,
-                "product_label": product_path_label(i.product),
-                "title": i.title,
+            return {
+                "changes": [],
+                "count": 0,
+                "not_yet_in_scope": 0,
+                "products_missing_systems": [],
             }
-            for i in sorted(self._items.values(), key=lambda i: i.created_at)
-            if i.system is None and i.status != "done"
-        ]
+        pending = []
+        out_of_scope = 0
+        for item in sorted(self._items.values(), key=lambda i: i.created_at):
+            if item.system is not None or item.status == "done":
+                continue
+            if not requires_system(item.product):
+                out_of_scope += 1
+                continue
+            pending.append(
+                {
+                    "id": item.id,
+                    "product": item.product,
+                    "product_label": product_path_label(item.product),
+                    "title": item.title,
+                }
+            )
         return {
             "changes": pending,
             "count": len(pending),
+            "not_yet_in_scope": out_of_scope,
             "products_missing_systems": products_missing_systems(),
         }
 
@@ -877,15 +918,16 @@ class RoadmapStore:
                 f' [EXTERNAL - owned by {item["owner"]}: track it, never dispatch '
                 "dev work for it]"
             )
-        # Silent on a deployment with no [systems]. Where there IS one, the attribution is
-        # named on every change and its absence shouts: an unattributed change is the
-        # inconsistency the PM is told to close (see agent.SYSTEM_GUIDANCE_TEMPLATE), and it
-        # can only act on what its context block actually shows it.
-        if systems_declared():
-            if item.get("system"):
-                flag += f' [system: {system_label(item["system"])}]'
-            else:
-                flag += " [NO SYSTEM - attribute it when you next touch this change]"
+        # The attribution is named wherever there is one, so the PM can see it without
+        # asking. Its ABSENCE only shouts for a product that is in scope (requires_system):
+        # on a board whose edge nobody has declared yet, [NO SYSTEM] on every line would be
+        # noise about missing config rather than a change the PM can act on - and the PM is
+        # not told to attribute there either (see agent.SYSTEM_GUIDANCE_TEMPLATE), so the
+        # prompt and the context block stay two statements of one rule.
+        if item.get("system"):
+            flag += f' [system: {system_label(item["system"])}]'
+        elif requires_system(item["product"]):
+            flag += " [NO SYSTEM - attribute it when you next touch this change]"
         flag += _schedule_note(item)
         if item.get("ticket_key"):
             ticket = (

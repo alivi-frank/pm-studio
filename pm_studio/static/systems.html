@@ -270,12 +270,12 @@
 
   // ---- restructure: changes carrying no system ----
 
-  // The systems a change on this product may be attributed to. A product declaring none
-  // cannot constrain the choice, so every declared system is offered rather than none -
-  // the same call validate_system makes server-side.
+  // The systems a change on this product may be attributed to. Every change listed here is
+  // on an in-scope product by construction (see roadmap.unattributed_report), so this is
+  // exactly what that product declares - except for a change being re-homed off a
+  // transitional board, where the destination product's list is what matters instead.
   function allowedSystems(product) {
-    const declared = data.product_systems[product] || [];
-    return declared.length ? declared : data.systems.map((s) => s.id);
+    return data.product_systems[product] || data.systems.map((s) => s.id);
   }
 
   function systemPicker(product) {
@@ -378,14 +378,20 @@
     const missing = data.unattributed.products_missing_systems || [];
     if (!missing.length) return;
 
+    const waiting = data.unattributed.not_yet_in_scope || 0;
     const panel = el("div", "panel");
-    panel.appendChild(el("h2", null, "Products touching no declared system"));
+    panel.appendChild(el("h2", null, "Products not yet in scope"));
     panel.appendChild(
       el(
         "p",
         "hint",
-        "These cannot constrain what their changes attribute to, so any declared system " +
-          "is accepted. Add a `systems = [...]` line for each in pm_studio_local/config.toml."
+        "These declare no systems, so their changes are not required to name one and are " +
+          "not counted as debt above" +
+          (waiting
+            ? ` (${waiting} change${waiting === 1 ? "" : "s"} sitting here). `
+            : ". ") +
+          "Add a `systems = [...]` line for each in pm_studio_local/config.toml to bring " +
+          "it in scope — one product at a time is the intended way."
       )
     );
     const chips = el("div", "chips");

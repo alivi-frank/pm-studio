@@ -1172,8 +1172,13 @@
   // system-shaped thing on this board invisible there rather than empty.
   let SYSTEMS = {};
   let PRODUCT_SYSTEMS = {};
-  let UNATTRIBUTED = { changes: [], count: 0, products_missing_systems: [] };
+  let UNATTRIBUTED = { changes: [], count: 0, not_yet_in_scope: 0, products_missing_systems: [] };
   const systemsDeclared = () => Object.keys(SYSTEMS).length > 0;
+  /* Attribution is scoped PER PRODUCT: a board is in scope once its product declares what
+     it touches, and untouched until then. Mirrors roadmap.requires_system exactly - the
+     board must not ask for something the server would not require, nor flag its absence. */
+  const requiresSystem = (product) =>
+    systemsDeclared() && (PRODUCT_SYSTEMS[product] || []).length > 0;
   let itemsByProduct = {}; // product -> [item] (that product's OWN changes only)
 
   function parentOf(product) {
@@ -1494,14 +1499,12 @@
     // product (the initiative lens) - and there, "Billing" alone doesn't say whose.
     if (!omit.product) chips.push(chip(productPathLabel(item.product)));
     // The system a change is contained within - shown in both lenses, because unlike the
-    // product and the initiative it is never what a section is grouped by. Silent when
-    // the deployment declares no [systems]; flagged when it does and this change predates
-    // the restructure, which is the same "surface it, never block it" call `unaligned`
-    // makes just below.
-    if (systemsDeclared()) {
-      if (item.system) chips.push(chip(SYSTEMS[item.system] || item.system));
-      else chips.push(chip("no system", "warn"));
-    }
+    // product and the initiative it is never what a section is grouped by. Named whenever
+    // there is one; its absence is flagged only where the product is in scope, so a board
+    // whose edge is still undeclared reads exactly as it did before the layer existed
+    // rather than turning every card amber over missing config.
+    if (item.system) chips.push(chip(SYSTEMS[item.system] || item.system));
+    else if (requiresSystem(item.product)) chips.push(chip("no system", "warn"));
     const project = PROJECTS_BY_ID[item.project_id];
     // Inside a project row the project is the row's own heading, so repeating it on
     // every card would print the same word a dozen times down one column.
@@ -1558,7 +1561,7 @@
        an already-attributed change: a system is not something a change can go back to not
        having (see roadmap.validate_system). One appears only while it IS unattributed, as
        the prompt to fix it - and it is not selectable once anything else is chosen. */
-    if (systemsDeclared()) {
+    if (requiresSystem(item.product)) {
       const systemSelect = el("select", "mini");
       systemSelect.title = "The system this change is contained within";
       if (!item.system) {
@@ -1752,13 +1755,12 @@
       .catch(() => {});
   }
 
-  /* The systems a change on this product may be attributed to. A product that declares
-     none cannot constrain the choice, so every declared system is offered rather than an
-     empty picker - the same call roadmap.validate_system makes server-side, and the
-     reason a product with nothing declared is reported rather than deadlocked. */
+  /* The systems a change on this product may be attributed to. Only ever called for a
+     product in scope, so this is exactly what it declares - the server accepts any
+     declared system on an out-of-scope board, but offering that here would invite the
+     wrong attribution instead of leaving it for the config to say. */
   function allowedSystems(product) {
-    const declared = PRODUCT_SYSTEMS[product] || [];
-    return declared.length ? declared : Object.keys(SYSTEMS);
+    return PRODUCT_SYSTEMS[product] || [];
   }
 
   function systemOptions(product, selected) {
@@ -1774,8 +1776,8 @@
     const form = el("form", "add-form");
     // Required, not optional: a change is contained within exactly one system, so the
     // picker has no blank option and the server refuses a create without one. Absent
-    // entirely when the deployment declares no [systems].
-    const systemField = systemsDeclared()
+    // entirely on a board that is not in scope, where the server requires nothing.
+    const systemField = requiresSystem(product)
       ? `<label class="date-field"><span>System</span>
            <select class="mini system" required>${systemOptions(product)}</select>
          </label>`
