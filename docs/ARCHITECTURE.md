@@ -74,7 +74,25 @@ hiccup must never break a PM turn or dev task. Snapshots are repo-wide; `.gitign
 
 - `PRODUCTS: dict[str, str]` — ordered product taxonomy (ids → display labels),
   customer-facing products first. **Project-specific — from the `[products]` table in
-  `pm_studio_local/config.toml`** (TOML order = display order).
+  `pm_studio_local/config.toml`** (declaration order = display order, each parent
+  laid out depth first so each product is followed by its own descendants).
+- `PRODUCT_PARENTS: dict[str, str]` — the hierarchy, child id → parent id, for children
+  only; empty on a flat taxonomy. Any depth: a child may itself be a parent. Validated
+  fatally at config load (`config._parse_products`) for unknown, self-referential and
+  **cyclic** parents — a cycle would leave its products reachable from no top-level
+  product, so they would drop out of the taxonomy while their boards sat on disk. Held
+  apart from `PRODUCTS` so the taxonomy stays one dict to iterate and every "is this a
+  real product id" check is unchanged.
+- Tree helpers, all of which answer the pre-hierarchy answer on a flat taxonomy:
+  `parent_of` and `children_of` (one hop), `top_level_products`, `product_label`,
+  `ancestors_of` (nearest parent first), `product_path_label` (the full path — "Web App /
+  Auth & Identity / SSO"), and `subtree_products(p)` — `p` then its descendants at every
+  depth. `subtree_products` is the **unit of ownership**: it decides what a pinned session
+  sees at full depth, what the awareness digest must leave out, and which boards
+  `agent.py` grants PATCH on. Both recursive walks carry a `seen` guard even though config
+  refuses cycles: they run inside a PM's turn and the board's render, where a hang is a
+  worse failure than a short answer. Nothing stores the hierarchy — a change carries only
+  its product id — so re-parenting, at any depth, is a config edit, never a migration.
 - `RoadmapItem` dataclass: `id` (8-hex), `product`, `title`, `description`,
   `bucket` ("now"|"next"|"later"), `status` ("pending"|"in_progress"|"done"),
   `origin_product`, `triaged: bool`, `created_at`, `updated_at`,
@@ -131,11 +149,17 @@ hiccup must never break a PM turn or dev task. Snapshots are repo-wide; `.gitign
     with `[UNTRIAGED suggestion from <origin> - accept or drop it]` flags and the
     schedule as `[starts <date>, target <date>, <n>d left]`, or
     `[OVERDUE - target was <date>, <n>d ago]`. The day count is spelled out rather than
-    left as a bare date the model has to difference against today itself.
+    left as a bare date the model has to difference against today itself. Covers the
+    product's whole **subtree** at any depth — a parent's session gets every descendant
+    board at the same depth under its own heading (`<Label> (sub-product of <its own
+    parent>, id \`x\`)`, so a grandchild names the board it actually hangs off), since a
+    parent PM owns the family; a leaf gets exactly what it always got.
   - `describe_other_products(exclude)` — one line per product:
-    `- <Label>: [bucket/status] Title; [bucket/status] Title; ...`, open items only.
-    Carries `(OVERDUE)` but not the dates themselves: this view is awareness, and another
-    product's slipping date is worth knowing where its exact start is noise.
+    `- <Path label>: [bucket/status] Title; [bucket/status] Title; ...`, open items only.
+    Excludes the **whole subtree** of `exclude`, not just that one product, so nothing
+    covered at full depth comes back a second time as a one-liner. Carries `(OVERDUE)`
+    but not the dates themselves: this view is awareness, and another product's slipping
+    date is worth knowing where its exact start is noise.
 
 ## 3b. `portfolio.py` — the work model above the roadmap
 

@@ -42,11 +42,20 @@ host = "127.0.0.1"
 port = 8000
 
 # The product taxonomy for the roadmap board: id = "Display Label".
-# TOML order is display order. Delete or leave empty for a single-product repo
-# with unpinned sessions only.
+# Declaration order is display order. Delete or leave empty for a single-product
+# repo with unpinned sessions only.
+#
+# A product can be a SUB-PRODUCT of another by giving it a table with a `parent`
+# instead of a plain label. It is a full product either way - its own board, its
+# own sessions, its own id in every URL - and the parent's PM sees its roadmap at
+# full detail and can write to it. Nest as deep as your org actually is: a
+# sub-product can have sub-products of its own.
 [products]
 # web = "Web App"
-# platform = "Platform / Shared Packages"
+# platform = "Platform"
+# auth = {{ label = "Auth & Identity", parent = "web" }}
+# billing = {{ label = "Billing", parent = "web" }}
+# sso = {{ label = "SSO", parent = "auth" }}
 
 # Optional model allow-list override (id = "Label"); the reserved key `default`
 # names the model new sessions start on. Omit the whole table to use package

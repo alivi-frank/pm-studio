@@ -45,7 +45,13 @@ from .portfolio import (
     PortfolioError,
     PortfolioStore,
 )
-from .roadmap import PRODUCTS, RoadmapItem, RoadmapStore, TicketAlreadyLinked
+from .roadmap import (
+    PRODUCT_PARENTS,
+    PRODUCTS,
+    RoadmapItem,
+    RoadmapStore,
+    TicketAlreadyLinked,
+)
 from .sessions import DEFAULT_SESSION_ID, SessionManager, SessionRuntime
 from .trackers import TrackerError, TrackerStore, normalize_key
 
@@ -151,9 +157,11 @@ def _with_ticket(item: dict) -> dict:
 
 def _roadmap_context_for(session_id: str) -> str:
     """Builds the roadmap block injected into a PM's turn: full depth on its own
-    product, a one-line digest of every other product for general awareness only. A
-    session with no pinned product (e.g. the default session) gets the shallow digest
-    of every product and nothing deep - see sessions.py's Session.product."""
+    product SUBTREE (the pinned product and, for a parent, its child products - see
+    roadmap.subtree_products), a one-line digest of every product outside that subtree
+    for general awareness only. A session with no pinned product (e.g. the default
+    session) gets the shallow digest of every product and nothing deep - see sessions.py's
+    Session.product."""
     session = sessions.get(session_id)
     product = session.product if session is not None else None
     if product:
@@ -1364,9 +1372,15 @@ def roadmap_data() -> dict:
     `portfolio` is additive: the board ships it so the page can re-group into the
     initiative lens locally as websocket events arrive, without refetching the whole
     board on every keystroke elsewhere. Existing consumers can ignore it.
+
+    `product_parents` is the taxonomy's hierarchy (child id -> parent id) and is
+    additive in the same way: `products` still lists every product flat, so a consumer
+    that only needs labels - the session picker's badges, a chat header - keeps working
+    without knowing the tree exists.
     """
     return {
         "products": PRODUCTS,
+        "product_parents": PRODUCT_PARENTS,
         "items": {
             product: [_with_ticket(item) for item in items]
             for product, items in roadmap_store.list_all().items()
@@ -1398,6 +1412,7 @@ def roadmap_by_initiative() -> dict:
     return {
         "pivot": "initiative",
         "products": PRODUCTS,
+        "product_parents": PRODUCT_PARENTS,
         "groups": portfolio_store.group_changes_by_initiative(changes),
         "trackers": tracker_store.describe(),
     }

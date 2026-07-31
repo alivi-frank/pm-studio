@@ -505,8 +505,22 @@
       fetch("/roadmap/data")
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => {
-          const label = (data && data.products && data.products[session.product]) || session.product;
-          productBadgeEl.textContent = label;
+          const products = (data && data.products) || {};
+          const parents = (data && data.product_parents) || {};
+          // The full path - "Web App / Auth / SSO" - walked up however deep the taxonomy
+          // goes: which family this PM belongs to is part of who it is, and the badge is
+          // the only place this page says it. `seen` is the cyclic-config guard the other
+          // pages carry too (the server refuses one at load; a hang here would blank the
+          // session header).
+          const path = [session.product];
+          const seen = new Set(path);
+          let cursor = parents[session.product];
+          while (cursor && !seen.has(cursor)) {
+            path.unshift(cursor);
+            seen.add(cursor);
+            cursor = parents[cursor];
+          }
+          productBadgeEl.textContent = path.map((p) => products[p] || p).join(" / ");
           productBadgeEl.style.display = "inline-block";
         })
         .catch(() => {});

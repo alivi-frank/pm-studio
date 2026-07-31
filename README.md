@@ -82,6 +82,12 @@ A project belongs to exactly one initiative, and an initiative may serve **sever
 goals**. Products aren't a level in the chain; a product hangs off the change, which is
 what lets an initiative span several products without any extra bookkeeping.
 
+Products have a hierarchy of their own, separate from the chain above: a product can
+declare a `parent`, making it a **sub-product**, nested as deep as your org actually is.
+A sub-product is a full product — its own board, sessions and ids — and a PM sees and
+writes its whole subtree, while the board nests each child inside its parent's section.
+See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#hierarchical-products).
+
 A project with no initiative is **unaligned** — allowed, so nobody is blocked
 mid-work, but reported so it gets linked up. Declare a maintenance goal + always-open
 initiative + catch-all project once (the page prompts you, with names you choose), and
@@ -161,7 +167,8 @@ they live in your workspace, never in this package.
 In `personal` mode this is a single-trusted-user, local-only tool: everything binds to
 127.0.0.1 and dev agents run with bypassed permissions inside your repo. Do not expose
 the port. PM agents run under a strict literal-match Bash allowlist that structurally
-scopes them to their own session and their own product's board.
+scopes them to their own session and to the product boards they own — their own, plus
+their sub-products' if they are pinned to a parent, and nothing else.
 
 Credential-bearing state (`accounts.json`, `costing.json`, `audit.jsonl`,
 `activity.jsonl`) is **unstaged from every snapshot commit unconditionally**, not merely

@@ -22,9 +22,108 @@ Bucket = Literal["now", "next", "later"]
 Status = Literal["pending", "in_progress", "done"]
 
 # The product taxonomy for this deployment, from pm_studio_local/config.toml's
-# [products] table (TOML order is display order). Empty when the target repo hasn't
-# declared products yet - sessions then run unpinned with no per-product boards.
+# [products] table (declaration order is display order, laid out depth first so each
+# product is followed by its own descendants). Empty when the target repo hasn't declared
+# products yet - sessions then run unpinned with no per-product boards.
 PRODUCTS: dict[str, str] = CONFIG.products
+
+# The hierarchy: child id -> parent id, for children only (see config._parse_products).
+# Empty for a flat taxonomy, and every helper below then answers exactly what it
+# answered before hierarchy existed - a product with no parent and no children is its
+# own whole subtree.
+PRODUCT_PARENTS: dict[str, str] = CONFIG.product_parents
+
+# A product is a product wherever it sits: children get their own board file, their own
+# sessions and their own items, and every URL still names one product id. The parent
+# pointer organizes them and does two things that matter beyond display - it decides
+# which boards a pinned PM sees at full depth (subtree_products, used by
+# describe_own_product) and how the board nests its sections.
+#
+# The tree is as deep as the deployment declared. Nothing here counts levels: every
+# helper below either walks one hop (parent_of) or recurses to the bottom
+# (subtree_products, ancestors_of), so a three-level taxonomy needs no special case and
+# neither would a five-level one. Config guarantees the one property that matters for
+# termination: every chain ends at a top-level product, with cycles refused at load.
+
+
+def parent_of(product: str) -> str | None:
+    return PRODUCT_PARENTS.get(product)
+
+
+def children_of(product: str) -> list[str]:
+    """Direct children, in display order (PRODUCTS is already ordered)."""
+    return [p for p in PRODUCTS if PRODUCT_PARENTS.get(p) == product]
+
+
+def top_level_products() -> list[str]:
+    return [p for p in PRODUCTS if p not in PRODUCT_PARENTS]
+
+
+def subtree_products(product: str) -> list[str]:
+    """The product itself followed by its descendants at every depth, in display order.
+
+    The unit of ownership: a PM pinned to a parent owns everything below it, so this is
+    what "my roadmap" means for context (describe_own_product), for what the awareness
+    digest must leave out (describe_other_products), and for which boards that session may
+    write to (agent.py's allowlist). For a leaf - or any product on a flat taxonomy - it is
+    just `[product]`, which is why nothing had to change shape when hierarchy arrived.
+
+    Cycle-guarded for the same reason as ancestors_of: config refuses a cyclic taxonomy at
+    load, but this runs inside a PM's turn and inside the board's render, and a hang there
+    is a far worse way to learn about a bad config than a short answer.
+    """
+    family: list[str] = []
+    seen: set[str] = set()
+
+    def walk(pid: str) -> None:
+        if pid in seen:
+            return
+        seen.add(pid)
+        family.append(pid)
+        for child in children_of(pid):
+            walk(child)
+
+    walk(product)
+    return family
+
+
+def product_label(product: str) -> str:
+    """The display label, falling back to the id for a product that is no longer
+    declared - an item can outlive the config line that named its board."""
+    return PRODUCTS.get(product, product)
+
+
+def ancestors_of(product: str) -> list[str]:
+    """Every product above this one, nearest parent first. Empty for a top-level product.
+
+    Terminates because config refuses a cycle (see config._parse_products); the `seen`
+    guard is belt to those braces, since a store can be handed a patched taxonomy in
+    tests and an infinite loop inside a PM's turn is a hang, not an error.
+    """
+    chain: list[str] = []
+    seen = {product}
+    cursor = parent_of(product)
+    while cursor is not None and cursor not in seen:
+        chain.append(cursor)
+        seen.add(cursor)
+        cursor = parent_of(cursor)
+    return chain
+
+
+def product_path_label(product: str) -> str:
+    """"Web App / Auth & Identity / SSO" - the full path down to this product, plain
+    label for a top-level one.
+
+    Used wherever a product name appears with no surrounding section to say where it
+    sits: a cross-product suggestion flag, another product's digest line, a change's chip
+    in the initiative lens. The whole path rather than just the parent, because at three
+    levels "Auth & Identity / SSO" still does not say whose auth - and these are the
+    places with no section heading to supply the rest.
+    """
+    ancestors = ancestors_of(product)
+    if not ancestors:
+        return product_label(product)
+    return " / ".join(product_label(p) for p in [*reversed(ancestors), product])
 
 # Schedule dates are stored as "YYYY-MM-DD" STRINGS, unlike created_at/updated_at/
 # shipped_at, which are epoch floats. The difference is deliberate and not worth
@@ -491,6 +590,46 @@ class RoadmapStore:
 
     # ---- PM context injection ----
 
+    def _describe_item(
+        self,
+        item: dict,
+        owning_product: str,
+        ticket_lookup: Callable[[str, str], dict | None] | None = None,
+    ) -> str:
+        """One change, at full depth, as its owning PM reads it.
+
+        `owning_product` is the board the item sits on - which is what decides whether
+        its origin makes it an untriaged suggestion, so it is passed rather than assumed
+        to be the session's own product: a parent's context block covers several boards.
+        """
+        flag = ""
+        if item["origin_product"] != owning_product and not item["triaged"]:
+            origin_label = product_path_label(item["origin_product"])
+            flag = f" [UNTRIAGED suggestion from {origin_label} - accept or drop it]"
+        if item.get("owner"):
+            flag += (
+                f' [EXTERNAL - owned by {item["owner"]}: track it, never dispatch '
+                "dev work for it]"
+            )
+        flag += _schedule_note(item)
+        if item.get("ticket_key"):
+            ticket = (
+                ticket_lookup(item["tracker_id"], item["ticket_key"])
+                if ticket_lookup
+                else None
+            )
+            if ticket:
+                flag += (
+                    f' [tracked as {ticket["raw_type"]} {item["ticket_key"]}'
+                    f' ({ticket["state"]}) in {item["tracker_id"]}]'
+                )
+            else:
+                flag += f' [linked to {item["ticket_key"]} in {item["tracker_id"]}]'
+        return (
+            f'- id {item["id"]} [{item["bucket"]}/{item["status"]}] {item["title"]}{flag}\n'
+            f'  {item["description"]}'
+        )
+
     def describe_own_product(
         self,
         product: str,
@@ -500,53 +639,78 @@ class RoadmapStore:
         full description - for injection into that product's own PM session. Flags any
         untriaged cross-product suggestion waiting on this PM to accept or drop.
 
+        A parent product's session gets its whole SUBTREE at the same depth - children,
+        grandchildren, however deep the taxonomy goes - under a heading per board: a
+        parent PM owns its subtree, so a descendant's plan is its own plan and not
+        somebody else's to be told about in one line. Each heading carries that board's
+        full path and its id, so the PM can tell "this is mine directly" from "this is my
+        Billing sub-product's" and knows which id to write to. A leaf (or any product on
+        a flat taxonomy) gets exactly what it always got.
+
         `ticket_lookup` resolves (tracker_id, key) to the synced ticket so the PM sees what
         each change is tracked as in Jira/ADO. Passed in rather than imported so this store
         keeps knowing nothing about the tracker catalog; omitted (as in tests) the linked
         key is still reported, just without its type.
         """
-        items = [i for i in self.list_product(product) if i["status"] != "done"]
-        if not items:
-            return f"{PRODUCTS[product]} roadmap has no open items right now."
-        lines = [f"{PRODUCTS[product]} roadmap (full detail):"]
-        for i in items:
-            flag = ""
-            if i["origin_product"] != product and not i["triaged"]:
-                origin_label = PRODUCTS.get(i["origin_product"], i["origin_product"])
-                flag = f" [UNTRIAGED suggestion from {origin_label} - accept or drop it]"
-            if i.get("owner"):
-                flag += (
-                    f' [EXTERNAL - owned by {i["owner"]}: track it, never dispatch '
-                    "dev work for it]"
-                )
-            flag += _schedule_note(i)
-            if i.get("ticket_key"):
-                ticket = (
-                    ticket_lookup(i["tracker_id"], i["ticket_key"])
-                    if ticket_lookup
-                    else None
-                )
-                if ticket:
-                    flag += (
-                        f' [tracked as {ticket["raw_type"]} {i["ticket_key"]}'
-                        f' ({ticket["state"]}) in {i["tracker_id"]}]'
-                    )
-                else:
-                    flag += f' [linked to {i["ticket_key"]} in {i["tracker_id"]}]'
-            lines.append(
-                f'- id {i["id"]} [{i["bucket"]}/{i["status"]}] {i["title"]}{flag}\n'
-                f'  {i["description"]}'
+        family = subtree_products(product)
+        open_items = {p: [i for i in self.list_product(p) if i["status"] != "done"] for p in family}
+        if not any(open_items.values()):
+            if len(family) == 1:
+                return f"{product_label(product)} roadmap has no open items right now."
+            return (
+                f"{product_label(product)} roadmap - and its sub-products "
+                f'({", ".join(product_label(p) for p in family[1:])}) - '
+                "has no open items right now."
             )
+
+        if len(family) == 1:
+            lines = [f"{product_label(product)} roadmap (full detail):"]
+            for i in open_items[product]:
+                lines.append(self._describe_item(i, product, ticket_lookup))
+            return "\n".join(lines)
+
+        lines = [
+            f"{product_label(product)} roadmap (full detail), including the "
+            f"{len(family) - 1} sub-product board(s) you also own:"
+        ]
+        for owned in family:
+            items = open_items[owned]
+            # Named by its OWN parent, not by the session's product: at three levels
+            # "sub-product of Web App" would be wrong for a board that actually hangs off
+            # Auth & Identity, and which board a change belongs under is the thing this
+            # heading exists to settle.
+            heading = (
+                f"{product_label(owned)} (your own board, id `{owned}`)"
+                if owned == product
+                else (
+                    f"{product_label(owned)} (sub-product of "
+                    f"{product_label(parent_of(owned))}, id `{owned}`)"
+                )
+            )
+            if not items:
+                lines.append(f"\n{heading} - no open items.")
+                continue
+            lines.append(f"\n{heading}:")
+            for i in items:
+                lines.append(self._describe_item(i, owned, ticket_lookup))
         return "\n".join(lines)
 
     def describe_other_products(self, exclude_product: str) -> str:
-        """Shallow, title-only digest of every OTHER product's roadmap - general
-        awareness without depth: just bucket/status/title, no descriptions. Passing an
-        exclude_product that matches nothing (e.g. "") returns a digest of every
-        product, for a session with no product of its own."""
+        """Shallow, title-only digest of every product OUTSIDE the pinned product's
+        subtree - general awareness without depth: just bucket/status/title, no
+        descriptions.
+
+        The whole subtree is excluded, not just the one product: whatever
+        describe_own_product covered at full depth must not come back a second time as a
+        one-liner, or a parent PM reads its children's changes twice and the digest stops
+        meaning "somebody else's work". Passing an exclude_product that matches nothing
+        (e.g. "") returns a digest of every product, for a session with no product of its
+        own.
+        """
+        excluded = set(subtree_products(exclude_product)) if exclude_product in PRODUCTS else set()
         lines = []
         for product in PRODUCTS:
-            if product == exclude_product:
+            if product in excluded or product == exclude_product:
                 continue
             items = [i for i in self.list_product(product) if i["status"] != "done"]
             if not items:
@@ -561,5 +725,7 @@ class RoadmapStore:
                 + (" (OVERDUE)" if i.get("is_overdue") else "")
                 for i in items
             )
-            lines.append(f"- {PRODUCTS[product]}: {summary}")
+            # The parent is named too, so a digest line reads unambiguously on a
+            # deployment where two parents each have a "Billing".
+            lines.append(f"- {product_path_label(product)}: {summary}")
         return "\n".join(lines)

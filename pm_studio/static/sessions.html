@@ -267,14 +267,49 @@
   const showArchivedCheckbox = document.getElementById("show-archived");
   let showArchived = false;
   let PRODUCTS = {};
+  // child product id -> parent id (see config._parse_products); empty on a flat taxonomy.
+  let PRODUCT_PARENTS = {};
+
+  // Every product above this one, nearest first ([] for a top-level one). `seen` guards a
+  // cyclic taxonomy the same way roadmap.ancestors_of does - the server refuses one at
+  // config load, and a hang here would be a blank sessions page.
+  function ancestorsOf(id) {
+    const chain = [];
+    const seen = new Set([id]);
+    let cursor = PRODUCT_PARENTS[id];
+    while (cursor && !seen.has(cursor)) {
+      chain.push(cursor);
+      seen.add(cursor);
+      cursor = PRODUCT_PARENTS[cursor];
+    }
+    return chain;
+  }
+
+  // "Web App / Auth / SSO" - the full path. A session badge and the picker below both need
+  // it: pinning a session to "Billing" is a different decision depending on whose it is.
+  function productPathLabel(id) {
+    const path = [...ancestorsOf(id).reverse(), id];
+    return path.map((p) => PRODUCTS[p] ?? p).join(" / ");
+  }
 
   fetch("/roadmap/data")
     .then((r) => r.json())
     .then((data) => {
       PRODUCTS = data.products || {};
+      PRODUCT_PARENTS = data.product_parents || {};
+      // PRODUCTS arrives depth first, each product followed by its own descendants, so one
+      // pass in order gives a picker that reads as the taxonomy - every product indented
+      // under the one it belongs to, rather than an alphabetical soup of every board.
       for (const [id, label] of Object.entries(PRODUCTS)) {
         const opt = document.createElement("option");
-        opt.value = id; opt.textContent = label;
+        opt.value = id;
+        // One EM SPACE per level, not a run of ordinary spaces: browsers collapse leading
+        // whitespace inside <option>, so a plain-space indent would draw every level flush.
+        const depth = ancestorsOf(id).length;
+        opt.textContent = depth ? `${"\u2003".repeat(depth)}↳ ${label}` : label;
+        // Screen readers and the closed-select display both get the unambiguous form;
+        // the indent is only what the open list uses to show the shape.
+        opt.title = productPathLabel(id);
         productSelect.appendChild(opt);
       }
       renderList(); // re-render with product labels now known
@@ -389,7 +424,7 @@
     const activityEl = buildActivityEl(activity);
     if (activityEl) branchEl.insertAdjacentElement("afterend", activityEl);
     if (session.product) {
-      card.querySelector(".product-badge").textContent = PRODUCTS[session.product] ?? session.product;
+      card.querySelector(".product-badge").textContent = productPathLabel(session.product);
     }
     if (note) card.querySelector(".result-note").textContent = note;
 

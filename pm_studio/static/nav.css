@@ -262,6 +262,27 @@
   white-space: nowrap;
 }
 
+/* The slot's second control shape: a one-shot action, as opposed to the segmented
+   switch above which reports a state. Outlined rather than filled - it sits next to
+   the view toggles and must not out-shout the thing they are toggling. */
+#pm-nav .pmnav-action {
+  padding: 3px 10px;
+  border: 1px solid var(--pmnav-border);
+  border-radius: 7px;
+  font-size: 0.98em;
+  font-weight: 500;
+  color: var(--pmnav-ink-secondary);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+#pm-nav .pmnav-action:hover:not(:disabled) {
+  border-color: var(--pmnav-accent);
+  color: var(--pmnav-accent);
+}
+
+#pm-nav .pmnav-action:disabled { opacity: 0.45; cursor: default; }
+
 /* Between the three work-model tabs in the bar. Decorative: the tabs are the
    navigation, this is only the relationship between them. */
 #pm-nav .pmnav-arrow {

@@ -27,6 +27,7 @@ import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NoReturn
 
 LOCAL_DIR_NAME = "pm_studio_local"
 CONFIG_FILE_NAME = "config.toml"
@@ -164,7 +165,18 @@ class Config:
     workspace_root: str
     host: str
     port: int
+    # Every product this deployment declares, id -> display label, ordered depth first so
+    # each product is immediately followed by its own descendants (see _parse_products).
+    # Sub-products are products in every respect - the flatness here is what keeps every
+    # existing caller that just wants "is this a real product id" or "what do I call it"
+    # unchanged, at any depth.
     products: dict[str, str] = field(default_factory=dict)
+    # The hierarchy, held separately and only for the products that HAVE a parent:
+    # child id -> parent id, at any depth (a child may itself be a parent). Empty on a
+    # deployment with a flat [products] table, which is exactly what every deployment
+    # before hierarchy had. Kept out of `products` so the taxonomy stays one dict to
+    # iterate and this stays a lookup you opt into.
+    product_parents: dict[str, str] = field(default_factory=dict)
     # Markdown-ish lines describing where product sources live at the repo root -
     # injected verbatim into the PM system prompt's layout section.
     repo_layout: str = DEFAULT_REPO_LAYOUT
@@ -221,6 +233,133 @@ def _read_optional(path: Path) -> str:
     if path.is_file():
         return path.read_text().strip()
     return ""
+
+
+def _fatal(message: str) -> NoReturn:
+    """Refuses to start, loudly. Used for config that would otherwise produce a
+    deployment which looks like it is working while quietly meaning something the
+    operator did not write - see _parse_mode and _parse_products."""
+    print(f"[pm_studio] FATAL: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def _parse_products(raw: dict, config_path: Path) -> tuple[dict[str, str], dict[str, str]]:
+    """Reads [products] into (id -> label, child id -> parent id).
+
+    Two spellings, both first class. A flat table of plain strings is what every
+    deployment had before hierarchy existed, and those lines keep working byte for byte:
+
+        [products]
+        web = "Web App"                                  # a top-level product
+        auth = { label = "Auth & Identity", parent = "web" }   # a child of web
+
+        [products.billing]                               # the same child, spelled out
+        label = "Billing"
+        parent = "web"
+
+    (TOML wants every bare `key = "value"` line in [products] before the first
+    [products.x] sub-table, which is the only reason the inline form is shown first -
+    the two mean the same thing.)
+
+    A child is a full product in every other respect: its own board file, its own
+    sessions, its own items, its own id in every URL. `parent` is purely an organizing
+    pointer, which is what makes re-parenting one later a config edit rather than a data
+    migration - no stored change carries the hierarchy, only the product id it always
+    carried.
+
+    Nesting goes as deep as a deployment declares - a child can itself be a parent:
+
+        [products]
+        web  = "Web App"
+        auth = { label = "Auth & Identity", parent = "web" }
+        sso  = { label = "SSO", parent = "auth" }          # three levels
+
+    Nothing in the model counts levels; every consumer walks the pointer (see
+    roadmap.subtree_products), so depth is the operator's decision about their own
+    org, not this package's opinion. The board indents one step per level, and past
+    four or five that gets narrow - a practical limit, not an enforced one.
+
+    A bad `parent` is fatal for the same reason a bad [enterprise] mode is: a child that
+    silently became a top-level product is a working-looking deployment with one board
+    too many, and nothing anywhere points at the typo. A CYCLE is fatal for a harder
+    reason - the products in it are reachable from no root at all, so they would simply
+    vanish from the taxonomy while their boards sat on disk holding items.
+    """
+    declared = raw.get("products", {})
+    if not isinstance(declared, dict):
+        _fatal(f"{config_path} has [products] as a {type(declared).__name__}; it must be a table")
+
+    labels: dict[str, str] = {}
+    parents: dict[str, str] = {}
+    for key, value in declared.items():
+        product_id = str(key)
+        if isinstance(value, str):
+            # The historical form: the whole value is the display label.
+            labels[product_id] = value
+            continue
+        if not isinstance(value, dict):
+            _fatal(
+                f'{config_path} has [products] entry {product_id!r} as a '
+                f"{type(value).__name__}; a product is either a label string "
+                '(web = "Web App") or a table with `label` and optional `parent`'
+            )
+        # A missing label is cosmetic, not structural - falling back to the id shows the
+        # mistake on the board immediately without refusing to boot over a display string.
+        labels[product_id] = str(value.get("label", "")).strip() or product_id
+        parent = str(value.get("parent", "")).strip()
+        if parent:
+            parents[product_id] = parent
+
+    for child, parent in parents.items():
+        if parent == child:
+            _fatal(f"{config_path} has product {child!r} declared as its own parent")
+        if parent not in labels:
+            _fatal(
+                f"{config_path} has product {child!r} with parent {parent!r}, which is "
+                f"not a declared product (declared: {', '.join(labels) or 'none'})"
+            )
+
+    # Every chain has to terminate at a top-level product. Walking up from each child is
+    # what proves it: with a cycle, the products in it have no root above them, so the
+    # depth-first ordering below would never reach them and they would silently drop out
+    # of the taxonomy - the board short a section, `create` rejecting a product id the
+    # config plainly declares.
+    for child in parents:
+        seen = {child}
+        cursor = parents[child]
+        while True:
+            if cursor in seen:
+                _fatal(
+                    f"{config_path} has a cycle in [products]: "
+                    f"{' -> '.join([*seen, cursor])}. Every product's `parent` chain must "
+                    "end at a top-level product."
+                )
+            seen.add(cursor)
+            if cursor not in parents:
+                break
+            cursor = parents[cursor]
+
+    # Declaration order, re-laid depth first so each product is immediately followed by
+    # its own descendants. Every consumer treats iteration order as display order (the
+    # board's sections, the session picker), so the tree is ordered once, here, rather
+    # than re-derived by each of them.
+    ordered: dict[str, str] = {}
+
+    def emit(product_id: str) -> None:
+        ordered[product_id] = labels[product_id]
+        for child, parent in parents.items():
+            # `parents` is in declaration order, so siblings come out in the order the
+            # operator wrote them.
+            if parent == product_id:
+                emit(child)
+
+    for product_id in labels:
+        if product_id not in parents:
+            emit(product_id)
+    # Guaranteed by the cycle check above; asserted because a product missing here is
+    # invisible everywhere downstream rather than loudly broken.
+    assert len(ordered) == len(labels), "product ordering dropped a declared product"
+    return ordered, parents
 
 
 def _parse_mode(raw: dict, config_path: Path) -> str:
@@ -438,6 +577,8 @@ def load_config(repo_root: Path | None = None) -> Config:
     models_raw = dict(raw.get("models", {}))
     default_model = str(models_raw.pop("default", "")).strip() or None
 
+    products, product_parents = _parse_products(raw, config_path)
+
     knowledge_dir = local_dir / KNOWLEDGE_DIR_NAME
     knowledge_files: tuple[str, ...] = ()
     if knowledge_dir.is_dir():
@@ -458,7 +599,8 @@ def load_config(repo_root: Path | None = None) -> Config:
         or DEFAULT_WORKSPACE_ROOT,
         host=str(server.get("host", "")).strip() or DEFAULT_HOST,
         port=int(server.get("port", DEFAULT_PORT)),
-        products={str(k): str(v) for k, v in raw.get("products", {}).items()},
+        products=products,
+        product_parents=product_parents,
         repo_layout=str(project.get("layout", "")).strip() or DEFAULT_REPO_LAYOUT,
         models={str(k): str(v) for k, v in models_raw.items()},
         default_model=default_model,

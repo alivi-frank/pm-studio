@@ -46,6 +46,10 @@ class AgentAuthHeaderTest(unittest.TestCase):
         for template in (
             agent_module.PM_SYSTEM_PROMPT_TEMPLATE,
             agent_module.ROADMAP_GUIDANCE_TEMPLATE,
+            # A parent product's PM writes to its sub-products' boards with the same
+            # curl calls, so its guidance carries the same contract.
+            agent_module.PARENT_PRODUCT_GUIDANCE_TEMPLATE,
+            agent_module.TRACKER_GUIDANCE_TEMPLATE,
         ):
             for line in template.splitlines():
                 stripped = line.strip()
@@ -66,6 +70,10 @@ class AgentAuthHeaderTest(unittest.TestCase):
         for template in (
             agent_module.PM_SYSTEM_PROMPT_TEMPLATE,
             agent_module.ROADMAP_GUIDANCE_TEMPLATE,
+            # A parent product's PM writes to its sub-products' boards with the same
+            # curl calls, so its guidance carries the same contract.
+            agent_module.PARENT_PRODUCT_GUIDANCE_TEMPLATE,
+            agent_module.TRACKER_GUIDANCE_TEMPLATE,
         ):
             for line in template.splitlines():
                 stripped = line.strip()

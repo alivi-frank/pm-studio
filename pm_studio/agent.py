@@ -13,7 +13,13 @@ from . import gitsnapshot
 from .accounts import AGENT_HEADER_NAME, AGENT_TOKEN
 from .config import CONFIG, LOCAL_DIR_NAME
 from .costing import agent_usage
-from .roadmap import PRODUCTS
+from .roadmap import (
+    PRODUCTS,
+    parent_of,
+    product_label,
+    product_path_label,
+    subtree_products,
+)
 
 if TYPE_CHECKING:
     from .sessions import Session
@@ -62,6 +68,11 @@ def agent_auth_header() -> str:
 # of every other product (see server.py's _roadmap_context_for) - this is the part that
 # tells the PM what to DO with that context: go deep on its own board, hand off rather
 # than build when something belongs elsewhere.
+#
+# A product may have child products (see roadmap.PRODUCT_PARENTS). The guidance below is
+# written for the pinned product's OWN board and stays true either way; what a parent or
+# a child additionally needs to know is appended from the two templates after it, so a
+# deployment with a flat taxonomy gets a prompt byte-identical to the one it always had.
 ROADMAP_GUIDANCE_TEMPLATE = """\
 - You are the PM for the "{product_label}" product specifically. Go deep there - features, \
 research, roadmap - rather than spreading yourself across every product in this repo. Every \
@@ -91,8 +102,9 @@ its id/history instead of recreating it from scratch:
 -d '{{"move_to_product": "<other_product>"}}'
   It lands on their board untriaged, same as any cross-product suggestion - their PM still \
 decides whether to accept it, since ownership moving doesn't skip their review. You can only \
-move items already on YOUR OWN board this way (the URL is scoped to {product} above) - you \
-cannot reach into another product's board and pull an item out.
+move items that are already on a board YOU own (the URL names the board the item is on \
+today, and PATCH is granted only for your own boards) - you cannot reach into another \
+product's board and pull an item out.
   Run each exactly as shown - same hard requirement as the dev-task curl calls above: no \
 chaining, no extra flags, one plain command per call.
 - A change can carry a real SCHEDULE on top of its bucket: `"start_at"` and \
@@ -116,6 +128,42 @@ PATCH `"owner": ""` to clear it if this system takes the work over). An item wit
 EXTERNAL: keep its bucket/status current as the stakeholder reports progress, factor it into \
 plans and avoid building anything that duplicates or collides with it, but NEVER dispatch a \
 dev task for it - it is someone else's work, tracked here for visibility.
+"""
+
+# Appended for a PM pinned to a product that has anything BELOW it - children,
+# grandchildren, however deep. The full-depth roadmap block already covers those boards
+# (see RoadmapStore.describe_own_product); this says what the PM may do with them, and the
+# Bash allowlist in PMAgent.__init__ grants exactly the same set - the prompt and the
+# enforcement are two statements of one rule, both built from subtree_products.
+PARENT_PRODUCT_GUIDANCE_TEMPLATE = """\
+- "{product_label}" has sub-products, and you are the PM for that whole family: \
+{child_summary}. Their boards are YOURS - your roadmap block above shows each one at full \
+detail under its own heading, and you create, update, schedule and triage on them exactly \
+as you do your own, using that sub-product's OWN id in the URL:
+  curl -s -X POST {roadmap_base_url}/<sub_product>/items{auth_header} -H "Content-Type: application/json" \
+-d '{{"title": "...", "description": "...", "bucket": "now|next|later"}}'
+  curl -s -X PATCH {roadmap_base_url}/<sub_product>/items/<item_id>{auth_header} -H "Content-Type: application/json" \
+-d '{{"bucket": "now", "status": "in_progress"}}'
+- File each change on the MOST SPECIFIC board it belongs to, however deep that is: a change \
+that is really about {child_example_label} belongs on `{child_example}`, not on \
+{product_label} because you happen to be pinned there. Keep each board for work that spans \
+what is below it or belongs to none of them in particular. A change filed in the wrong place \
+is not lost - move it with `move_to_product` as shown above.
+- Nothing outside this family is yours. Every OTHER product still gets the one-line digest \
+only, and reaching it means a suggestion (POST with `"origin_product"`), never a direct edit.
+"""
+
+# Appended for a PM pinned to a product that HAS a parent - including one that is itself a
+# parent, which is why this is not exclusive with the template above. Short on purpose: a
+# child PM's job is its own board, and the one thing it genuinely needs is that somebody
+# above is reading it - so a handoff upward is a normal move, not an escalation.
+CHILD_PRODUCT_GUIDANCE_TEMPLATE = """\
+- "{product_label}" is a sub-product of "{parent_label}". Your board is your own to run, \
+and the {parent_label} PM sees it at full detail as part of that family - so work you raise \
+here is visible upward without you announcing it. {parent_label}'s own board is in the \
+one-line digest below your roadmap, like any other product: read it for context, and when \
+something belongs to the parent rather than to you, suggest it there \
+(`"origin_product": "{product}"`) instead of building it here.
 """
 
 # Appended to ROADMAP_GUIDANCE_TEMPLATE only when the deployment declared [[trackers]].
@@ -355,13 +403,48 @@ class PMAgent:
 
         roadmap_tools = ""
         if self.product:
+            # Every board this session owns: its own product first, then any children
+            # (see roadmap.subtree_products). One list, used for the prompt AND for the
+            # allowlist below, so the two can never drift apart.
+            owned_products = subtree_products(self.product)
             roadmap_guidance = ROADMAP_GUIDANCE_TEMPLATE.format(
                 product=self.product,
-                product_label=PRODUCTS.get(self.product, self.product),
-                product_ids=", ".join(PRODUCTS),
+                product_label=product_label(self.product),
+                # Ids with their place in the taxonomy: on a deployment with many child
+                # products, a bare list of ids doesn't tell the PM whose "billing" it is
+                # about to suggest work to.
+                product_ids=", ".join(
+                    f"{pid} (sub-product of {parent_of(pid)})" if parent_of(pid) else pid
+                    for pid in PRODUCTS
+                ),
                 roadmap_base_url=ROADMAP_BASE_URL,
                 auth_header=agent_auth_header(),
             )
+            # Everything below this product, not just its direct children: the allowlist
+            # grants the whole subtree, so the prompt has to name the whole subtree or the
+            # PM has write access to a board it was never told about. Each is named by its
+            # path, which is what tells a three-level family apart from a wide two-level one.
+            descendants = owned_products[1:]
+            if descendants:
+                roadmap_guidance += PARENT_PRODUCT_GUIDANCE_TEMPLATE.format(
+                    product_label=product_label(self.product),
+                    child_summary=", ".join(
+                        f"{product_path_label(d)} (id `{d}`)" for d in descendants
+                    ),
+                    child_example=descendants[0],
+                    child_example_label=product_path_label(descendants[0]),
+                    roadmap_base_url=ROADMAP_BASE_URL,
+                    auth_header=agent_auth_header(),
+                )
+            # Not an elif: a product in the middle of a three-level family is both a
+            # parent and a child, and each fact tells the PM something different - what it
+            # may write, and who is already reading it.
+            if parent_of(self.product):
+                roadmap_guidance += CHILD_PRODUCT_GUIDANCE_TEMPLATE.format(
+                    product=self.product,
+                    product_label=product_label(self.product),
+                    parent_label=product_label(parent_of(self.product)),
+                )
             if CONFIG.trackers:
                 roadmap_guidance += TRACKER_GUIDANCE_TEMPLATE.format(
                     product=self.product,
@@ -374,13 +457,16 @@ class PMAgent:
                     ),
                 )
             # POST is deliberately broad (any product) - suggesting work for another
-            # product is the intended cross-product handoff. PATCH is scoped to this
-            # session's own product only, the same literal-URL-prefix enforcement
-            # tasks_base_url above relies on: it is structurally impossible for this
-            # PM to reach into and mutate another product's existing items.
-            roadmap_tools = (
-                f"Bash(curl -s -X POST {ROADMAP_BASE_URL}/*) "
-                f"Bash(curl -s -X PATCH {ROADMAP_BASE_URL}/{self.product}/*) "
+            # product is the intended cross-product handoff. PATCH is scoped to the
+            # boards this session OWNS - its own product, plus its children if it is a
+            # parent - one literal-URL-prefix entry each, the same enforcement
+            # tasks_base_url above relies on: it is structurally impossible for this PM
+            # to reach into and mutate the existing items of a product outside its own
+            # subtree. This is the enforcement half of PARENT_PRODUCT_GUIDANCE_TEMPLATE,
+            # and both are built from owned_products so they cannot disagree.
+            roadmap_tools = f"Bash(curl -s -X POST {ROADMAP_BASE_URL}/*) " + "".join(
+                f"Bash(curl -s -X PATCH {ROADMAP_BASE_URL}/{owned}/*) "
+                for owned in owned_products
             )
         else:
             roadmap_guidance = GENERAL_ROADMAP_GUIDANCE

@@ -46,11 +46,20 @@ host = "127.0.0.1"   # keep it local - see the security model in the README
 port = 8000
 
 # Product taxonomy for the roadmap board: id = "Display Label".
-# TOML order is display order (customer-facing first reads best). Omit for a
-# single-product repo: sessions then run unpinned, with no per-product boards.
+# Declaration order is display order (customer-facing first reads best). Omit for
+# a single-product repo: sessions then run unpinned, with no per-product boards.
+#
+# A product with a `parent` is a SUB-PRODUCT of it (see "Hierarchical products"
+# below). Both spellings below mean the same thing; TOML wants every plain
+# `key = "value"` line to come before the first [products.x] sub-table.
 [products]
 web = "Web App"
-platform = "Platform / Shared Packages"
+platform = "Platform"
+auth = { label = "Auth & Identity", parent = "web" }
+
+[products.billing]
+label = "Billing"
+parent = "web"
 
 # Optional model allow-list override (id = "Label"). The reserved key `default`
 # names the model new sessions start on. Omit the table entirely to use the
@@ -109,6 +118,59 @@ organization = "acme"            # base_url is derived: https://dev.azure.com/ac
 projects = ["Platform"]
 token_env = "PM_STUDIO_ADO_PAT"  # an ADO personal access token
 ```
+
+## Hierarchical products
+
+A product declared with a `parent` is a **sub-product** of it:
+
+```toml
+[products]
+web = "Web App"
+platform = "Platform"
+auth     = { label = "Auth & Identity", parent = "web" }
+billing  = { label = "Billing",         parent = "web" }
+sso      = { label = "SSO",             parent = "auth" }   # three levels
+```
+
+A sub-product is a full product, not a label: its own roadmap board file, its own
+pinned sessions, its own id in every `/roadmap/<product>/...` URL. `parent` adds
+three things and nothing else:
+
+- **The board nests it.** The Product lens draws one section per top-level product,
+  with its own project rows first and a folding sub-section per child inside it, one
+  indent step per level. A parent's heading counts its own open work and, separately,
+  what is open across its whole subtree — both are true at once, so neither number is
+  quietly inflated. Folding a product folds everything under it.
+- **A parent's PM owns its whole subtree.** A session pinned to `web` gets `web`,
+  `auth`, `sso` and `billing` at full detail in its roadmap block, each under its own
+  heading naming its own parent, and may create/update/schedule/triage on all of
+  them. A session pinned to `auth` gets `auth` and `sso`; `web` reaches it as a
+  one-line digest like any other product. Nothing outside the subtree is writable —
+  that stays a suggestion (`origin_product`), enforced by the agent's own URL
+  allowlist. A product in the middle is told it is both a parent and a child.
+- **Names disambiguate.** Wherever a product is named with no section around it, it
+  reads as its full path: `Web App / Auth & Identity / SSO`.
+
+**Depth is yours to choose.** Nothing counts levels — a sub-product can have
+sub-products of its own, as deep as your org actually is. The practical limit is
+width, not the model: the board indents one step per level, so past four or five the
+sections get narrow. An unknown or self-referential `parent`, or a **cycle**, is a
+hard startup error, for the same reason a bad `[enterprise] mode` is — a child that
+silently became a top-level product is a working-looking deployment with one board
+too many, and the products in a cycle would hang off no top-level product at all and
+vanish from the taxonomy while their boards sat on disk holding items.
+
+Nothing stores the hierarchy: a change records the product id it always recorded.
+So **re-parenting is a config edit**, not a migration — move the `parent` pointer,
+restart, and the same boards appear in their new place. Deleting a `[products]`
+entry does not delete its board file; items on an undeclared product stop loading
+and come back if the id returns.
+
+Adding sub-products to an existing deployment changes nothing about the products
+already there: their items, boards and sessions stay exactly where they are, and a
+parent simply gains children underneath it. The same goes for deepening an existing
+tree later — pointing a new product at a product that already has a parent needs no
+migration either.
 
 ## Operating modes
 

@@ -87,9 +87,17 @@
     cursor: pointer;
   }
   .group-head:hover { background: var(--hover); }
+  /* Sized in its own right rather than shrunk relative to the heading: this glyph is
+     the only thing on the row that says it opens, so it has to be findable before you
+     have thought to look for it. Boxed and centred so the rotation pivots on the
+     glyph rather than swinging it sideways. */
   .group-head .chevron {
-    color: var(--ink-muted);
-    font-size: 0.7em;
+    flex: 0 0 auto;
+    width: 16px;
+    font-size: 0.95em;
+    line-height: 1;
+    text-align: center;
+    color: var(--ink-secondary);
     transition: transform 0.15s ease;
   }
   section.group.collapsed .chevron { transform: rotate(-90deg); }
@@ -112,6 +120,125 @@
   .group-head .tally .live { color: var(--status-in-progress); font-weight: 600; }
   section.group.collapsed .group-body { display: none; }
   .group-body { padding-top: 10px; }
+
+  /* ---- sub-products: a section nested inside its parent's body -------------------
+     A child product is a board in its own right, so it gets the same heading, tally and
+     fold as any other section - only indented, and hung off a rule that runs down its
+     parent. A rule rather than another card for the reason the sections themselves are
+     rules: a box inside a box inside a box spends the width on padding, and the one
+     thing the indent has to say is "these belong to the heading above". */
+  /* Indented past where the parent's OWN project rows sit, not level with them: at the
+     same offset a child's heading reads as one more row of the parent's board rather
+     than as the board underneath it. */
+  .subgroups { display: flex; flex-direction: column; gap: 2px; margin: 12px 0 0 8px; }
+  section.group.sub {
+    margin-bottom: 0;
+    padding-left: 15px;
+    /* Visible in both themes on its own, unlike the hairline the sections' own rules
+       use - it is the only thing carrying "these belong to the heading above". */
+    border-left: 2px solid rgba(128, 128, 128, 0.35);
+  }
+  section.group.sub > .group-head h2 { font-size: 0.92em; font-weight: 600; }
+  /* Dashed, so the depth is legible at a glance even when a parent's own rows are
+     folded away and two headings end up adjacent. */
+  section.group.sub > .group-head { border-bottom-style: dashed; }
+  section.group.sub > .group-body { padding-top: 7px; }
+  /* The one tally entry that is about work NOT in this section - italic so it doesn't
+     read as another of the section's own counts. */
+  .group-head .tally .nested,
+  .gantt-group .tally .nested { font-style: italic; }
+
+  /* ---- the project row: what a section shows FIRST -------------------------------
+     A section used to open straight onto every one of its changes, which is the right
+     altitude for doing the work and the wrong one for reading the plan: twelve titles
+     tell you what is being built, not whether the thing they add up to is on track.
+     So the first level is one row per project - the unit the portfolio page actually
+     plans in - carrying only what you can act on at that altitude (how much is done,
+     how much is moving, what is late, when it runs). The changes are one click away,
+     unchanged, inside it. */
+  .projects { display: flex; flex-direction: column; gap: 5px; }
+  .project {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .project:hover { border-color: rgba(128, 128, 128, 0.35); }
+  .project-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    /* Wraps rather than crushes: on a narrow window the counts drop to their own line
+       under the name instead of squeezing it down to two characters. */
+    flex-wrap: wrap;
+    width: 100%;
+    padding: 7px 10px;
+    border: 0;
+    background: none;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .project-head:hover { background: var(--hover); }
+  .project-head .chevron {
+    flex: 0 0 auto;
+    width: 15px;
+    font-size: 0.9em;
+    line-height: 1;
+    text-align: center;
+    color: var(--ink-secondary);
+    transition: transform 0.15s ease;
+  }
+  .project:not(.open) .project-head .chevron { transform: rotate(-90deg); }
+  .project-name {
+    min-width: 0;
+    font-size: 0.86em;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* The row's own metadata sits left, next to the name it qualifies; the numbers are
+     pushed right so every project in a section lines its counts up in one column. */
+  .project-head .chip { flex: 0 0 auto; }
+  .project-head .chip:not(:last-child)::after { content: none; }
+  .project-stats {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+    font-size: 0.74em;
+    color: var(--ink-muted);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .project-stats .live { color: var(--status-in-progress); font-weight: 600; }
+  .project-body {
+    display: none;
+    padding: 8px 10px 10px;
+    border-top: 1px solid var(--hairline);
+  }
+  .project.open .project-body { display: block; }
+  .project-empty { font-size: 0.78em; color: var(--ink-muted); padding: 2px 0; }
+
+  /* Shipped / in progress / pending, as a share of the project. Deliberately NOT the
+     only signal: the counts beside it say the same thing in words, so the row reads
+     correctly in greyscale and to a colour-blind viewer, and the meter is the glance
+     version rather than the source of truth. The 2px gaps are page, not a border, so
+     a 3% segment is still a visible segment. */
+  .meter {
+    display: flex;
+    gap: 2px;
+    flex: 0 0 auto;
+    width: 84px;
+    height: 5px;
+  }
+  .meter .seg { min-width: 2px; border-radius: 2px; }
+  .meter .seg.done { background: var(--status-done); }
+  .meter .seg.in_progress { background: var(--status-in-progress); }
+  .meter .seg.pending { background: var(--status-pending); opacity: 0.45; }
+  .meter .seg.empty { flex: 1; background: var(--border); }
 
   /* ---- lanes (the now / next / later subview) ---- */
   .lanes {
@@ -418,7 +545,12 @@
     --gutter: 290px;
     min-width: 900px;
   }
-  @media (max-width: 700px) { .gantt { --gutter: 160px; } }
+  /* The gutter halves on a narrow window, which leaves no room for a project row's
+     meter - the "3/9" beside it says the same thing in a tenth of the width. */
+  @media (max-width: 700px) {
+    .gantt { --gutter: 160px; }
+    .gantt-label .meter { display: none; }
+  }
   /* NOT sticky, deliberately. `overflow-x: auto` on the wrapper makes it the nearest
      scrollport in BOTH axes, so a `position: sticky` axis here is measured against that
      box rather than the window - it renders `top` pixels down from the top of the
@@ -502,10 +634,40 @@
   /* The heading and its counts both stay in the label gutter. Spilling the tally into
      the second column would print it across the time axis, where the gridlines run
      through the text and it reads as a bar that starts in April. */
+  /* A button, not a div: the timeline's sections fold exactly like the lane view's, so
+     "Collapse all" means the same thing whichever view you are in. */
   .gantt-group {
+    display: block;
     width: var(--gutter);
     padding: 12px 10px 3px 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
   }
+  .gantt-group:hover { background: var(--hover); }
+  .gantt-group .head-line { display: flex; align-items: center; gap: 7px; }
+  .gantt-group .chevron {
+    flex: 0 0 auto;
+    color: var(--ink-muted);
+    font-size: 0.7em;
+    transition: transform 0.15s ease;
+  }
+  .gantt-group.collapsed .chevron { transform: rotate(-90deg); }
+  /* A sub-product heading. Indented inside the gutter, where the parent heading it
+     belongs to sits directly above it - the timeline draws one flat column of rows, so
+     depth here is the indent and the rule, not a nested box. Less top padding than a
+     top-level heading: it groups with the heading above rather than starting fresh. The
+     indent itself scales with depth and is set inline by renderTimeline, since it has to
+     come out of the shared gutter width. */
+  .gantt-group.sub {
+    padding-top: 8px;
+    border-left: 2px solid var(--border);
+    padding-left: 9px;
+  }
+  .gantt-group.sub h2 { font-weight: 600; color: var(--ink-secondary); }
   .gantt-group h2 {
     margin: 0;
     font-size: 0.85em;
@@ -531,6 +693,10 @@
     position: relative;
   }
   .gantt-row:hover { background: var(--hover); }
+  /* A folded project's change rows stay in the DOM and are only hidden, so opening one
+     doesn't rebuild the timeline and throw away where you had scrolled to. The UA's own
+     `[hidden]` rule loses to `display: grid` above, so it has to be restated. */
+  .gantt-row[hidden] { display: none; }
   .gantt-label {
     display: flex;
     align-items: center;
@@ -563,6 +729,30 @@
   /* The lane card nudges its dot down to sit on the first line of a wrapping title; a
      timeline row is one line, so it just centres. */
   .gantt-label .status-dot { align-self: center; transform: none; margin-top: 0; }
+  /* The project row, and the change rows that fold out beneath it. The indent is the
+     only thing saying "these belong to the row above", so it is worth more than the
+     12px of label width it costs. */
+  .gantt-row.is-project { min-height: 26px; }
+  .gantt-row.is-project .gantt-label .name { font-weight: 650; }
+  .gantt-label .twisty {
+    flex: 0 0 auto;
+    width: 13px;
+    font-size: 0.85em;
+    line-height: 1;
+    text-align: center;
+    color: var(--ink-secondary);
+    transition: transform 0.15s ease;
+  }
+  .gantt-label .twisty.closed { transform: rotate(-90deg); }
+  .gantt-row.is-change .gantt-label { padding-left: 33px; }
+  .gantt-row.is-change .gantt-detail { padding-left: 51px; }
+  .gantt-label .meter { margin-left: auto; }
+  .gantt-label .count {
+    flex: 0 0 auto;
+    font-size: 0.7em;
+    color: var(--ink-muted);
+    font-variant-numeric: tabular-nums;
+  }
   .gantt-track { position: relative; height: 23px; }
   /* A bar carries two independent facts, so it has two independent modifiers rather
      than one class per combination:
@@ -581,10 +771,10 @@
     border-radius: 3px;
     background: var(--bar);
   }
-  .gantt-bar.s-pending { --bar: var(--status-pending); }
-  .gantt-bar.s-in_progress { --bar: var(--status-in-progress); }
-  .gantt-bar.s-done { --bar: var(--status-done); }
-  .gantt-bar.s-overdue { --bar: var(--danger); }
+  .gantt-bar.s-pending, .gantt-summary.s-pending, .gantt-reach.s-pending { --bar: var(--status-pending); }
+  .gantt-bar.s-in_progress, .gantt-summary.s-in_progress, .gantt-reach.s-in_progress { --bar: var(--status-in-progress); }
+  .gantt-bar.s-done, .gantt-summary.s-done, .gantt-reach.s-done { --bar: var(--status-done); }
+  .gantt-bar.s-overdue, .gantt-summary.s-overdue, .gantt-reach.s-overdue { --bar: var(--danger); }
   .gantt-bar.derived {
     background: repeating-linear-gradient(135deg, var(--bar) 0 3px, transparent 3px 7px);
     border: 1px solid var(--bar);
@@ -592,6 +782,48 @@
   }
   .gantt-bar.clip-start { border-top-left-radius: 0; border-bottom-left-radius: 0; }
   .gantt-bar.clip-end { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+
+  /* The project's own bar: the span its DATED changes actually cover, drawn with the
+     downward end caps a summary row has carried since the first Gantt charts, so a
+     rolled-up span can never be mistaken for one change's committed dates. Its colour
+     is the worst state underneath it - one overdue change makes the whole project
+     read overdue, which is the point of looking at this level. */
+  .gantt-summary {
+    position: absolute;
+    top: 8px;
+    height: 6px;
+    min-width: 4px;
+    border-radius: 2px;
+    background: var(--bar);
+  }
+  .gantt-summary::before,
+  .gantt-summary::after {
+    content: "";
+    position: absolute;
+    top: 100%;
+    width: 0;
+    height: 0;
+    border-top: 4px solid var(--bar);
+  }
+  .gantt-summary::before { left: 0; border-right: 4px solid transparent; }
+  .gantt-summary::after { right: 0; border-left: 4px solid transparent; }
+  /* How far the project REACHES once its undated changes are counted - drawn as a
+     dashed rule rather than as more bar, because one un-dated "later" change would
+     otherwise stretch a solid, committed-looking envelope two quarters past anything
+     anyone has actually committed to. A project with no dates at all is this line and
+     nothing else, which is the honest picture of it. */
+  .gantt-reach {
+    position: absolute;
+    top: 10px;
+    height: 2px;
+    background: repeating-linear-gradient(90deg, var(--bar) 0 4px, transparent 4px 8px);
+    opacity: 0.7;
+  }
+  /* Legend copies: no caps, and back in flow. */
+  .gantt-legend .swatch.gantt-summary { height: 6px; }
+  .gantt-legend .swatch.gantt-summary::before,
+  .gantt-legend .swatch.gantt-summary::after { content: none; }
+  .gantt-legend .swatch.gantt-reach { height: 2px; align-self: center; }
   /* The committed target date, marked on the bar rather than replacing it - on a
      shipped change the gap between the bar's end and this diamond IS the slip. */
   .gantt-target {
@@ -850,7 +1082,60 @@
   const STATUS_LABEL = { pending: "Pending", in_progress: "In progress", done: "Done" };
 
   let PRODUCTS = {};
-  let itemsByProduct = {}; // product -> [item]
+  // The taxonomy's hierarchy: child product id -> parent id, for children only (see
+  // config._parse_products). Empty on a flat deployment, and every helper below then
+  // answers what it answered before hierarchy existed - one section per product, no
+  // nesting - so a flat board is not a special case anywhere in this file.
+  let PRODUCT_PARENTS = {};
+  let itemsByProduct = {}; // product -> [item] (that product's OWN changes only)
+
+  function parentOf(product) {
+    return PRODUCT_PARENTS[product] ?? null;
+  }
+  // PRODUCTS arrives ordered (parent, then its children), so these preserve display order.
+  function childrenOf(product) {
+    return Object.keys(PRODUCTS).filter((p) => parentOf(p) === product);
+  }
+  function topLevelProducts() {
+    return Object.keys(PRODUCTS).filter((p) => !parentOf(p));
+  }
+  /* A product then its descendants at every depth, in display order - the mirror of
+     roadmap.subtree_products, including its cycle guard: the server refuses a cyclic
+     taxonomy at config load, and an unguarded walk here would hang the render rather
+     than draw a slightly wrong board. */
+  function subtreeProducts(product, seen = new Set()) {
+    if (seen.has(product)) return [];
+    seen.add(product);
+    return [product, ...childrenOf(product).flatMap((c) => subtreeProducts(c, seen))];
+  }
+  function productLabel(product) {
+    return PRODUCTS[product] ?? product;
+  }
+  /* Everything above a product, nearest parent first; [] for a top-level one. The `seen`
+     guard mirrors roadmap.ancestors_of: the server refuses a cyclic taxonomy at config
+     load, and a hang in a render loop is a worse way to find that out than a wrong label. */
+  function ancestorsOf(product) {
+    const chain = [];
+    const seen = new Set([product]);
+    let cursor = parentOf(product);
+    while (cursor && !seen.has(cursor)) {
+      chain.push(cursor);
+      seen.add(cursor);
+      cursor = parentOf(cursor);
+    }
+    return chain;
+  }
+  function depthOf(product) {
+    return ancestorsOf(product).length;
+  }
+  /* The full path down to a product - "Web App / Auth / SSO" - or the plain label for a
+     top-level one. Used where a product is named with no section around it to say where it
+     sits: a card's chip in the initiative lens, a "suggested by" line, the move picker. */
+  function productPathLabel(product) {
+    const ancestors = ancestorsOf(product);
+    if (!ancestors.length) return productLabel(product);
+    return [...ancestors.reverse(), product].map(productLabel).join(" / ");
+  }
   // The work model, used only by the initiative grouping. Empty on a deployment that
   // doesn't use /portfolio, in which case everything lands in one "Unaligned" group.
   let PORTFOLIO = { initiatives: [], projects: [], catch_all_project_id: null };
@@ -866,16 +1151,25 @@
   let groupBy = localStorage.getItem("roadmapGroupBy") === "initiative" ? "initiative" : "product";
   let view = localStorage.getItem("roadmapView") === "timeline" ? "timeline" : "board";
 
-  /* Which sections are folded, and which cards are open. Both live outside the DOM
-     because renderAll() rebuilds everything from scratch on every websocket event -
-     without this, a fold or an open card would reset the instant anyone else touched
-     the board. Folds persist across loads; an open card is a transient reading state
-     and deliberately does not. */
+  /* Which sections are folded, which projects are opened out, and which cards are open.
+     All three live outside the DOM because renderAll() rebuilds everything from scratch
+     on every websocket event - without this, a fold would reset the instant anyone else
+     touched the board.
+
+     The two structural levels persist; an open card is a transient reading state and
+     deliberately does not. A project starts CLOSED and there is no stored default that
+     can change that, which is what makes the section read as a plan rather than as a
+     backlog the first time you land on it. */
   const collapsed = new Set(JSON.parse(localStorage.getItem("roadmapCollapsedGroups") || "[]"));
+  const openProjects = new Set(JSON.parse(localStorage.getItem("roadmapOpenProjects") || "[]"));
   const openCards = new Set();
 
   function persistCollapsed() {
     localStorage.setItem("roadmapCollapsedGroups", JSON.stringify([...collapsed]));
+  }
+
+  function persistOpenProjects() {
+    localStorage.setItem("roadmapOpenProjects", JSON.stringify([...openProjects]));
   }
 
   function el(tag, className, text) {
@@ -921,12 +1215,14 @@
     return Math.round((bMs - aMs) / 86400000);
   }
   // "Sep 30" for a date this year, "Sep 30 2027" when the year is not the obvious one.
-  function dateLabel(iso) {
-    const ms = dateMs(iso);
+  function dateLabelMs(ms) {
     if (ms == null) return "";
     const opts = { month: "short", day: "numeric" };
     if (new Date(ms).getFullYear() !== new Date().getFullYear()) opts.year = "numeric";
     return new Date(ms).toLocaleDateString(undefined, opts);
+  }
+  function dateLabel(iso) {
+    return dateLabelMs(dateMs(iso));
   }
 
   // ---- the view switches, mounted into the shared nav's controls slot ----
@@ -946,8 +1242,43 @@
     return wrap;
   }
 
+  /* One button rather than two, because "collapse all" and "expand all" are never both
+     useful at once: whichever the board is not already in is the one worth offering.
+     It acts on the sections you can currently see - the keys come from currentGroups(),
+     so switching the grouping switches what "all" means, and a fold stored against the
+     other grouping is left alone rather than silently dropped. */
+  function collapseAllButton() {
+    // Nested sections included: a sub-product section is one of the things "all" means,
+    // and leaving them out would make "expand all" open a parent onto folded children.
+    const keys = groupKeys(currentGroups());
+    const allCollapsed = keys.length > 0 && keys.every((k) => collapsed.has(k));
+    const button = el("button", "pmnav-action", allCollapsed ? "Expand all" : "Collapse all");
+    button.type = "button";
+    button.title = allCollapsed
+      ? `Open all ${keys.length} ${groupBy === "initiative" ? "initiatives" : "products"}`
+      : `Fold all ${keys.length} ${groupBy === "initiative" ? "initiatives" : "products"} down to their headings`;
+    button.disabled = !keys.length;
+    button.addEventListener("click", () => {
+      const hadFocus = document.activeElement === button;
+      for (const key of keys) {
+        if (allCollapsed) collapsed.delete(key); else collapsed.add(key);
+      }
+      persistCollapsed();
+      renderAll();
+      // renderAll() rebuilds the slot, so the button that was just clicked no longer
+      // exists - without this, a keyboard user is dropped back to the top of the page
+      // between "collapse all" and the "expand all" that undoes it.
+      if (hadFocus) {
+        const next = document.querySelector("#pm-nav-slot .pmnav-action");
+        if (next) next.focus();
+      }
+    });
+    return button;
+  }
+
   function mountControls(slot) {
     slot.textContent = "";
+    slot.appendChild(collapseAllButton());
     slot.appendChild(el("span", "pmnav-seg-label", "Group by"));
     slot.appendChild(segmented("Group changes by", [
       ["product", "Product", "One section per product board"],
@@ -1030,12 +1361,18 @@
      the product on every card, an initiative section doesn't repeat the initiative. */
   function metaChips(item, omit = {}) {
     const chips = [];
-    if (!omit.product) chips.push(chip(PRODUCTS[item.product] || item.product));
+    // The full path, because this chip only appears where the section does NOT name the
+    // product (the initiative lens) - and there, "Billing" alone doesn't say whose.
+    if (!omit.product) chips.push(chip(productPathLabel(item.product)));
     const project = PROJECTS_BY_ID[item.project_id];
-    if (project) chips.push(chip(project.title));
-    // Alignment is a practice the board surfaces, never a validation that blocks work -
-    // so an unaligned change is flagged on its card and still shown everywhere else.
-    else chips.push(chip("unaligned", "warn"));
+    // Inside a project row the project is the row's own heading, so repeating it on
+    // every card would print the same word a dozen times down one column.
+    if (!omit.project) {
+      if (project) chips.push(chip(project.title));
+      // Alignment is a practice the board surfaces, never a validation that blocks work -
+      // so an unaligned change is flagged on its card and still shown everywhere else.
+      else chips.push(chip("unaligned", "warn"));
+    }
     if (item.owner) chips.push(chip(`External — ${item.owner}`, "owner"));
     // The schedule, in whatever shape it has. `is_overdue` is computed server-side
     // (roadmap.py) so the board and the PM's context block never disagree about what
@@ -1084,16 +1421,36 @@
     const placeholder = el("option", null, "Move to…");
     placeholder.value = "";
     moveSelect.appendChild(placeholder);
-    for (const [id, label] of Object.entries(PRODUCTS)) {
-      if (id === item.product) continue;
-      const opt = el("option", null, label);
-      opt.value = id;
-      moveSelect.appendChild(opt);
+    /* Grouped by family, one optgroup per top-level product holding its whole subtree in
+       display order, indented one step per level: a flat list of every board stops being
+       readable at the point a deployment has a dozen sub-products, which is exactly when
+       moving things between them starts to matter. A top-level product with nothing below
+       it is a plain option, not a group of one. */
+    for (const top of topLevelProducts()) {
+      const family = subtreeProducts(top).filter((id) => id !== item.product);
+      if (!family.length) continue;
+      const option = (id) => {
+        const indent = depthOf(id) - depthOf(top);
+        const opt = el("option", null,
+          indent ? `${" ".repeat(indent * 2)}↳ ${productLabel(id)}` : productLabel(id));
+        opt.value = id;
+        // The closed select shows only the chosen option, so it carries the whole path.
+        opt.title = productPathLabel(id);
+        return opt;
+      };
+      if (subtreeProducts(top).length === 1) {
+        moveSelect.appendChild(option(top));
+        continue;
+      }
+      const optgroup = document.createElement("optgroup");
+      optgroup.label = productLabel(top);
+      for (const id of family) optgroup.appendChild(option(id));
+      moveSelect.appendChild(optgroup);
     }
     moveSelect.addEventListener("change", () => {
       const target = moveSelect.value;
       if (!target) return;
-      if (!confirm(`Move "${item.title}" to ${PRODUCTS[target]}? It keeps its history and lands accepted on their board.`)) {
+      if (!confirm(`Move "${item.title}" to ${productPathLabel(target)}? It keeps its history and lands accepted on their board.`)) {
         moveSelect.value = "";
         return;
       }
@@ -1193,7 +1550,7 @@
     const body = el("div", "body");
     body.appendChild(el("div", "title", item.title));
     body.appendChild(el("div", "from",
-      `Suggested by ${PRODUCTS[item.origin_product] ?? item.origin_product}`
+      `Suggested by ${productPathLabel(item.origin_product)}`
       + (item.description ? ` — ${item.description}` : "")));
     card.appendChild(body);
 
@@ -1288,19 +1645,72 @@
     return Object.values(itemsByProduct).flat();
   }
 
-  /* A group is { key, title, flags, changes, addTo }.
-     `addTo` is { product, projectId } when a "+" in this section has an unambiguous
-     destination, and null when it does not - an initiative spanning three products has
-     no single board to add to, so it shows no "+" rather than guessing one. */
+  /* A group is { key, title, flags, changes, omit, product, projectIds, subgroups }.
+
+     `product` is the one product board this section is about, or null when it spans
+     several - it is what lets a project row inside the section know where a new change
+     would go. `projectIds` is an explicit, ordered list of the projects the section
+     should show as rows even when they hold no changes yet (an initiative's own
+     projects are part of its plan whether or not anything has been raised against them
+     yet), or null to mean "just whatever the changes turn out to belong to".
+
+     `subgroups` are sections nested INSIDE this one - a parent product's child products.
+     Empty for every other kind of section. The invariant that makes the counting below
+     safe: `changes` is always a section's OWN changes only, never its descendants', so
+     every change belongs to exactly one section however deep the taxonomy goes. What a
+     parent shows about its children it takes from the subgroups. */
   function groupsByProduct() {
-    return Object.keys(PRODUCTS).map((product) => ({
-      key: `product:${product}`,
-      title: PRODUCTS[product] ?? product,
-      flags: [],
-      changes: itemsByProduct[product] ?? [],
-      omit: { product: true },
-      addTo: { product, projectId: null },
-    }));
+    // `seen` is the same cycle guard subtreeProducts carries - this recursion is what
+    // builds the whole board, so an unguarded one would hang the page.
+    const productGroup = (product, seen = new Set()) => {
+      seen.add(product);
+      return {
+        key: `product:${product}`,
+        title: productLabel(product),
+        flags: [],
+        changes: itemsByProduct[product] ?? [],
+        omit: { product: true },
+        product,
+        // A product board doesn't own projects, so an empty project has no business
+        // appearing under it - the rows are derived from the changes actually here.
+        projectIds: null,
+        subgroups: childrenOf(product)
+          .filter((c) => !seen.has(c))
+          .map((c) => productGroup(c, seen)),
+      };
+    };
+    return topLevelProducts().map((p) => productGroup(p));
+  }
+
+  /* Every change a section holds, its sub-products included - what a parent's heading
+     counts, since folded shut it stands for the whole family. */
+  function groupChanges(group) {
+    return [...group.changes, ...(group.subgroups || []).flatMap(groupChanges)];
+  }
+
+  function groupKeys(groups) {
+    return groups.flatMap((g) => [g.key, ...groupKeys(g.subgroups || [])]);
+  }
+
+  /* Every section nested under this one at any depth. Counted rather than just the direct
+     children, because the change count beside it is the whole subtree's - "+9 open in 2
+     sub-products" when nine of them live in a grandchild would be quietly wrong about
+     where the work is. */
+  function groupDescendants(group) {
+    return (group.subgroups || []).flatMap((g) => [g, ...groupDescendants(g)]);
+  }
+
+  /* The sections as a flat sequence with depth, for the timeline - it draws rows on one
+     shared axis, so nesting is indentation there rather than a box inside a box. A
+     folded parent takes its sub-products with it: they are inside it, so they fold with
+     it rather than being left behind at the top level with nothing above them. */
+  function flatGroups(groups = currentGroups(), depth = 0) {
+    const out = [];
+    for (const group of groups) {
+      out.push({ group, depth });
+      if (!collapsed.has(group.key)) out.push(...flatGroups(group.subgroups || [], depth + 1));
+    }
+    return out;
   }
 
   /* Mirrors portfolio.group_changes_by_initiative on the server (see
@@ -1337,23 +1747,27 @@
         flags,
         changes,
         omit: {},
-        // Unambiguous only when the whole initiative lives on one product AND one
-        // project; otherwise a "+" would have to guess where the change belongs.
-        addTo: products.size === 1 && projects.length === 1
-          ? { product: [...products][0], projectId: projects[0].id }
-          : null,
+        // An initiative can span products, so it names none - each project row works
+        // out its own destination from the changes it holds.
+        product: products.size === 1 ? [...products][0] : null,
+        projectIds: projects.map((p) => p.id),
       };
     });
 
     const unaligned = buckets.get(null) || [];
-    if (unaligned.length || !groups.length) {
+    // Projects with no initiative belong in the trailing group whether or not anything
+    // has been raised against them - an unaligned project is exactly the thing this
+    // section exists to make visible.
+    const looseProjects = PORTFOLIO.projects.filter((p) => !p.initiative_id);
+    if (unaligned.length || looseProjects.length || !groups.length) {
       groups.push({
         key: "initiative:none",
         title: "Unaligned",
         flags: [["no initiative", true]],
         changes: unaligned,
         omit: {},
-        addTo: null,
+        product: null,
+        projectIds: looseProjects.map((p) => p.id),
       });
     }
     return groups;
@@ -1363,22 +1777,131 @@
     return groupBy === "initiative" ? groupsByInitiative() : groupsByProduct();
   }
 
+  /* ---- the project level ----------------------------------------------------------
+
+     The section's first level. A row is
+       { key, project, title, changes, flags, omit, addTo, roll }
+     where `project` is null for the synthetic row holding changes that belong to no
+     project - shown, never hidden, because a change that fell out of the work model is
+     the one you most need to see.
+
+     `key` is scoped to the group, so the same project appearing under two products
+     folds independently: opening it on one board should not open it on the other. */
+
+  function rollup(changes) {
+    const done = changes.filter((c) => c.status === "done");
+    const live = changes.filter((c) => c.status === "in_progress");
+    const open = changes.filter((c) => c.status !== "done");
+    const overdue = open.filter((c) => c.is_overdue);
+    // The window the project actually runs over, from whatever dates its changes
+    // carry. Undated changes contribute nothing rather than collapsing it to today.
+    let from = null;
+    let to = null;
+    for (const c of changes) {
+      for (const iso of [c.start_at, c.target_at]) {
+        const ms = dateMs(iso);
+        if (ms == null) continue;
+        if (from == null || ms < from) from = ms;
+        if (to == null || ms > to) to = ms;
+      }
+    }
+    return {
+      total: changes.length,
+      done: done.length,
+      live: live.length,
+      pending: open.length - live.length,
+      open: open.length,
+      overdue: overdue.length,
+      now: open.filter((c) => c.bucket === "now").length,
+      from,
+      to,
+    };
+  }
+
+  function meter(roll) {
+    const node = el("div", "meter");
+    node.setAttribute("aria-hidden", "true"); // the counts beside it carry the same facts
+    if (!roll.total) {
+      node.appendChild(el("span", "seg empty"));
+      return node;
+    }
+    for (const [name, count] of [["done", roll.done], ["in_progress", roll.live], ["pending", roll.pending]]) {
+      if (!count) continue;
+      const seg = el("span", `seg ${name}`);
+      seg.style.flex = `${count} 1 0`;
+      node.appendChild(seg);
+    }
+    node.title = `${roll.done} shipped · ${roll.live} in progress · ${roll.pending} not started`;
+    return node;
+  }
+
+  function projectRows(group, changes) {
+    const byProject = new Map();
+    for (const change of changes) {
+      const id = PROJECTS_BY_ID[change.project_id] ? change.project_id : null;
+      if (!byProject.has(id)) byProject.set(id, []);
+      byProject.get(id).push(change);
+    }
+
+    // The section's declared projects first, in the portfolio's own order, then
+    // anything that landed here without being on that list - a change moved onto a
+    // project belonging to another initiative must still be drawn somewhere.
+    const ids = group.projectIds
+      ? group.projectIds.filter((id) => PROJECTS_BY_ID[id])
+      : PORTFOLIO.projects.filter((p) => byProject.has(p.id)).map((p) => p.id);
+    for (const id of byProject.keys()) {
+      if (id !== null && !ids.includes(id)) ids.push(id);
+    }
+
+    const row = (project, rowChanges) => {
+      const flags = [];
+      if (project && project.is_catch_all) flags.push(["catch-all", false]);
+      if (project && project.status === "closed") flags.push(["closed", false]);
+      if (project && project.is_unaligned && groupBy === "product") flags.push(["no initiative", true]);
+      const products = new Set(rowChanges.map((c) => c.product));
+      if (!group.product && products.size > 1) flags.push([`${products.size} products`, false]);
+
+      /* Where a "+" in this row would put a change. The project is known by
+         construction; the product is the section's when it has one, the changes' when
+         they agree on one, and the deployment's when it only has one board at all.
+         Anything else is a guess, so the row shows no "+" instead. */
+      const productIds = Object.keys(PRODUCTS);
+      const product = group.product
+        || (products.size === 1 ? [...products][0] : null)
+        || (productIds.length === 1 ? productIds[0] : null);
+
+      return {
+        key: `${group.key}/project:${project ? project.id : "none"}`,
+        project,
+        title: project ? project.title : "No project",
+        changes: rowChanges,
+        flags,
+        // The row already names the project, so its changes don't repeat it - the same
+        // trick the section head plays with the product.
+        omit: { ...group.omit, project: true },
+        addTo: product ? { product, projectId: project ? project.id : null } : null,
+        roll: rollup(rowChanges),
+      };
+    };
+
+    const rows = ids.map((id) => row(PROJECTS_BY_ID[id], byProject.get(id) || []));
+    if (byProject.has(null)) rows.push(row(null, byProject.get(null)));
+    return rows;
+  }
+
   // ---- the now / next / later view ----
 
-  function renderLanes(group, container) {
-    const open = group.changes.filter((i) => i.status !== "done");
-    const suggestions = open.filter((i) => i.origin_product !== i.product && !i.triaged);
-
-    if (suggestions.length) {
-      const triage = el("div", "triage");
-      for (const item of suggestions) triage.appendChild(suggestionCard(item));
-      container.appendChild(triage);
-    }
+  /* The lanes now belong to ONE project rather than to a whole section, so `row` is a
+     project row - but the shape it needs ({ changes, omit, addTo }) is the same one a
+     group had, and untriaged suggestions have already been lifted out of it by
+     renderBoard. */
+  function renderLanes(row, container) {
+    const open = row.changes.filter((i) => i.status !== "done");
 
     const lanes = el("div", "lanes");
     for (const [value, label] of BUCKETS) {
       const items = open
-        .filter((i) => i.bucket === value && !suggestions.includes(i))
+        .filter((i) => i.bucket === value)
         // Soonest commitment first, undated work after it - so a date changes what you
         // see in this view too, not only on the timeline. ISO dates sort as strings.
         .sort((a, b) =>
@@ -1392,8 +1915,8 @@
       head.appendChild(el("span", "n", String(items.length)));
       lane.appendChild(head);
 
-      if (group.addTo) {
-        const form = addForm(group.addTo.product, value, group.addTo.projectId);
+      if (row.addTo) {
+        const form = addForm(row.addTo.product, value, row.addTo.projectId);
         const add = el("button", "add-btn", "+");
         add.type = "button";
         add.title = `Add a change to ${label}`;
@@ -1403,12 +1926,12 @@
       }
 
       if (!items.length) lane.appendChild(el("div", "lane-empty", "—"));
-      for (const item of items) lane.appendChild(itemCard(item, group.omit));
+      for (const item of items) lane.appendChild(itemCard(item, row.omit));
       lanes.appendChild(lane);
     }
     container.appendChild(lanes);
 
-    const shipped = group.changes
+    const shipped = row.changes
       .filter((i) => i.status === "done")
       .sort((a, b) => (b.shipped_at ?? b.updated_at) - (a.shipped_at ?? a.updated_at))
       .slice(0, 8);
@@ -1417,49 +1940,156 @@
       details.appendChild(el("summary", null, `Recently shipped (${shipped.length})`));
       const list = el("div", "shipped-list");
       for (const item of shipped) {
-        const row = el("div", "shipped-item");
-        row.appendChild(el("span", "when", relativeTime(item.shipped_at ?? item.updated_at)));
-        row.appendChild(el("span", null, item.title));
-        list.appendChild(row);
+        const line = el("div", "shipped-item");
+        line.appendChild(el("span", "when", relativeTime(item.shipped_at ?? item.updated_at)));
+        line.appendChild(el("span", null, item.title));
+        list.appendChild(line);
       }
       details.appendChild(list);
       container.appendChild(details);
     }
   }
 
-  function renderBoard() {
-    for (const group of currentGroups()) {
-      const section = el("section", "group");
-      if (collapsed.has(group.key)) section.classList.add("collapsed");
+  /* One project row: the strategic line, with the whole Now / Next / Later board for
+     that project folded inside it. */
+  function projectNode(row) {
+    const isOpen = openProjects.has(row.key);
+    const node = el("article", "project" + (isOpen ? " open" : ""));
 
-      const head = el("button", "group-head");
-      head.type = "button";
-      head.setAttribute("aria-expanded", String(!collapsed.has(group.key)));
-      head.appendChild(el("span", "chevron", "▾"));
-      head.appendChild(el("h2", null, group.title));
-      for (const [text, warn] of group.flags) head.appendChild(chip(text, warn ? "warn" : null));
-
-      const open = group.changes.filter((i) => i.status !== "done");
-      const live = open.filter((i) => i.status === "in_progress").length;
-      const tally = el("div", "tally");
-      tally.appendChild(el("span", null, `${open.length} open`));
-      if (live) tally.appendChild(el("span", "live", `${live} in progress`));
-      tally.appendChild(el("span", null, `${open.filter((i) => i.bucket === "now").length} now`));
-      head.appendChild(tally);
-
-      head.addEventListener("click", () => {
-        const nowCollapsed = section.classList.toggle("collapsed");
-        if (nowCollapsed) collapsed.add(group.key); else collapsed.delete(group.key);
-        head.setAttribute("aria-expanded", String(!nowCollapsed));
-        persistCollapsed();
-      });
-      section.appendChild(head);
-
-      const body = el("div", "group-body");
-      renderLanes(group, body);
-      section.appendChild(body);
-      board.appendChild(section);
+    const head = el("button", "project-head");
+    head.type = "button";
+    head.setAttribute("aria-expanded", String(isOpen));
+    head.appendChild(el("span", "chevron", "▾"));
+    head.appendChild(el("span", "project-name", row.title));
+    for (const [text, warn] of row.flags) head.appendChild(chip(text, warn ? "warn" : null));
+    // The one flag that isn't about the project's shape but about its health, so it is
+    // the one that gets a fill.
+    if (row.roll.overdue) head.appendChild(chip(`${row.roll.overdue} overdue`, "late"));
+    if (row.roll.from != null) {
+      head.appendChild(chip(
+        row.roll.from === row.roll.to
+          ? dateLabelMs(row.roll.from)
+          : `${dateLabelMs(row.roll.from)} → ${dateLabelMs(row.roll.to)}`,
+        "dates"));
     }
+
+    const stats = el("div", "project-stats");
+    stats.appendChild(meter(row.roll));
+    if (row.roll.total) {
+      stats.appendChild(el("span", null, `${row.roll.done}/${row.roll.total} shipped`));
+      if (row.roll.live) stats.appendChild(el("span", "live", `${row.roll.live} in progress`));
+      stats.appendChild(el("span", null, `${row.roll.now} now`));
+    } else {
+      stats.appendChild(el("span", null, "no changes yet"));
+    }
+    head.appendChild(stats);
+
+    head.addEventListener("click", () => {
+      const nowOpen = !openProjects.has(row.key);
+      if (nowOpen) openProjects.add(row.key); else openProjects.delete(row.key);
+      node.classList.toggle("open", nowOpen);
+      head.setAttribute("aria-expanded", String(nowOpen));
+      persistOpenProjects();
+    });
+    node.appendChild(head);
+
+    const body = el("div", "project-body");
+    // Built even while folded: a project holds a handful of changes, and rebuilding
+    // them on every toggle would drop any card the user had opened inside.
+    if (!row.roll.total && !row.addTo) {
+      body.appendChild(el("div", "project-empty", "Nothing raised against this project yet."));
+    } else {
+      renderLanes(row, body);
+    }
+    node.appendChild(body);
+    return node;
+  }
+
+  /* One section, with its sub-product sections drawn inside its own body. The parent's
+     OWN project rows come first and the children follow, so a parent reads as "here is
+     what I run directly, and here is each sub-product below it" - one place to look for
+     the family, at whatever depth the taxonomy declared. */
+  function groupSection(group, depth) {
+    const section = el("section", "group" + (depth ? " sub" : ""));
+    if (collapsed.has(group.key)) section.classList.add("collapsed");
+
+    const head = el("button", "group-head");
+    head.type = "button";
+    head.setAttribute("aria-expanded", String(!collapsed.has(group.key)));
+    head.appendChild(el("span", "chevron", "▾"));
+    head.appendChild(el("h2", null, group.title));
+    for (const [text, warn] of group.flags) head.appendChild(chip(text, warn ? "warn" : null));
+
+    /* Untriaged cross-product suggestions are lifted to the section, not filed under
+       a project: nobody has accepted them onto this board yet, so claiming they are
+       part of a project's plan would be putting them in the plan by drawing them. */
+    const suggestions = group.changes.filter(
+      (i) => i.status !== "done" && i.origin_product !== i.product && !i.triaged);
+    const suggested = new Set(suggestions.map((i) => i.id));
+    const planned = group.changes.filter((i) => !suggested.has(i.id));
+    const rows = projectRows(group, planned);
+
+    const open = planned.filter((i) => i.status !== "done");
+    const live = open.filter((i) => i.status === "in_progress").length;
+    const subgroups = group.subgroups || [];
+    const tally = el("div", "tally");
+    // Projects first: the section's headline is now how many bets it is running, and
+    // the change counts are the size of them.
+    tally.appendChild(el("span", null, `${rows.length} project${rows.length === 1 ? "" : "s"}`));
+    tally.appendChild(el("span", null, `${open.length} open`));
+    if (live) tally.appendChild(el("span", "live", `${live} in progress`));
+    if (suggestions.length) tally.appendChild(el("span", null, `${suggestions.length} to triage`));
+    if (subgroups.length) {
+      // Counted separately from the section's own numbers rather than folded into them:
+      // "4 open" that silently included three sub-products' work would misreport what
+      // this board is running, and the whole point of the nesting is that both are true
+      // at once. Folded shut, this is what says the family is not empty.
+      const nested = groupDescendants(group);
+      const nestedOpen = subgroups
+        .flatMap(groupChanges)
+        .filter((i) => i.status !== "done").length;
+      tally.appendChild(el("span", "nested",
+        `+${nestedOpen} open in ${nested.length} sub-product${nested.length === 1 ? "" : "s"}`));
+    }
+    head.appendChild(tally);
+
+    head.addEventListener("click", () => {
+      const nowCollapsed = section.classList.toggle("collapsed");
+      if (nowCollapsed) collapsed.add(group.key); else collapsed.delete(group.key);
+      head.setAttribute("aria-expanded", String(!nowCollapsed));
+      persistCollapsed();
+      // The nav's collapse-all label is a function of every section's state.
+      const slot = document.getElementById("pm-nav-slot");
+      if (slot) mountControls(slot);
+    });
+    section.appendChild(head);
+
+    const body = el("div", "group-body");
+    if (suggestions.length) {
+      const triage = el("div", "triage");
+      for (const item of suggestions) triage.appendChild(suggestionCard(item));
+      body.appendChild(triage);
+    }
+    if (rows.length) {
+      const list = el("div", "projects");
+      for (const row of rows) list.appendChild(projectNode(row));
+      body.appendChild(list);
+    } else if (!suggestions.length && !subgroups.length) {
+      // Said only when there is genuinely nothing here. A parent whose work all lives in
+      // its sub-products is not empty, and the sections below say so themselves.
+      body.appendChild(el("div", "project-empty", "No projects or changes here yet."));
+    }
+    if (subgroups.length) {
+      const nested = el("div", "subgroups");
+      for (const sub of subgroups) nested.appendChild(groupSection(sub, depth + 1));
+      body.appendChild(nested);
+    }
+    section.appendChild(body);
+    return section;
+  }
+
+  function renderBoard() {
+    for (const group of currentGroups()) board.appendChild(groupSection(group, 0));
   }
 
   /* ---- the timeline view ----------------------------------------------------------
@@ -1603,6 +2233,8 @@
     key("gantt-bar s-done", "shipped");
     key("gantt-bar s-overdue", "overdue");
     key("gantt-bar s-pending derived", "no dates — horizon only");
+    key("gantt-summary s-pending", "project — dated span");
+    key("gantt-reach s-pending", "project — full reach");
     key("gantt-target", "target date");
     key("gantt-age", "waiting on the board");
     key("today", "today");
@@ -1656,110 +2288,247 @@
     lines.appendChild(today);
     body.appendChild(lines);
 
-    for (const group of currentGroups()) {
-      const header = el("div", "gantt-group");
-      header.appendChild(el("h2", null, group.title));
+    // One change, as a row on the axis. Unchanged from before the project level
+    // existed - it just no longer sits directly under a section.
+    function changeRow(item, bar, omit) {
+      const row = el("div", "gantt-row is-change");
+
+      const label = el("button", "gantt-label");
+      label.type = "button";
+      label.setAttribute("aria-expanded", String(openCards.has(item.id)));
+      const dot = el("span", `status-dot ${item.status}`);
+      dot.title = STATUS_LABEL[item.status];
+      label.appendChild(dot);
+      label.appendChild(el("span", "name", item.title));
+      if (!omit.product) label.appendChild(el("span", "sub", productPathLabel(item.product)));
+      else if (item.ticket) label.appendChild(el("span", "sub", item.ticket.key));
+      label.title = `${item.title}\n${bar.note}`;
+      row.appendChild(label);
+
+      const track = el("div", "gantt-track");
+      if (bar.tail) {
+        const tail = el("div", "gantt-age");
+        const left = clamp(pct(bar.tail[0]));
+        tail.style.left = left + "%";
+        tail.style.width = Math.max(0, clamp(pct(bar.tail[1])) - left) + "%";
+        track.appendChild(tail);
+      }
+      const rect = el("div", `gantt-bar s-${bar.status}` + (bar.derived ? " derived" : ""));
+      const left = clamp(pct(bar.start));
+      rect.style.left = left + "%";
+      rect.style.width = Math.max(0.4, clamp(pct(bar.end)) - left) + "%";
+      if (bar.start < ax.start) rect.classList.add("clip-start");
+      if (bar.end > ax.end) rect.classList.add("clip-end");
+      rect.title = bar.note;
+      track.appendChild(rect);
+
+      // Drawn even when it coincides with the bar's own right edge: on an open change
+      // that is the same information twice, but on a shipped one it is the only way
+      // to see that the bar stopped somewhere else.
+      if (bar.target != null && bar.target > ax.start && bar.target < ax.end) {
+        const mark = el("div", "gantt-target"
+          + (bar.targetMet === true ? " met" : "")
+          + (bar.targetMet === false || bar.status === "overdue" ? " missed" : ""));
+        mark.style.left = clamp(pct(bar.target)) + "%";
+        mark.title = `Target ${dateLabel(item.target_at)}`;
+        track.appendChild(mark);
+      }
+      row.appendChild(track);
+
+      // The same controls the lane view's card opens, in the same place: a row that
+      // can be read but not changed would send you back to the other view to act.
+      const detail = el("div", "gantt-detail");
+      detail.hidden = !openCards.has(item.id);
+      if (item.description) detail.appendChild(el("div", "desc", item.description));
+      const chips = el("div", "card-meta");
+      for (const node of metaChips(item, omit)) chips.appendChild(node);
+      if (item.ticket) chips.appendChild(ticketBadge(item.ticket, false));
+      detail.appendChild(chips);
+      detail.appendChild(itemControls(item));
+      row.appendChild(detail);
+
+      label.addEventListener("click", () => {
+        const nowOpen = !openCards.has(item.id);
+        if (nowOpen) openCards.add(item.id); else openCards.delete(item.id);
+        detail.hidden = !nowOpen;
+        label.setAttribute("aria-expanded", String(nowOpen));
+      });
+
+      return row;
+    }
+
+    /* The project's own row, in two marks that say two different things:
+
+         reach  where the project extends to once its undated changes are counted -
+                the full envelope, as a dashed rule.
+         span   the part of that backed by dates changes actually carry, as a solid
+                capped bar. Absent when nothing in the project is dated.
+
+       Its colour is the worst state underneath it, because at this altitude the
+       question is "is this project in trouble", not "which of these nine changes is". */
+    function summaryBar(bars) {
+      const dated = bars.filter((b) => !b.derived);
+      const status = bars.some((b) => b.status === "overdue")
+        ? "overdue"
+        : bars.some((b) => b.status === "in_progress")
+        ? "in_progress"
+        : bars.every((b) => b.status === "done")
+        ? "done"
+        : "pending";
+      return {
+        from: Math.min(...bars.map((b) => b.start)),
+        to: Math.max(...bars.map((b) => b.end)),
+        span: dated.length
+          ? { from: Math.min(...dated.map((b) => b.start)), to: Math.max(...dated.map((b) => b.end)) }
+          : null,
+        undated: bars.length - dated.length,
+        status,
+      };
+    }
+
+    // Flat with depth, not nested: this view's whole point is one shared axis, so a
+    // sub-product is an indented heading in the same column of rows rather than a box.
+    for (const { group, depth } of flatGroups()) {
+      const isFolded = collapsed.has(group.key);
+      const header = el("button", "gantt-group" + (isFolded ? " collapsed" : "") + (depth ? " sub" : ""));
+      if (depth) {
+        // One step per level, set here rather than in CSS: the gutter is a fixed width the
+        // rows share, so each level has to take its indent out of that same width instead
+        // of pushing the axis along. A depth-N selector per level would be the alternative.
+        const indent = depth * 13;
+        header.style.marginLeft = `${indent}px`;
+        header.style.width = `calc(var(--gutter) - ${indent}px)`;
+      }
+      header.type = "button";
+      header.setAttribute("aria-expanded", String(!isFolded));
+      const headLine = el("div", "head-line");
+      headLine.appendChild(el("span", "chevron", "▾"));
+      headLine.appendChild(el("h2", null, group.title));
+      header.appendChild(headLine);
       const tally = el("div", "tally");
       // Same flags the lane view puts on a section head - "no initiative" or "closed"
       // must not be information you can only get by switching views.
       for (const [text, warn] of group.flags) tally.appendChild(chip(text, warn ? "warn" : null));
+      const rows = projectRows(group, group.changes);
       const open = group.changes.filter((i) => i.status !== "done").length;
       tally.appendChild(el("span", null,
+        `${rows.length} project${rows.length === 1 ? "" : "s"} · ` +
         `${group.changes.length} change${group.changes.length === 1 ? "" : "s"} · ${open} open`));
+      // Folded, a parent's own heading is all that is left of its family, so it has to
+      // say the sub-products exist - open, they say it themselves as their own headings.
+      const subgroups = group.subgroups || [];
+      if (subgroups.length && isFolded) {
+        const nested = groupDescendants(group);
+        const nestedOpen = subgroups.flatMap(groupChanges).filter((i) => i.status !== "done").length;
+        tally.appendChild(el("span", "nested",
+          `+${nestedOpen} open in ${nested.length} sub-product${nested.length === 1 ? "" : "s"}`));
+      }
       header.appendChild(tally);
+      // A full re-render, unlike the project twisty: folding a section removes a
+      // variable number of rows, and rebuilding is simpler than tracking them all.
+      header.addEventListener("click", () => {
+        if (isFolded) collapsed.delete(group.key); else collapsed.add(group.key);
+        persistCollapsed();
+        renderAll();
+      });
       body.appendChild(header);
 
-      // Everything on one axis, but out-of-range history would add rows that draw
-      // nothing - so it is counted instead of listed.
-      const rows = [];
-      let earlier = 0;
-      for (const item of group.changes) {
-        const bar = barFor(item, ax);
-        if (bar.end <= ax.start) { earlier++; continue; }
-        rows.push({ item, bar });
-      }
-      rows.sort((a, b) =>
-        (a.item.status === "done") - (b.item.status === "done")
-        || (BUCKET_RANK[a.item.bucket] ?? 3) - (BUCKET_RANK[b.item.bucket] ?? 3)
-        || a.bar.start - b.bar.start);
+      if (isFolded) continue;
 
       if (!rows.length) {
-        body.appendChild(el("div", "gantt-empty", earlier
-          ? `Nothing in range — ${earlier} shipped earlier.`
-          : "No changes."));
+        // A parent that runs nothing directly is not empty - its sub-products' headings
+        // come next, so saying "no changes" under it would contradict them.
+        if (!subgroups.length) body.appendChild(el("div", "gantt-empty", "No changes."));
         continue;
       }
 
-      for (const { item, bar } of rows) {
-        const row = el("div", "gantt-row");
+      for (const projectRow of rows) {
+        // Everything on one axis, but out-of-range history would add rows that draw
+        // nothing - so it is counted instead of listed.
+        const drawn = [];
+        let earlier = 0;
+        for (const item of projectRow.changes) {
+          const bar = barFor(item, ax);
+          if (bar.end <= ax.start) { earlier++; continue; }
+          drawn.push({ item, bar });
+        }
+        drawn.sort((a, b) =>
+          (a.item.status === "done") - (b.item.status === "done")
+          || (BUCKET_RANK[a.item.bucket] ?? 3) - (BUCKET_RANK[b.item.bucket] ?? 3)
+          || a.bar.start - b.bar.start);
+
+        const isOpen = openProjects.has(projectRow.key);
+        const head = el("div", "gantt-row is-project");
 
         const label = el("button", "gantt-label");
         label.type = "button";
-        label.setAttribute("aria-expanded", String(openCards.has(item.id)));
-        const dot = el("span", `status-dot ${item.status}`);
-        dot.title = STATUS_LABEL[item.status];
-        label.appendChild(dot);
-        label.appendChild(el("span", "name", item.title));
-        if (!group.omit.product) label.appendChild(el("span", "sub", PRODUCTS[item.product] || item.product));
-        else if (item.ticket) label.appendChild(el("span", "sub", item.ticket.key));
-        label.title = `${item.title}\n${bar.note}`;
-        row.appendChild(label);
+        label.setAttribute("aria-expanded", String(isOpen));
+        label.appendChild(el("span", "twisty" + (isOpen ? "" : " closed"), "▾"));
+        label.appendChild(el("span", "name", projectRow.title));
+        const roll = projectRow.roll;
+        label.appendChild(el("span", "count", `${roll.done}/${roll.total}`));
+        label.appendChild(meter(roll));
+        label.title =
+          `${projectRow.title} — ${roll.total} change${roll.total === 1 ? "" : "s"}, ` +
+          `${roll.done} shipped, ${roll.live} in progress` +
+          (roll.overdue ? `, ${roll.overdue} overdue` : "") +
+          (earlier ? `\n${earlier} shipped before ${shortDate(ax.start)}` : "");
+        head.appendChild(label);
 
         const track = el("div", "gantt-track");
-        if (bar.tail) {
-          const tail = el("div", "gantt-age");
-          const left = clamp(pct(bar.tail[0]));
-          tail.style.left = left + "%";
-          tail.style.width = Math.max(0, clamp(pct(bar.tail[1])) - left) + "%";
-          track.appendChild(tail);
-        }
-        const rect = el("div", `gantt-bar s-${bar.status}` + (bar.derived ? " derived" : ""));
-        const left = clamp(pct(bar.start));
-        rect.style.left = left + "%";
-        rect.style.width = Math.max(0.4, clamp(pct(bar.end)) - left) + "%";
-        if (bar.start < ax.start) rect.classList.add("clip-start");
-        if (bar.end > ax.end) rect.classList.add("clip-end");
-        rect.title = bar.note;
-        track.appendChild(rect);
+        if (drawn.length) {
+          const sum = summaryBar(drawn.map((d) => d.bar));
+          const note = `${projectRow.title}\n` +
+            (sum.span
+              ? `dated ${shortDate(sum.span.from)} – ${shortDate(sum.span.to)}`
+              : "nothing dated — horizon only") +
+            (sum.undated ? `\nreaches ${shortDate(sum.to)} with ${sum.undated} undated change${sum.undated === 1 ? "" : "s"}` : "");
 
-        // Drawn even when it coincides with the bar's own right edge: on an open change
-        // that is the same information twice, but on a shipped one it is the only way
-        // to see that the bar stopped somewhere else.
-        if (bar.target != null && bar.target > ax.start && bar.target < ax.end) {
-          const mark = el("div", "gantt-target"
-            + (bar.targetMet === true ? " met" : "")
-            + (bar.targetMet === false || bar.status === "overdue" ? " missed" : ""));
-          mark.style.left = clamp(pct(bar.target)) + "%";
-          mark.title = `Target ${dateLabel(item.target_at)}`;
-          track.appendChild(mark);
-        }
-        row.appendChild(track);
+          const reach = el("div", `gantt-reach s-${sum.status}`);
+          const reachLeft = clamp(pct(sum.from));
+          reach.style.left = reachLeft + "%";
+          reach.style.width = Math.max(0.4, clamp(pct(sum.to)) - reachLeft) + "%";
+          reach.title = note;
+          track.appendChild(reach);
 
-        // The same controls the lane view's card opens, in the same place: a row that
-        // can be read but not changed would send you back to the other view to act.
-        const detail = el("div", "gantt-detail");
-        detail.hidden = !openCards.has(item.id);
-        if (item.description) detail.appendChild(el("div", "desc", item.description));
-        const chips = el("div", "card-meta");
-        for (const node of metaChips(item, group.omit)) chips.appendChild(node);
-        if (item.ticket) chips.appendChild(ticketBadge(item.ticket, false));
-        detail.appendChild(chips);
-        detail.appendChild(itemControls(item));
-        row.appendChild(detail);
+          if (sum.span) {
+            const rect = el("div", `gantt-summary s-${sum.status}`);
+            const left = clamp(pct(sum.span.from));
+            rect.style.left = left + "%";
+            rect.style.width = Math.max(0.4, clamp(pct(sum.span.to)) - left) + "%";
+            rect.title = note;
+            track.appendChild(rect);
+          }
+        }
+        head.appendChild(track);
+        body.appendChild(head);
+
+        const childRows = drawn.map(({ item, bar }) => {
+          const node = changeRow(item, bar, projectRow.omit);
+          node.hidden = !isOpen;
+          return node;
+        });
+        for (const node of childRows) body.appendChild(node);
+
+        const note = earlier
+          ? el("div", "gantt-empty", `+ ${earlier} shipped before ${shortDate(ax.start)}.`)
+          : !drawn.length
+          ? el("div", "gantt-empty", "Nothing in range.")
+          : null;
+        if (note) {
+          note.hidden = !isOpen;
+          body.appendChild(note);
+        }
 
         label.addEventListener("click", () => {
-          const nowOpen = !openCards.has(item.id);
-          if (nowOpen) openCards.add(item.id); else openCards.delete(item.id);
-          detail.hidden = !nowOpen;
+          const nowOpen = !openProjects.has(projectRow.key);
+          if (nowOpen) openProjects.add(projectRow.key); else openProjects.delete(projectRow.key);
+          for (const node of childRows) node.hidden = !nowOpen;
+          if (note) note.hidden = !nowOpen;
+          label.firstChild.classList.toggle("closed", !nowOpen);
           label.setAttribute("aria-expanded", String(nowOpen));
+          persistOpenProjects();
         });
-
-        body.appendChild(row);
-      }
-
-      if (earlier) {
-        body.appendChild(el("div", "gantt-empty",
-          `+ ${earlier} shipped before ${shortDate(ax.start)}.`));
       }
     }
 
@@ -1809,6 +2578,7 @@
       .then((r) => r.json())
       .then((data) => {
         PRODUCTS = data.products;
+        PRODUCT_PARENTS = data.product_parents || {};
         itemsByProduct = data.items;
         PORTFOLIO = data.portfolio || PORTFOLIO;
         TRACKERS = data.trackers || TRACKERS;
