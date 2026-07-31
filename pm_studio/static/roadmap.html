@@ -1011,6 +1011,22 @@
     color: var(--ink-muted);
   }
   #tracker-bar.visible { display: flex; }
+  /* Same bar geometry as the tracker strip above, in the warning colour: this one is
+     work still to do, not a status line. */
+  #unattributed-bar {
+    display: none;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: var(--suggestion-bg);
+    color: var(--suggestion-border);
+    font-size: 0.75em;
+  }
+  #unattributed-bar.visible { display: flex; }
+  #unattributed-bar a { color: inherit; font-weight: 600; }
   #tracker-bar button {
     font: inherit;
     padding: 2px 9px;
@@ -1119,6 +1135,8 @@
 <main>
   <!-- Shown only when the deployment configured [[trackers]]. -->
   <div id="tracker-bar"></div>
+  <!-- Shown only while changes predating the system layer are still unattributed. -->
+  <div id="unattributed-bar"></div>
   <div id="board"></div>
 </main>
 <div id="ticket-picker" role="dialog" aria-modal="true" aria-labelledby="picker-title">
@@ -1149,6 +1167,13 @@
   // answers what it answered before hierarchy existed - one section per product, no
   // nesting - so a flat board is not a special case anywhere in this file.
   let PRODUCT_PARENTS = {};
+  // The system taxonomy: system id -> label, and product id -> the systems it touches.
+  // Both empty on a deployment that declares no [systems], which is what keeps every
+  // system-shaped thing on this board invisible there rather than empty.
+  let SYSTEMS = {};
+  let PRODUCT_SYSTEMS = {};
+  let UNATTRIBUTED = { changes: [], count: 0, products_missing_systems: [] };
+  const systemsDeclared = () => Object.keys(SYSTEMS).length > 0;
   let itemsByProduct = {}; // product -> [item] (that product's OWN changes only)
 
   function parentOf(product) {
@@ -1468,6 +1493,15 @@
     // The full path, because this chip only appears where the section does NOT name the
     // product (the initiative lens) - and there, "Billing" alone doesn't say whose.
     if (!omit.product) chips.push(chip(productPathLabel(item.product)));
+    // The system a change is contained within - shown in both lenses, because unlike the
+    // product and the initiative it is never what a section is grouped by. Silent when
+    // the deployment declares no [systems]; flagged when it does and this change predates
+    // the restructure, which is the same "surface it, never block it" call `unaligned`
+    // makes just below.
+    if (systemsDeclared()) {
+      if (item.system) chips.push(chip(SYSTEMS[item.system] || item.system));
+      else chips.push(chip("no system", "warn"));
+    }
     const project = PROJECTS_BY_ID[item.project_id];
     // Inside a project row the project is the row's own heading, so repeating it on
     // every card would print the same word a dozen times down one column.
@@ -1519,6 +1553,31 @@
     }
     bucketSelect.addEventListener("change", () => patchItem(item, { bucket: bucketSelect.value }));
     row.appendChild(bucketSelect);
+
+    /* Re-attribution, in the same row as status and horizon. There is no blank option for
+       an already-attributed change: a system is not something a change can go back to not
+       having (see roadmap.validate_system). One appears only while it IS unattributed, as
+       the prompt to fix it - and it is not selectable once anything else is chosen. */
+    if (systemsDeclared()) {
+      const systemSelect = el("select", "mini");
+      systemSelect.title = "The system this change is contained within";
+      if (!item.system) {
+        const prompt = el("option", null, "No system — pick one");
+        prompt.value = "";
+        systemSelect.appendChild(prompt);
+      }
+      for (const id of allowedSystems(item.product)) {
+        const opt = el("option", null, SYSTEMS[id] || id);
+        opt.value = id;
+        opt.selected = id === item.system;
+        systemSelect.appendChild(opt);
+      }
+      systemSelect.addEventListener("change", () => {
+        if (!systemSelect.value) return;
+        patchItem(item, { system: systemSelect.value });
+      });
+      row.appendChild(systemSelect);
+    }
 
     const moveSelect = el("select", "mini");
     moveSelect.title = "Move to another product";
@@ -1693,12 +1752,39 @@
       .catch(() => {});
   }
 
+  /* The systems a change on this product may be attributed to. A product that declares
+     none cannot constrain the choice, so every declared system is offered rather than an
+     empty picker - the same call roadmap.validate_system makes server-side, and the
+     reason a product with nothing declared is reported rather than deadlocked. */
+  function allowedSystems(product) {
+    const declared = PRODUCT_SYSTEMS[product] || [];
+    return declared.length ? declared : Object.keys(SYSTEMS);
+  }
+
+  function systemOptions(product, selected) {
+    return allowedSystems(product)
+      .map((id) => {
+        const label = SYSTEMS[id] || id;
+        return `<option value="${id}"${id === selected ? " selected" : ""}>${label}</option>`;
+      })
+      .join("");
+  }
+
   function addForm(product, bucket, projectId) {
     const form = el("form", "add-form");
+    // Required, not optional: a change is contained within exactly one system, so the
+    // picker has no blank option and the server refuses a create without one. Absent
+    // entirely when the deployment declares no [systems].
+    const systemField = systemsDeclared()
+      ? `<label class="date-field"><span>System</span>
+           <select class="mini system" required>${systemOptions(product)}</select>
+         </label>`
+      : "";
     form.innerHTML = `
       <input type="text" placeholder="Title" class="title" required />
       <textarea placeholder="Description (optional)" class="desc" rows="2"></textarea>
       <input type="text" placeholder="External owner (optional)" class="owner" />
+      ${systemField}
       <label class="date-field"><span>Target</span><input type="date" class="mini target" /></label>
       <div class="buttons">
         <button type="button" class="cancel">Cancel</button>
@@ -1721,6 +1807,8 @@
         bucket,
         status: "pending",
       };
+      const systemField = form.querySelector(".system");
+      if (systemField) payload.system = systemField.value;
       // Adding from inside an initiative section means the change belongs to that
       // initiative's work - so it lands on its project rather than unaligned.
       if (projectId) payload.project_id = projectId;
@@ -2650,8 +2738,26 @@
 
   // ---- render ----
 
+  /* The restructure banner: a count, and the page that fixes it. Deliberately a pointer
+     rather than a second copy of the attribute-each-one controls - those live on the cards
+     (itemControls) and on the systems page, and a third place to do the same write would
+     be a third place to keep in step. Absent entirely once nothing is unattributed. */
+  function renderUnattributedBar() {
+    const bar = document.getElementById("unattributed-bar");
+    bar.textContent = "";
+    const count = systemsDeclared() ? (UNATTRIBUTED.count || 0) : 0;
+    bar.className = count ? "visible" : "";
+    if (!count) return;
+    bar.appendChild(el("span", null,
+      `${count} change${count === 1 ? "" : "s"} not yet attributed to a system`));
+    const link = el("a", null, "Review on the systems page →");
+    link.href = "/systems";
+    bar.appendChild(link);
+  }
+
   function renderAll() {
     board.textContent = "";
+    renderUnattributedBar();
     const slot = document.getElementById("pm-nav-slot");
     if (slot) mountControls(slot);
 
@@ -2690,6 +2796,9 @@
       .then((data) => {
         PRODUCTS = data.products;
         PRODUCT_PARENTS = data.product_parents || {};
+        SYSTEMS = data.systems || {};
+        PRODUCT_SYSTEMS = data.product_systems || {};
+        UNATTRIBUTED = data.unattributed || UNATTRIBUTED;
         itemsByProduct = data.items;
         PORTFOLIO = data.portfolio || PORTFOLIO;
         TRACKERS = data.trackers || TRACKERS;

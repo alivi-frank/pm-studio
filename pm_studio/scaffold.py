@@ -57,6 +57,33 @@ port = 8000
 # billing = {{ label = "Billing", parent = "web" }}
 # sso = {{ label = "SSO", parent = "auth" }}
 
+# The SYSTEM taxonomy: the bounded pieces of technology your changes live in - a
+# service, an app, a module. A system is not a product. A product is the
+# business-facing thing (a line of business, or an umbrella over the technology
+# serving one); a system is code. The two are many-to-many: a product touches
+# several systems, and a system serves several products.
+#
+# Declaring this table turns on attribution: every NEW change must name the one
+# system it is contained within, which is what makes its blast radius knowable.
+# Leave it out entirely and nothing changes - no attribution, no Systems tab.
+#
+# Systems own no roadmap. Work that belongs to a system rather than a product -
+# infra, performance, upgrades - is an initiative (see the portfolio page).
+# [systems]
+# claims = "Claims Processor"
+#
+# [systems.rides]
+# label = "Rides & Logistics"
+# path = "services/rides"              # source folder, repo-root-relative
+# repo = "github.com/org/rides"        # its own repo, if it has one
+# guidance = "docs/rides/GUIDANCE.md"  # declared now, acted on later
+# pipelines = ["rides-ci"]             # declared now, acted on later
+#
+# Then say which systems each product touches. Every id must be declared above:
+# [products.checkout]
+# label = "Checkout"
+# systems = ["claims", "rides"]
+
 # Optional model allow-list override (id = "Label"); the reserved key `default`
 # names the model new sessions start on. Omit the whole table to use package
 # defaults (Opus/Sonnet/Haiku).

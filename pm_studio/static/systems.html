@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PM Studio — Systems</title>
+<link rel="stylesheet" href="/static/nav.css" />
+<script src="/static/nav.js"></script>
+<style>
+  :root {
+    color-scheme: light dark;
+    --surface: #fcfcfb;
+    --page: #f9f9f7;
+    --ink-primary: #0b0b0b;
+    --ink-secondary: #52514e;
+    --ink-muted: #898781;
+    --border: rgba(11, 11, 11, 0.10);
+    --accent: #2a78d6;
+    --accent-fg: #ffffff;
+    --error: #d03b3b;
+    --warn: #c77700;
+    --warn-bg: rgba(199, 119, 0, 0.09);
+    --note-bg: rgba(42, 120, 214, 0.07);
+    --closed: #898781;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface: #1a1a19;
+      --page: #0d0d0d;
+      --ink-primary: #ffffff;
+      --ink-secondary: #c3c2b7;
+      --ink-muted: #898781;
+      --border: rgba(255, 255, 255, 0.10);
+      --accent: #3987e5;
+      --error: #e66767;
+      --warn: #e0a33c;
+      --warn-bg: rgba(224, 163, 60, 0.13);
+      --note-bg: rgba(57, 135, 229, 0.12);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--page);
+    color: var(--ink-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  header { padding: 20px 24px; border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 1.2em; margin: 0; }
+  header p { margin: 4px 0 0; color: var(--ink-muted); font-size: 0.85em; }
+  main { padding: 24px; }
+  .chain {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    margin-bottom: 18px;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    font-size: 0.85em;
+    color: var(--ink-secondary);
+    flex-wrap: wrap;
+  }
+  .chain code {
+    font-family: inherit;
+    color: var(--ink-muted);
+  }
+  .error {
+    display: none;
+    margin: 0 0 14px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: var(--warn-bg);
+    color: var(--error);
+    font-size: 0.85em;
+  }
+  .panel {
+    margin-bottom: 20px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+  }
+  .panel.warn { border-color: var(--warn); background: var(--warn-bg); }
+  .panel.note { background: var(--note-bg); }
+  .panel h2 { font-size: 0.95em; margin: 0 0 4px; }
+  .panel p.hint { margin: 0 0 10px; color: var(--ink-muted); font-size: 0.82em; }
+  .cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+  .card {
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+  }
+  .card h3 { margin: 0; font-size: 1em; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .card h3 .id { font-size: 0.72em; color: var(--ink-muted); font-family: ui-monospace, monospace; font-weight: normal; }
+  .meta { margin: 10px 0 0; font-size: 0.82em; color: var(--ink-secondary); display: grid; gap: 4px; }
+  .meta div { display: flex; gap: 8px; }
+  .meta .key { color: var(--ink-muted); min-width: 68px; flex: none; }
+  .meta code { font-family: ui-monospace, monospace; font-size: 0.95em; word-break: break-all; }
+  .chips { display: flex; flex-wrap: wrap; gap: 5px; }
+  .chip {
+    display: inline-block;
+    padding: 1px 7px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 0.95em;
+    color: var(--ink-secondary);
+    background: var(--page);
+  }
+  .counts { margin-top: 10px; font-size: 0.82em; color: var(--ink-muted); }
+  .counts strong { color: var(--ink-primary); font-weight: 600; }
+  .flag {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 0.7em;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    background: var(--warn-bg);
+    color: var(--warn);
+    border: 1px solid var(--warn);
+  }
+  .soon { color: var(--ink-muted); font-style: italic; }
+  ul.rows { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  ul.rows li {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    font-size: 0.85em;
+  }
+  ul.rows li .title { font-weight: 500; }
+  ul.rows li .on { color: var(--ink-muted); font-size: 0.92em; }
+  ul.rows li form { display: flex; gap: 6px; margin-left: auto; align-items: center; flex-wrap: wrap; }
+  select, button {
+    font: inherit;
+    font-size: 0.92em;
+    padding: 4px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--ink-primary);
+  }
+  button { background: var(--accent); color: var(--accent-fg); border-color: transparent; cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .empty { color: var(--ink-muted); font-size: 0.85em; margin: 0; }
+</style>
+</head>
+<body>
+<div id="pm-nav" data-page="systems"></div>
+<header>
+  <h1>Systems</h1>
+  <p>The technology the products are built on. A change is contained within exactly one system.</p>
+</header>
+<main>
+  <div class="chain">
+    <span>Product</span><code>⇄</code><span>System</span>
+    <span style="color: var(--ink-muted);">
+      (many-to-many — a product touches several systems, a system serves several products)
+    </span>
+  </div>
+
+  <p class="error" id="error"></p>
+  <div id="undeclared"></div>
+  <div id="restructure"></div>
+  <div id="config-gap"></div>
+  <div class="cards" id="systems"></div>
+</main>
+
+<script>
+  // Systems own no roadmap: they are the unit a change is contained WITHIN, not a place
+  // work is planned. So this page is a catalogue plus the two halves of the restructure
+  // gap - changes with no system yet (data), and products declaring no systems (config).
+  let data = {
+    declared: false,
+    systems: [],
+    unattributed: { changes: [], count: 0, products_missing_systems: [] },
+    products: {},
+    product_systems: {},
+  };
+  const errorBox = document.getElementById("error");
+
+  function showError(message) {
+    errorBox.textContent = message;
+    errorBox.style.display = "block";
+    setTimeout(() => { errorBox.style.display = "none"; }, 8000);
+  }
+
+  async function api(path, options) {
+    const response = await fetch(path, options);
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.detail || `Request failed (${response.status})`);
+    }
+    return response.json();
+  }
+
+  const json = (method, body) => ({
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  async function act(fn) {
+    try {
+      await fn();
+      await load();
+    } catch (err) {
+      showError(err.message);
+    }
+  }
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  function metaRow(key, valueNode) {
+    const row = el("div");
+    row.appendChild(el("span", "key", key));
+    row.appendChild(valueNode);
+    return row;
+  }
+
+  // ---- the "no [systems] declared" state, which is an answer and not an error ----
+
+  function renderUndeclared() {
+    const host = document.getElementById("undeclared");
+    host.textContent = "";
+    if (data.declared) return;
+    const panel = el("div", "panel note");
+    panel.appendChild(el("h2", null, "No systems declared yet"));
+    const p = el("p", "hint");
+    p.textContent =
+      "A system is a bounded piece of technology — a service, an app, a module — and it is " +
+      "the unit a change is contained within. Products are the business-facing things built " +
+      "on top of them: a product touches several systems, and a system serves several " +
+      "products. Declare them in pm_studio_local/config.toml, then say which systems each " +
+      "product touches:";
+    panel.appendChild(p);
+    const pre = el("pre");
+    pre.style.margin = "0";
+    pre.style.fontSize = "0.8em";
+    pre.style.overflowX = "auto";
+    pre.style.color = "var(--ink-secondary)";
+    pre.textContent =
+      '[systems]\n' +
+      'claims = "Claims Processor"\n' +
+      '\n' +
+      '[systems.rides]\n' +
+      'label = "Rides & Logistics"\n' +
+      'path  = "services/rides"\n' +
+      'repo  = "github.com/org/rides"\n' +
+      '\n' +
+      '[products.checkout]\n' +
+      'label   = "Checkout"\n' +
+      'systems = ["claims", "rides"]';
+    panel.appendChild(pre);
+    host.appendChild(panel);
+  }
+
+  // ---- restructure: changes carrying no system ----
+
+  // The systems a change on this product may be attributed to. A product declaring none
+  // cannot constrain the choice, so every declared system is offered rather than none -
+  // the same call validate_system makes server-side.
+  function allowedSystems(product) {
+    const declared = data.product_systems[product] || [];
+    return declared.length ? declared : data.systems.map((s) => s.id);
+  }
+
+  function systemPicker(product) {
+    const select = el("select");
+    select.appendChild(el("option", null, "Attribute to…"));
+    select.firstChild.value = "";
+    allowedSystems(product).forEach((id) => {
+      const found = data.systems.find((s) => s.id === id);
+      const option = el("option", null, found ? found.label : id);
+      option.value = id;
+      select.appendChild(option);
+    });
+    return select;
+  }
+
+  // Only for a change stranded on a TRANSITIONAL id - one declared as both a product and
+  // a system while it is being reclassified. Its board is still live, so its changes are
+  // re-homed onto a real product and attributed in the same request.
+  function productPicker(currentProduct) {
+    const select = el("select");
+    select.appendChild(el("option", null, "Keep on this product"));
+    select.firstChild.value = "";
+    Object.keys(data.products).forEach((id) => {
+      if (id === currentProduct) return;
+      const option = el("option", null, data.products[id]);
+      option.value = id;
+      select.appendChild(option);
+    });
+    return select;
+  }
+
+  function transitionalIds() {
+    return data.systems.filter((s) => s.transitional).map((s) => s.id);
+  }
+
+  function renderRestructure() {
+    const host = document.getElementById("restructure");
+    host.textContent = "";
+    if (!data.declared) return;
+    const pending = data.unattributed.changes || [];
+    if (!pending.length) return;
+
+    const panel = el("div", "panel warn");
+    panel.appendChild(
+      el("h2", null, `${pending.length} change${pending.length === 1 ? "" : "s"} not yet attributed to a system`)
+    );
+    panel.appendChild(
+      el(
+        "p",
+        "hint",
+        "Every change belongs to exactly one system. These predate the system layer — " +
+          "attribute each one to finish the restructure. New changes already require it."
+      )
+    );
+
+    const list = el("ul", "rows");
+    const moveable = transitionalIds();
+    pending.forEach((change) => {
+      const row = el("li");
+      row.appendChild(el("span", "title", change.title));
+      row.appendChild(el("span", "on", `on ${change.product_label}`));
+
+      const form = el("form");
+      const products = moveable.indexOf(change.product) !== -1 ? productPicker(change.product) : null;
+      if (products) form.appendChild(products);
+      const systems = systemPicker(change.product);
+      form.appendChild(systems);
+      const submit = el("button", null, "Save");
+      submit.type = "submit";
+      form.appendChild(submit);
+
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!systems.value) {
+          showError("Pick the system this change is contained within.");
+          return;
+        }
+        const body = { system: systems.value };
+        if (products && products.value) body.move_to_product = products.value;
+        // Triaged: a human picking the destination directly needs no second review, the
+        // same call the board's own move control makes.
+        if (body.move_to_product) body.triaged = true;
+        act(() =>
+          api(`/roadmap/${encodeURIComponent(change.product)}/items/${change.id}`, json("PATCH", body))
+        );
+      });
+      row.appendChild(form);
+      list.appendChild(row);
+    });
+    panel.appendChild(list);
+    host.appendChild(panel);
+  }
+
+  // ---- restructure: products declaring no systems ----
+
+  function renderConfigGap() {
+    const host = document.getElementById("config-gap");
+    host.textContent = "";
+    if (!data.declared) return;
+    const missing = data.unattributed.products_missing_systems || [];
+    if (!missing.length) return;
+
+    const panel = el("div", "panel");
+    panel.appendChild(el("h2", null, "Products touching no declared system"));
+    panel.appendChild(
+      el(
+        "p",
+        "hint",
+        "These cannot constrain what their changes attribute to, so any declared system " +
+          "is accepted. Add a `systems = [...]` line for each in pm_studio_local/config.toml."
+      )
+    );
+    const chips = el("div", "chips");
+    missing.forEach((id) => chips.appendChild(el("span", "chip", data.products[id] || id)));
+    panel.appendChild(chips);
+    host.appendChild(panel);
+  }
+
+  // ---- the catalogue ----
+
+  function renderSystems() {
+    const host = document.getElementById("systems");
+    host.textContent = "";
+    if (!data.declared) return;
+    if (!data.systems.length) {
+      host.appendChild(el("p", "empty", "No systems declared."));
+      return;
+    }
+
+    data.systems.forEach((system) => {
+      const card = el("div", "card");
+      const heading = el("h3");
+      heading.appendChild(el("span", null, system.label));
+      heading.appendChild(el("span", "id", system.id));
+      if (system.transitional) {
+        const flag = el("span", "flag", "reclassifying");
+        flag.title =
+          "Declared as both a product and a system. Its product board is still live so " +
+          "its changes can be re-homed; delete the [products] entry once it is empty.";
+        heading.appendChild(flag);
+      }
+      card.appendChild(heading);
+
+      const meta = el("div", "meta");
+      if (system.path) {
+        const code = el("code", null, system.path);
+        meta.appendChild(metaRow("Source", code));
+      }
+      if (system.repo) {
+        meta.appendChild(metaRow("Repo", el("code", null, system.repo)));
+      }
+      if (!system.path && !system.repo) {
+        meta.appendChild(metaRow("Source", el("span", "soon", "not declared")));
+      }
+
+      const products = el("div", "chips");
+      if (system.products.length) {
+        system.products.forEach((p) => products.appendChild(el("span", "chip", p.label)));
+      } else {
+        products.appendChild(el("span", "soon", "no product declares it"));
+      }
+      meta.appendChild(metaRow("Products", products));
+
+      // Forward-looking slots: declared and shown, deliberately not acted on yet.
+      const pipelines = el("div", "chips");
+      if (system.pipelines.length) {
+        system.pipelines.forEach((p) => pipelines.appendChild(el("span", "chip", p)));
+      } else {
+        pipelines.appendChild(el("span", "soon", "none declared"));
+      }
+      meta.appendChild(metaRow("Pipelines", pipelines));
+      meta.appendChild(
+        metaRow("Guidance", system.guidance ? el("code", null, system.guidance) : el("span", "soon", "none declared"))
+      );
+      card.appendChild(meta);
+
+      const counts = el("div", "counts");
+      counts.appendChild(el("strong", null, String(system.open_changes)));
+      counts.appendChild(document.createTextNode(` open of ${system.changes} change${system.changes === 1 ? "" : "s"}`));
+      card.appendChild(counts);
+
+      host.appendChild(card);
+    });
+  }
+
+  async function load() {
+    data = await api("/systems/data");
+    renderUndeclared();
+    renderRestructure();
+    renderConfigGap();
+    renderSystems();
+  }
+
+  // Attribution changes ride the roadmap socket, so this page stays current when a PM or
+  // the board attributes a change elsewhere.
+  try {
+    const socket = new WebSocket(`ws://${location.host}/ws/roadmap`);
+    socket.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      if (message.type === "roadmap_item_upserted" || message.type === "roadmap_item_deleted") load();
+    };
+  } catch (err) { /* the page still works, just not live */ }
+
+  load().catch((err) => showError(err.message));
+</script>
+</body>
+</html>

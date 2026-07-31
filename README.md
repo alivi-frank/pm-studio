@@ -74,7 +74,8 @@ Roadmap items can optionally hang off a strategy chain, visible at `/portfolio`:
 
 ```
 Goals  ⇄  Initiative  →  Project  →  Change
-                                       └─ belongs to exactly one Product
+                                       ├─ belongs to exactly one Product  (its board)
+                                       └─ belongs to exactly one System   (its code)
 ```
 
 A **Change** is just the roadmap item you already have — it gains one parent project.
@@ -87,6 +88,22 @@ declare a `parent`, making it a **sub-product**, nested as deep as your org actu
 A sub-product is a full product — its own board, sessions and ids — and a PM sees and
 writes its whole subtree, while the board nests each child inside its parent's section.
 See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#hierarchical-products).
+
+### Products and systems
+
+A **product** is business-facing — a line of business, or an umbrella over the technology
+that serves one. A **system** is a bounded piece of technology: a service, an app, a
+module, with its own source folder and/or repo. They are different shapes, and the
+relationship between them is **many-to-many**: a product touches several systems, and a
+system serves several products.
+
+A change belongs to exactly one system — that is what makes its blast radius knowable —
+and systems are declared in `[systems]`, with each product listing what it touches. The
+catalogue lives at `/systems`. Declaring the table is the switch: leave it out and
+nothing changes anywhere. Systems deliberately own **no** roadmap — roadmaps are
+product- and initiative-first, and work that belongs to a system rather than a product
+(infra, performance) is an initiative. See
+[docs/CONFIGURATION.md](docs/CONFIGURATION.md#systems).
 
 A project with no initiative is **unaligned** — allowed, so nobody is blocked
 mid-work, but reported so it gets linked up. Declare a maintenance goal + always-open

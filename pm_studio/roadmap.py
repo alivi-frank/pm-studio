@@ -8,7 +8,7 @@ from datetime import date
 from pathlib import Path
 from typing import Callable, Iterable, Literal
 
-from .config import CONFIG
+from .config import CONFIG, CONFIG_FILE_NAME, LOCAL_DIR_NAME, SystemSpec
 
 # Imported for the one rule that must not be re-implemented per caller: what makes two
 # spellings of a ticket key the SAME ticket. The 1:1 guarantee below is only as good as
@@ -146,6 +146,125 @@ def product_path_label(product: str) -> str:
         return product_label(product)
     return " / ".join(product_label(p) for p in [*reversed(ancestors), product])
 
+
+# The SYSTEM taxonomy, from config.toml's [systems] table (see config._parse_systems for
+# what separates a system from a product). A system is the bounded piece of technology a
+# change is contained within; a product is the business-facing thing that several systems
+# together serve.
+#
+# Systems deliberately own no boards. Roadmaps are product-first and initiative-first,
+# and work that belongs to a system rather than a product - infra, performance - is
+# expressed as an initiative, which is what initiatives already are. So `system` is an
+# ATTRIBUTE of a change, never its home: the change still lives on exactly one product
+# board, exactly as it did before this table existed.
+#
+# Empty on every deployment that has not declared [systems], and empty is what keeps the
+# whole layer dormant: no attribution is required, nothing new appears in the UI, and
+# every function below answers what it answered before.
+SYSTEMS: dict[str, SystemSpec] = CONFIG.systems
+
+# The many-to-many edge, product id -> the systems it touches, in declaration order.
+PRODUCT_SYSTEMS: dict[str, tuple[str, ...]] = CONFIG.product_systems
+
+# Ids mid-reclassification from product to system - declared in both tables. Their
+# product board keeps loading and stays writable so its changes can be re-homed at the
+# operator's pace; see config.Config.transitional_ids.
+TRANSITIONAL_IDS: tuple[str, ...] = CONFIG.transitional_ids
+
+
+def systems_declared() -> bool:
+    """Whether this deployment uses the system layer at all. The single switch every
+    caller asks instead of testing `SYSTEMS` itself, so "dormant" means one thing."""
+    return bool(SYSTEMS)
+
+
+def system_label(system: str) -> str:
+    """Display label, falling back to the id - same reason as product_label: a change can
+    outlive the config line that declared its system."""
+    spec = SYSTEMS.get(system)
+    return spec.label if spec else system
+
+
+def systems_of_product(product: str) -> list[str]:
+    """The systems a product declares it touches, in declaration order.
+
+    Not inherited through `parent`: a child product touches what it declares, and a
+    parent's list says nothing about its children's. Containment and composition are
+    different questions (see config._parse_products), so this walks nothing.
+    """
+    return [s for s in PRODUCT_SYSTEMS.get(product, ()) if s in SYSTEMS]
+
+
+def products_of_system(system: str) -> list[str]:
+    """Which products touch this system, in product display order - the other side of the
+    edge, derived rather than stored so the two can never disagree.
+
+    A system touched by several products is the normal case and the reason this returns a
+    list: it is exactly what makes the edge many-to-many, and exactly why per-system
+    totals must never be summed across products (they would double-count the system).
+    """
+    return [p for p in PRODUCTS if system in PRODUCT_SYSTEMS.get(p, ())]
+
+
+def validate_system(product: str, system: str | None, *, required: bool = True) -> str | None:
+    """Resolves the `system` for a change on `product`, or raises ValueError saying why.
+
+    Three rules, in order:
+      1. No [systems] declared -> the only valid value is none at all. Naming one would
+         silently attribute a change to a taxonomy this deployment does not have.
+      2. Otherwise a system is REQUIRED and must be declared.
+      3. And it must be one the product declares it touches - UNLESS the product declares
+         no systems at all. That exception matters: enforcing an empty list would reject
+         every possible value and make the board unusable, so a product with nothing
+         declared accepts any declared system and is reported as config still to do
+         (see products_missing_systems) rather than deadlocked.
+
+    Note there is deliberately no ""-clears convention here, unlike `owner` and
+    `project_id`: dropping a change's system would manufacture exactly the inconsistency
+    this layer exists to remove, so an explicit empty value is an error, not a reset.
+    """
+    value = (system or "").strip() or None
+    if not systems_declared():
+        if value is not None:
+            raise ValueError(
+                f"This deployment declares no [systems], so a change cannot be attributed "
+                f"to one (got {value!r}). Declare [systems] in "
+                f"{LOCAL_DIR_NAME}/{CONFIG_FILE_NAME} first."
+            )
+        return None
+    if value is None:
+        if not required:
+            return None
+        allowed = systems_of_product(product) or list(SYSTEMS)
+        raise ValueError(
+            f"A change must name the one system it is contained within. "
+            f"{product_label(product)} touches: {', '.join(allowed)}"
+        )
+    if value not in SYSTEMS:
+        raise ValueError(
+            f"Unknown system: {value} (declared: {', '.join(SYSTEMS) or 'none'})"
+        )
+    declared = systems_of_product(product)
+    if declared and value not in declared:
+        raise ValueError(
+            f"{product_label(product)} does not touch system {value!r}; it touches: "
+            f"{', '.join(declared)}. If it should, add {value!r} to that product's "
+            "`systems = [...]`."
+        )
+    return value
+
+
+def products_missing_systems() -> list[str]:
+    """Declared products that touch no declared system, in display order.
+
+    Only meaningful once [systems] exists, and it is the config half of the restructure
+    gap that unattributed changes are the data half of: these products cannot constrain
+    what their changes attribute to (see validate_system rule 3), so the view names them.
+    """
+    if not systems_declared():
+        return []
+    return [p for p in PRODUCTS if not systems_of_product(p)]
+
 # Schedule dates are stored as "YYYY-MM-DD" STRINGS, unlike created_at/updated_at/
 # shipped_at, which are epoch floats. The difference is deliberate and not worth
 # "tidying" into one type: those three are instants - the moment something happened -
@@ -257,6 +376,17 @@ class RoadmapItem:
     # change predates the work model or the deployment isn't using it - so existing
     # boards keep loading untouched, and this stays additive rather than a migration.
     project_id: str | None = None
+    # The one SYSTEM this change is contained within (see SYSTEMS above). A change has
+    # exactly one - that is what makes its blast radius knowable - and it is REQUIRED on
+    # every new change once the deployment declares [systems].
+    #
+    # None means one of two things, and they are not the same:
+    #   - the deployment has no [systems] at all, so there is nothing to attribute to;
+    #   - or it does, and this change predates the restructure. That is an INCONSISTENCY
+    #     to be fixed, not a supported resting state: unattributed_report counts it and
+    #     the UI shows it until it is attributed. It is never a hard block, because
+    #     refusing to load a board would be worse than showing the work left to do.
+    system: str | None = None
     # The 1:1 link to one ticket in one configured external tracker (see trackers.py).
     # Only the reference is stored - the ticket's type, title, state and URL come from
     # the synced catalog at read time, so a sync updates one place instead of having to
@@ -365,6 +495,83 @@ class RoadmapStore:
     def get(self, item_id: str) -> RoadmapItem | None:
         return self._items.get(item_id)
 
+    def list_by_system(self, system: str) -> list[dict]:
+        return sorted(
+            (i.to_public_dict() for i in self._items.values() if i.system == system),
+            key=lambda i: i["created_at"],
+        )
+
+    def unattributed_report(self) -> dict:
+        """Changes carrying no system, once this deployment declares [systems].
+
+        The data half of the restructure gap (products_missing_systems is the config
+        half). Reported, never blocked - same call portfolio.unaligned_report makes for
+        alignment: attribution is mandatory as a practice, so the gap is surfaced rather
+        than used to refuse the board that shows it.
+
+        Empty by construction on a deployment with no [systems]: there is nothing to
+        attribute to, so nothing is missing.
+        """
+        if not systems_declared():
+            return {"changes": [], "count": 0, "products_missing_systems": []}
+        pending = [
+            {
+                "id": i.id,
+                "product": i.product,
+                "product_label": product_path_label(i.product),
+                "title": i.title,
+            }
+            for i in sorted(self._items.values(), key=lambda i: i.created_at)
+            if i.system is None and i.status != "done"
+        ]
+        return {
+            "changes": pending,
+            "count": len(pending),
+            "products_missing_systems": products_missing_systems(),
+        }
+
+    def system_rollup(self) -> list[dict]:
+        """One row per declared system, in display order, for the systems view.
+
+        Counts are per system and each change is counted once, so these totals are exact.
+        They must NOT be summed across products: a system touched by several products
+        would be counted once per product. That is the same overlap rule goals carry in
+        portfolio.py, and it is inherent to the edge being many-to-many rather than a
+        tree level.
+        """
+        counts: dict[str, dict[str, int]] = {
+            s: {"total": 0, "open": 0} for s in SYSTEMS
+        }
+        for item in self._items.values():
+            bucket = counts.get(item.system or "")
+            if bucket is None:
+                continue
+            bucket["total"] += 1
+            if item.status != "done":
+                bucket["open"] += 1
+        rows = []
+        for system_id, spec in SYSTEMS.items():
+            rows.append(
+                {
+                    "id": system_id,
+                    "label": spec.label,
+                    "path": spec.path,
+                    "repo": spec.repo,
+                    "guidance": spec.guidance,
+                    "pipelines": list(spec.pipelines),
+                    "products": [
+                        {"id": p, "label": product_path_label(p)}
+                        for p in products_of_system(system_id)
+                    ],
+                    "changes": counts[system_id]["total"],
+                    "open_changes": counts[system_id]["open"],
+                    # True while this id is declared as both a product and a system - the
+                    # temporary reclassification state, whose product board is still live.
+                    "transitional": system_id in TRANSITIONAL_IDS,
+                }
+            )
+        return rows
+
     def list_by_project(self, project_id: str) -> list[dict]:
         return sorted(
             (i.to_public_dict() for i in self._items.values() if i.project_id == project_id),
@@ -420,12 +627,16 @@ class RoadmapStore:
         project_id: str | None = None,
         start_at: str | None = None,
         target_at: str | None = None,
+        system: str | None = None,
     ) -> RoadmapItem:
         if product not in PRODUCTS:
             raise ValueError(f"Unknown product: {product}")
         origin = origin_product or product
         if origin not in PRODUCTS:
             raise ValueError(f"Unknown origin_product: {origin}")
+        # Validated against the OWNING product, not the origin: the change is contained
+        # within the system its own board's product is built on, whoever suggested it.
+        resolved_system = validate_system(product, system)
         start = parse_date(start_at, "start_at")
         target = parse_date(target_at, "target_at")
         _check_order(start, target)
@@ -450,6 +661,7 @@ class RoadmapStore:
             project_id=(project_id or "").strip() or None,
             start_at=start,
             target_at=target,
+            system=resolved_system,
         )
         with self._lock:
             self._items[item.id] = item
@@ -469,11 +681,18 @@ class RoadmapStore:
         project_id: str | None = None,
         start_at: str | None = None,
         target_at: str | None = None,
+        system: str | None = None,
     ) -> RoadmapItem:
         with self._lock:
             item = self._items.get(item_id)
             if item is None:
                 raise KeyError(f"Unknown roadmap item: {item_id}")
+            # Resolved before any write, like the dates below: a PATCH naming a system the
+            # product does not touch must leave the item exactly as it was. `required`
+            # because there is no ""-clears convention for this field - see validate_system.
+            resolved_system = (
+                item.system if system is None else validate_system(item.product, system)
+            )
             # Both dates resolved and checked BEFORE anything is written, so a PATCH
             # carrying an impossible schedule leaves the item exactly as it was rather
             # than half-applied. Same convention as owner/project_id: None = no change,
@@ -483,6 +702,7 @@ class RoadmapStore:
             _check_order(start, target)
             item.start_at = start
             item.target_at = target
+            item.system = resolved_system
             if bucket is not None:
                 item.bucket = bucket
             if status is not None:
@@ -561,6 +781,7 @@ class RoadmapStore:
         status: Status | None = None,
         title: str | None = None,
         description: str | None = None,
+        system: str | None = None,
     ) -> RoadmapItem:
         """Reassigns an item to a different product in place - same id/created_at/
         history, unlike a delete+recreate. `origin_product` is set to wherever it just
@@ -569,7 +790,12 @@ class RoadmapStore:
         move (see agent.py's ROADMAP_GUIDANCE_TEMPLATE) still needs the destination's
         review, same as any cross-product suggestion. The board UI passes
         triaged=True for a stakeholder-initiated move instead, since a human picking
-        the destination directly needs no second confirmation step."""
+        the destination directly needs no second confirmation step.
+
+        This is also the re-homing primitive the reclassification path uses: an id being
+        moved from [products] to [systems] empties its old board by moving each change to
+        a real product and naming the system it is contained within (see
+        config.Config.transitional_ids)."""
         with self._lock:
             item = self._items.get(item_id)
             if item is None:
@@ -578,9 +804,20 @@ class RoadmapStore:
                 raise ValueError(f"Unknown product: {to_product}")
             if to_product == item.product:
                 raise ValueError(f"Item {item_id} is already on {to_product}")
+            # Attribution has to survive the move, and the destination may well not touch
+            # the system this change sits in. Passing `system` re-attributes it as part of
+            # the same move; passing nothing carries the current one over and fails loudly
+            # if the destination does not touch it. Resolved before any write, so a
+            # rejected move leaves the item entirely alone.
+            resolved_system = validate_system(
+                to_product,
+                item.system if system is None else system,
+                required=system is not None,
+            )
             from_product = item.product
             item.origin_product = from_product
             item.product = to_product
+            item.system = resolved_system
             item.triaged = triaged
             if bucket is not None:
                 item.bucket = bucket
@@ -640,6 +877,15 @@ class RoadmapStore:
                 f' [EXTERNAL - owned by {item["owner"]}: track it, never dispatch '
                 "dev work for it]"
             )
+        # Silent on a deployment with no [systems]. Where there IS one, the attribution is
+        # named on every change and its absence shouts: an unattributed change is the
+        # inconsistency the PM is told to close (see agent.SYSTEM_GUIDANCE_TEMPLATE), and it
+        # can only act on what its context block actually shows it.
+        if systems_declared():
+            if item.get("system"):
+                flag += f' [system: {system_label(item["system"])}]'
+            else:
+                flag += " [NO SYSTEM - attribute it when you next touch this change]"
         flag += _schedule_note(item)
         if item.get("ticket_key"):
             ticket = (
