@@ -165,6 +165,29 @@ class TrackerConfig:
 
 
 @dataclass(frozen=True)
+class SystemSpec:
+    """One declared system: a bounded piece of technology/code, the unit a change is
+    contained within. Distinct from a product - see _parse_systems for the split.
+
+    Everything but the label is optional and, for now, purely descriptive: `path` and
+    `repo` say where the code lives, and `guidance`/`pipelines` are the seams for the
+    engineering guidance and CI/CD a system will carry later. Nothing enforces them yet,
+    so declaring a system costs one line and a deployment can fill the rest in over time.
+    """
+
+    label: str
+    # Repo-root-relative source folder, and/or the system's own repo when it has one.
+    # A system can legitimately have both (a folder in this repo AND its own remote),
+    # one, or neither (a system tracked here but built somewhere unrelated).
+    path: str = ""
+    repo: str = ""
+    # Forward-looking, descriptive only: where this system's engineering guidance lives
+    # and the pipelines that build it. Surfaced in the UI and the PM prompt; not acted on.
+    guidance: str = ""
+    pipelines: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Config:
     repo_root: Path
     project_name: str
@@ -187,6 +210,23 @@ class Config:
     # before hierarchy had. Kept out of `products` so the taxonomy stays one dict to
     # iterate and this stays a lookup you opt into.
     product_parents: dict[str, str] = field(default_factory=dict)
+    # Every system this deployment declares, id -> spec, in declaration order (which is
+    # display order, same convention as `products`). Empty on every deployment that has
+    # not declared [systems] - and an empty table is what keeps the whole system layer
+    # dormant, exactly as an absent [[trackers]] keeps the tracker feature dormant.
+    systems: dict[str, SystemSpec] = field(default_factory=dict)
+    # The many-to-many edge, from the product's side: product id -> the systems it
+    # touches, in declaration order. Held from this side only because that is the side
+    # the operator declares and the side a pinned PM asks about ("what do I touch?");
+    # the reverse (which products touch a system) is derived in roadmap.products_of_system
+    # rather than stored, so the two can never disagree.
+    product_systems: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # Ids declared as BOTH a product and a system: the explicit, temporary state of an id
+    # being reclassified from product to system. Its product board keeps loading and
+    # stays fully usable, so the changes on it can be re-homed at the operator's pace
+    # instead of being orphaned the moment the [products] entry is deleted. Empty on any
+    # deployment that is not mid-restructure.
+    transitional_ids: tuple[str, ...] = ()
     # Markdown-ish lines describing where product sources live at the repo root -
     # injected verbatim into the PM system prompt's layout section.
     repo_layout: str = DEFAULT_REPO_LAYOUT
@@ -343,8 +383,81 @@ def _fatal(message: str) -> NoReturn:
     raise SystemExit(2)
 
 
-def _parse_products(raw: dict, config_path: Path) -> tuple[dict[str, str], dict[str, str]]:
-    """Reads [products] into (id -> label, child id -> parent id).
+def _parse_systems(raw: dict, config_path: Path) -> dict[str, SystemSpec]:
+    """Reads [systems] into id -> SystemSpec, in declaration order.
+
+    A SYSTEM is a bounded piece of technology/code - a service, an app, a module - and
+    it is the unit a change is contained within: a change belongs to exactly one system,
+    which is what makes its blast radius knowable. A PRODUCT is the business-facing
+    thing: a line of business, or an umbrella over the technology that serves one. A
+    product touches many systems and a system is touched by many products, which is why
+    the edge between them is declared per product (`systems = [...]`) rather than being
+    a level of either tree.
+
+    The two tables are deliberately separate rather than one renamed into the other:
+    products keep owning the roadmap boards (roadmaps are product- and initiative-first;
+    a system never has a roadmap of its own), and every deployment that has not declared
+    [systems] behaves exactly as it did before this table existed.
+
+    Both entry spellings from [products] work here too - a bare label, or a table:
+
+        [systems]
+        claims = "Claims Processor"
+
+        [systems.rides]
+        label = "Rides & Logistics"
+        path = "services/rides"
+        repo = "github.com/org/rides"
+    """
+    declared = raw.get("systems", {})
+    if not isinstance(declared, dict):
+        _fatal(f"{config_path} has [systems] as a {type(declared).__name__}; it must be a table")
+
+    systems: dict[str, SystemSpec] = {}
+    for key, value in declared.items():
+        system_id = str(key)
+        if isinstance(value, str):
+            systems[system_id] = SystemSpec(label=value or system_id)
+            continue
+        if not isinstance(value, dict):
+            _fatal(
+                f"{config_path} has [systems] entry {system_id!r} as a "
+                f"{type(value).__name__}; a system is either a label string "
+                '(claims = "Claims Processor") or a table with `label` and optional '
+                "`path`, `repo`, `guidance` and `pipelines`"
+            )
+        # Systems do not nest. `parent` is meaningful in the sibling [products] table, so
+        # an operator could reasonably expect it here - refuse loudly rather than accept
+        # the line and silently drop the relationship they thought they declared.
+        if "parent" in value:
+            _fatal(
+                f"{config_path} has system {system_id!r} with a `parent`, but systems do "
+                "not nest. If it is contained by another system, declare it as its own "
+                "system; to say which products touch it, list it in that product's "
+                "`systems = [...]`."
+            )
+        pipelines = value.get("pipelines", ())
+        if isinstance(pipelines, str) or not isinstance(pipelines, (list, tuple)):
+            _fatal(
+                f"{config_path} has system {system_id!r} with `pipelines` as a "
+                f"{type(pipelines).__name__}; it must be an array, e.g. "
+                'pipelines = ["rides-ci"]'
+            )
+        # A missing label is cosmetic, not structural - same call as [products] makes.
+        systems[system_id] = SystemSpec(
+            label=str(value.get("label", "")).strip() or system_id,
+            path=str(value.get("path", "")).strip(),
+            repo=str(value.get("repo", "")).strip(),
+            guidance=str(value.get("guidance", "")).strip(),
+            pipelines=tuple(str(p).strip() for p in pipelines if str(p).strip()),
+        )
+    return systems
+
+
+def _parse_products(
+    raw: dict, config_path: Path, systems: dict[str, SystemSpec] | None = None
+) -> tuple[dict[str, str], dict[str, str], dict[str, tuple[str, ...]]]:
+    """Reads [products] into (id -> label, child id -> parent id, id -> systems touched).
 
     Two spellings, both first class. A flat table of plain strings is what every
     deployment had before hierarchy existed, and those lines keep working byte for byte:
@@ -384,13 +497,27 @@ def _parse_products(raw: dict, config_path: Path) -> tuple[dict[str, str], dict[
     too many, and nothing anywhere points at the typo. A CYCLE is fatal for a harder
     reason - the products in it are reachable from no root at all, so they would simply
     vanish from the taxonomy while their boards sat on disk holding items.
+
+    A product also declares WHICH SYSTEMS IT TOUCHES (see _parse_systems), which is the
+    many-to-many edge between the two taxonomies:
+
+        [products.checkout]
+        label   = "Checkout"
+        systems = ["claims", "rides"]      # every id must be a declared system
+
+    `parent` and `systems` answer different questions and never substitute for each
+    other: `parent` says which product contains this one, `systems` says which
+    technology this product is built out of. Neither implies the other - a child product
+    touches whatever it touches, independently of its parent.
     """
     declared = raw.get("products", {})
     if not isinstance(declared, dict):
         _fatal(f"{config_path} has [products] as a {type(declared).__name__}; it must be a table")
 
+    known_systems = systems or {}
     labels: dict[str, str] = {}
     parents: dict[str, str] = {}
+    touches: dict[str, tuple[str, ...]] = {}
     for key, value in declared.items():
         product_id = str(key)
         if isinstance(value, str):
@@ -401,7 +528,8 @@ def _parse_products(raw: dict, config_path: Path) -> tuple[dict[str, str], dict[
             _fatal(
                 f'{config_path} has [products] entry {product_id!r} as a '
                 f"{type(value).__name__}; a product is either a label string "
-                '(web = "Web App") or a table with `label` and optional `parent`'
+                '(web = "Web App") or a table with `label` and optional `parent` '
+                "and `systems`"
             )
         # A missing label is cosmetic, not structural - falling back to the id shows the
         # mistake on the board immediately without refusing to boot over a display string.
@@ -409,11 +537,43 @@ def _parse_products(raw: dict, config_path: Path) -> tuple[dict[str, str], dict[
         parent = str(value.get("parent", "")).strip()
         if parent:
             parents[product_id] = parent
+        if "systems" in value:
+            touched = value["systems"]
+            if isinstance(touched, str) or not isinstance(touched, (list, tuple)):
+                _fatal(
+                    f"{config_path} has product {product_id!r} with `systems` as a "
+                    f"{type(touched).__name__}; it must be an array of declared system "
+                    'ids, e.g. systems = ["claims", "rides"]'
+                )
+            # Order is the operator's, duplicates are a harmless typo rather than a
+            # structural error - dedupe and keep the first mention's position.
+            touched_ids: dict[str, None] = {}
+            for entry in touched:
+                system_id = str(entry).strip()
+                if not system_id:
+                    continue
+                if system_id not in known_systems:
+                    _fatal(
+                        f"{config_path} has product {product_id!r} touching system "
+                        f"{system_id!r}, which is not declared in [systems] (declared: "
+                        f"{', '.join(known_systems) or 'none'})"
+                    )
+                touched_ids[system_id] = None
+            touches[product_id] = tuple(touched_ids)
 
     for child, parent in parents.items():
         if parent == child:
             _fatal(f"{config_path} has product {child!r} declared as its own parent")
         if parent not in labels:
+            # Pointing a product's `parent` at a system is the predictable confusion once
+            # both tables exist, so name the fix instead of only the fact.
+            if parent in known_systems:
+                _fatal(
+                    f"{config_path} has product {child!r} with parent {parent!r}, which "
+                    "is a system, not a product. A product's `parent` is the product "
+                    "that contains it; to say this product is built on that system, add "
+                    f'it to {child!r}\'s `systems = ["{parent}"]` instead.'
+                )
             _fatal(
                 f"{config_path} has product {child!r} with parent {parent!r}, which is "
                 f"not a declared product (declared: {', '.join(labels) or 'none'})"
@@ -459,7 +619,7 @@ def _parse_products(raw: dict, config_path: Path) -> tuple[dict[str, str], dict[
     # Guaranteed by the cycle check above; asserted because a product missing here is
     # invisible everywhere downstream rather than loudly broken.
     assert len(ordered) == len(labels), "product ordering dropped a declared product"
-    return ordered, parents
+    return ordered, parents, touches
 
 
 def _parse_mode(raw: dict, config_path: Path) -> str:
@@ -680,7 +840,14 @@ def load_config(repo_root: Path | None = None) -> Config:
     models_raw = dict(raw.get("models", {}))
     default_model = str(models_raw.pop("default", "")).strip() or None
 
-    products, product_parents = _parse_products(raw, config_path)
+    # Systems first: a product declares which of them it touches, so they have to be
+    # known before [products] can validate those references.
+    systems = _parse_systems(raw, config_path)
+    products, product_parents, product_systems = _parse_products(raw, config_path, systems)
+    # An id in both tables is the reclassification-in-progress state, not an error: see
+    # Config.transitional_ids. Ordered by the [products] table so the report reads in the
+    # order the operator sees their own board.
+    transitional_ids = tuple(p for p in products if p in systems)
 
     knowledge_dir = local_dir / KNOWLEDGE_DIR_NAME
     knowledge_files: tuple[str, ...] = ()
@@ -704,6 +871,9 @@ def load_config(repo_root: Path | None = None) -> Config:
         port=int(server.get("port", DEFAULT_PORT)),
         products=products,
         product_parents=product_parents,
+        systems=systems,
+        product_systems=product_systems,
+        transitional_ids=transitional_ids,
         repo_layout=str(project.get("layout", "")).strip() or DEFAULT_REPO_LAYOUT,
         models={str(k): str(v) for k, v in models_raw.items()},
         default_model=default_model,

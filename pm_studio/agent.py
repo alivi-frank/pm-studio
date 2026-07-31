@@ -15,11 +15,15 @@ from .config import CONFIG, LOCAL_DIR_NAME
 from .costing import agent_usage
 from .roadmap import (
     PRODUCTS,
+    SYSTEMS,
     owned_subtrees,
     parent_of,
     product_label,
     product_path_label,
     subtree_products,
+    system_label,
+    systems_declared,
+    systems_of_product,
 )
 
 if TYPE_CHECKING:
@@ -171,6 +175,53 @@ here is visible upward without you announcing it. {parent_label}'s own board is 
 one-line digest below your roadmap, like any other product: read it for context, and when \
 something belongs to the parent rather than to you, suggest it there \
 (`"origin_product": "{product}"`) instead of building it here.
+"""
+
+# Appended to ROADMAP_GUIDANCE_TEMPLATE only when the deployment declared [systems].
+# Omitted entirely otherwise, for the same reason the tracker block is: a PM told to
+# attribute changes to a taxonomy this deployment does not have would either invent system
+# names or refuse to create changes at all.
+#
+# This block is load-bearing rather than informational. The PM creates changes by curl, so
+# if its examples don't carry `system`, every change it files is rejected (or, worse on a
+# product that declares no systems, lands unattributed) - and the PM is the source of most
+# changes on most boards.
+def _describe_system(system: str) -> str:
+    """"Rides & Logistics (id `rides`, services/rides)" - one system, named the way a PM
+    needs it: the label to talk about, the id to put in a payload, and where its code lives
+    so a dev task can be pointed at the right tree. Path preferred over repo when a system
+    has both, since only the path is inside this checkout."""
+    spec = SYSTEMS.get(system)
+    where = ""
+    if spec and (spec.path or spec.repo):
+        where = f", {spec.path or spec.repo}"
+    return f"{system_label(system)} (id `{system}`{where})"
+
+
+SYSTEM_GUIDANCE_TEMPLATE = """\
+- Changes here are attributed to a SYSTEM: the bounded piece of technology a change is \
+contained within - a service, an app, a module - as opposed to the product, which is the \
+business-facing thing built on top of several of them. "{product_label}" is built on: \
+{system_summary}.
+- EVERY change you create must name the one system it is contained within. A change belongs \
+to exactly one - that is what makes its blast radius knowable - so pick the system whose \
+code would actually change, not the one that sounds closest to the feature's name:
+  curl -s -X POST {roadmap_base_url}/{product}/items{auth_header} -H "Content-Type: application/json" \
+-d '{{"title": "...", "description": "...", "bucket": "now|next|later", "system": "<system_id>"}}'
+  A create without `"system"` is rejected with a 400 listing the valid ids - read it rather \
+than retrying the same payload. If genuinely none of them fits, say so to the stakeholder \
+and ask which system owns the work; never guess, and never pick one just to get past the \
+error.
+- To correct an attribution, PATCH it. There is no way to remove one - a change cannot go \
+back to having no system, so `""` is refused rather than treated as a reset:
+  curl -s -X PATCH {roadmap_base_url}/{product}/items/<item_id>{auth_header} -H "Content-Type: application/json" \
+-d '{{"system": "<system_id>"}}'
+- Changes that predate this are shown in your roadmap block as `[NO SYSTEM]`. That is an \
+inconsistency to close, not a normal state: when you touch such a change for any other \
+reason, attribute it in the same pass, and if the stakeholder asks what is outstanding, \
+count them. A system is NOT a place work is planned - it has no roadmap of its own, and \
+work that belongs to a system rather than a product (infra, performance, upgrades) belongs \
+to an initiative instead.
 """
 
 # Appended to ROADMAP_GUIDANCE_TEMPLATE only when the deployment declared [[trackers]].
@@ -580,6 +631,22 @@ class PMAgent:
                     product=home,
                     product_label=product_label(home),
                     parent_label=product_label(parent_of(home)),
+                )
+            # Before the tracker block: what a change IS attributed to matters more to the
+            # PM's next call than where it is mirrored.
+            if systems_declared():
+                # The systems the HOME product touches, falling back to every declared
+                # system when it declares none - the same widening validate_system does, so
+                # the prompt cannot offer an id the server would then refuse.
+                offered = systems_of_product(home) or list(SYSTEMS)
+                roadmap_guidance += SYSTEM_GUIDANCE_TEMPLATE.format(
+                    product=home,
+                    product_label=product_label(home),
+                    roadmap_base_url=ROADMAP_BASE_URL,
+                    auth_header=agent_auth_header(),
+                    # Where the code lives, not just the label: the PM's next move after
+                    # filing the change is often to dispatch a dev task into that tree.
+                    system_summary=", ".join(_describe_system(s) for s in offered),
                 )
             if CONFIG.trackers:
                 roadmap_guidance += TRACKER_GUIDANCE_TEMPLATE.format(

@@ -1,10 +1,10 @@
 # Architecture Specification
 
-Complete technical spec of PM Studio (~6,100 lines of Python + 10 static HTML pages):
+Complete technical spec of PM Studio (~6,100 lines of Python + 11 static HTML pages):
 the package `pm_studio/` with modules `config.py`, `models.py`, `gitsnapshot.py`,
 `roadmap.py`, `portfolio.py`, `tasks.py`, `agent.py`, `sessions.py`, `accounts.py`,
 `authz.py`, `costing.py`, `mailer.py`, `server.py`, `scaffold.py`, `__main__.py`, and
-`static/` (10 pages). Dependencies: `fastapi`, `uvicorn`, the `claude` CLI on PATH,
+`static/` (11 pages). Dependencies: `fastapi`, `uvicorn`, the `claude` CLI on PATH,
 `git` — no database, and no third-party crypto or ORM: everything is JSON files + git,
 with password hashing and tokens from the standard library.
 
@@ -93,7 +93,27 @@ hiccup must never break a PM turn or dev task. Snapshots are repo-wide; `.gitign
   refuses cycles: they run inside a PM's turn and the board's render, where a hang is a
   worse failure than a short answer. Nothing stores the hierarchy — a change carries only
   its product id — so re-parenting, at any depth, is a config edit, never a migration.
-- `RoadmapItem` dataclass: `id` (8-hex), `product`, `title`, `description`,
+- `SYSTEMS: dict[str, SystemSpec]` — the ordered **system** taxonomy from the `[systems]`
+  table: the bounded pieces of technology a change is contained within (`label`, plus
+  optional `path`, `repo`, `guidance`, `pipelines`). Distinct from a product in kind, not
+  in level: a product is business-facing and owns a board; a system is code and owns
+  none. `PRODUCT_SYSTEMS: dict[str, tuple[str, ...]]` is the declared many-to-many edge
+  from the product's side; `products_of_system()` derives the reverse rather than storing
+  it, so the two can never disagree. `systems_declared()` is the single switch every
+  caller asks — an empty table keeps the whole layer dormant and every behaviour below
+  pre-system. `TRANSITIONAL_IDS` holds ids declared as **both** a product and a system,
+  the explicit temporary state of reclassifying one into the other (its product board
+  stays live so its changes can be re-homed; see CONFIGURATION.md § Systems).
+- `validate_system(product, system, *, required)` is the one place attribution is
+  decided: no `[systems]` means the only valid value is none at all; otherwise a system
+  is required and must be declared **and** touched by the product — unless that product
+  declares none, in which case any declared system is accepted, because enforcing an
+  empty list would reject every value and make the board unusable
+  (`products_missing_systems()` reports those). There is deliberately **no** `""`-clears
+  convention, unlike `owner`/`project_id`: a change cannot go back to having no system.
+  `unattributed_report()` counts the changes that still do — reported, never blocked,
+  the same call `portfolio.unaligned_report()` makes.
+- `RoadmapItem` dataclass: `id` (8-hex), `product`, `system: str|None`, `title`, `description`,
   `bucket` ("now"|"next"|"later"), `status` ("pending"|"in_progress"|"done"),
   `origin_product`, `triaged: bool`, `created_at`, `updated_at`,
   `shipped_at: float|None` (set when status flips to done, cleared otherwise),
@@ -182,7 +202,8 @@ behaves exactly as before: every field is additive and defaults to "unset".
 
 ```
 Goals  ⇄  Initiative  →  Project  →  Change
-                                       └─ belongs to exactly ONE Product
+                                       ├─ belongs to exactly ONE Product  (its board)
+                                       └─ belongs to exactly ONE System   (its code)
 ```
 
 - A **Change** is the existing `RoadmapItem` — no new concept. It gains a single
@@ -199,9 +220,17 @@ Goals  ⇄  Initiative  →  Project  →  Change
   *session* be scoped to an initiative rather than pinned to a product (§6): the set of
   products an initiative touches is **derived** from its changes, so it can be discovered
   as the work goes.
+- **Systems are not a level either**, and for the same reason: `system` hangs off the
+  Change, additive with default None. A **system** is the bounded piece of code a change
+  is contained within; a **product** is the business-facing thing built on several of
+  them. The `product ⇄ system` edge is therefore many-to-many and needs no association
+  records — it is declared once per product (`systems = [...]`) and the reverse is
+  derived (`roadmap.products_of_system`). Systems own **no roadmap**: a change's home is
+  its product's board, and system-shaped work (infra, performance) is an *initiative*.
+  See `docs/CONFIGURATION.md` § Systems.
 - Goals, Initiatives and Projects each carry a `status` of `"open"|"closed"` plus a
-  `closed_at` stamp. Products are persistent (they come from config); everything in
-  the chain is temporary.
+  `closed_at` stamp. Products and Systems are persistent (they come from config);
+  everything in the chain is temporary.
 
 ### Why single-parent below the initiative
 
@@ -212,6 +241,12 @@ legitimately contributes to more than one goal, so goal-level figures overlap an
 never be summed into a grand total. The API reflects this — `rollup_path(project_id)`
 returns only project + initiative, and `goal_ids_for_initiative()` is a deliberately
 separate call so goals cannot be folded in by accident.
+
+**Systems carry the same warning as goals.** `Change → System` is single-parent, so a
+per-system count or total is exact. But a system is touched by several products, so
+system figures grouped by product overlap and must never be summed across them — the
+same system would be counted once per product. `roadmap.system_rollup()` returns
+per-system rows only, and does no product-level aggregation, for exactly this reason.
 
 ### The maintenance scaffold
 
@@ -646,7 +681,8 @@ background-thread → websocket hops via `loop.call_soon_threadsafe(asyncio.crea
 | `POST /chat/{id}/reset` | archive + clear |
 | `POST /tasks/{id}` `{"task": "..."}` | dispatch dev task (immediate return) |
 | `GET /tasks/{id}`, `GET /tasks/{id}/{tid}` | list / one |
-| `GET /roadmap/data` | `{products, items-by-product}` |
+| `GET /roadmap/data` | `{products, product_parents, systems, product_systems, unattributed, items-by-product}` |
+| `GET /systems`, `GET /systems/data` | the system catalogue page and its dataset: one row per declared system (label, path, repo, guidance, pipelines, the products touching it, its change counts, whether it is mid-reclassification), plus the restructure gap. `{"declared": false}` when no `[systems]` table exists |
 | `GET/POST /roadmap/{product}/items`, `PATCH/DELETE /roadmap/{product}/items/{item_id}` | board CRUD; PATCH/DELETE verify the URL product OWNS the item (this is what makes own-product-scoped allowlists safe); PATCH with `move_to_product` triggers the move flow; `start_at`/`target_at` accept `"YYYY-MM-DD"` or `""` to clear, and a malformed or inverted pair is a 400 naming the reason with nothing applied |
 | WS `/ws/chat/{id}`, `/ws/tasks/{id}`, `/ws/sessions`, `/ws/roadmap` | push channels |
 

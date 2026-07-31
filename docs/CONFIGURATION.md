@@ -216,6 +216,101 @@ parent simply gains children underneath it. The same goes for deepening an exist
 tree later — pointing a new product at a product that already has a parent needs no
 migration either.
 
+## Systems
+
+A **system** is a bounded piece of technology — a service, an app, a module — and it is
+the unit a change is contained within. **A change belongs to exactly one system.** That
+is what makes its blast radius knowable.
+
+A **product** is the business-facing thing: a line of business, or an umbrella over the
+technology that serves one. The two are not the same shape and neither contains the
+other:
+
+| | Product | System |
+|---|---|---|
+| What it is | a business-facing offering | a bounded piece of code |
+| Owns a roadmap board | **yes** | no, never |
+| A change relates to | exactly one (its board) | exactly one (its attribution) |
+| Relationship | touches many systems | serves many products |
+
+```toml
+[products]
+web = "Web App"
+
+[products.checkout]
+label   = "Checkout"
+systems = ["claims", "rides"]     # which systems this product is built on
+
+[systems]
+claims = "Claims Processor"
+
+[systems.rides]
+label    = "Rides & Logistics"
+path     = "services/rides"             # source folder, repo-root-relative
+repo     = "github.com/org/rides"       # its own repo, when it has one
+guidance = "docs/rides/GUIDANCE.md"     # declared now, acted on later
+pipelines = ["rides-ci"]                # declared now, acted on later
+```
+
+`path`, `repo`, `guidance` and `pipelines` are all optional and, today, purely
+descriptive: they are shown on the Systems page and named in the PM's prompt (so it
+knows where a change's code lives before dispatching a dev task), but nothing enforces
+or triggers them yet.
+
+**The edge is many-to-many, so systems totals never sum across products.** A system
+touched by three products would be counted three times. This is the same overlap rule
+goals already carry — see `docs/ARCHITECTURE.md`.
+
+**Systems have no roadmap, deliberately.** Roadmaps are product-first and
+initiative-first. Work that belongs to a system rather than to any product — infra,
+performance, an upgrade — is an **initiative**, which is exactly what initiatives are
+for. Grouping a system's own changes is a filter on the board, not a board of its own.
+
+### Turning it on, and what changes
+
+**Declaring `[systems]` is the switch.** With no `[systems]` table, a deployment behaves
+exactly as it did before this feature existed: no attribution is required, no Systems
+tab appears, and nothing new shows on the board. Once the table exists:
+
+- Every **new** change must name its system — from the board's create form, or
+  `"system": "<id>"` in a PM's `POST`. A create without one is a 400 listing the valid
+  ids.
+- Changes that predate it carry no system. That is an **inconsistency to close, not a
+  supported state**: the board shows a `no system` chip and a banner, the PM's context
+  block marks each one `[NO SYSTEM]`, and the Systems page lists them with a control to
+  attribute each. It is never a hard block — refusing to load a board would be worse
+  than showing the work left to do.
+- A change's system can be corrected, never removed: `"system": ""` is refused rather
+  than treated as a reset.
+
+A product that declares **no** `systems` cannot constrain what its changes attribute to,
+so any declared system is accepted there and the product is listed on the Systems page
+as configuration still to do. Enforcing an empty list would reject every possible value
+and make that board unusable.
+
+### Reclassifying a product that was really a system
+
+If an id in `[products]` turns out to be a system, **an id may be declared in both
+tables at once** — that is the explicit, temporary reclassification state, not an error:
+
+```toml
+[products]
+claims = "Claims Processor"   # still here, so its board keeps loading
+
+[systems]
+claims = "Claims Processor"   # and now also a system
+```
+
+Its product board stays live and fully usable, and the Systems page flags it
+`reclassifying` and offers each of its changes a "re-home to product X, attribute to
+system Y" control (one `move_to_product` + `system` PATCH). When its board is empty,
+delete the `[products]` entry.
+
+Do it in that order. Deleting the `[products]` entry first would orphan the board:
+board files are loaded only for **declared product ids**, so its items would silently
+stop loading — the same behavior described for any deleted product above, which is
+harmless for an empty board and data loss for a full one.
+
 ## Operating modes
 
 `personal` (the default) is the tool as it has always been: one trusted user, no

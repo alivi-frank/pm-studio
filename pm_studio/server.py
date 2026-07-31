@@ -47,11 +47,14 @@ from .portfolio import (
 )
 from .roadmap import (
     PRODUCT_PARENTS,
+    PRODUCT_SYSTEMS,
     PRODUCTS,
+    SYSTEMS,
     RoadmapItem,
     RoadmapStore,
     TicketAlreadyLinked,
     parent_of,
+    systems_declared,
 )
 from .sessions import DEFAULT_SESSION_ID, SessionManager, SessionRuntime
 from .trackers import TrackerError, TrackerStore, normalize_key
@@ -650,6 +653,10 @@ def auth_me(request: Request) -> dict:
         "user": user.to_public_dict() if user is not None else None,
         "roles": ROLE_LABELS,
         "smtp_configured": bool(CONFIG.smtp and CONFIG.smtp.is_usable),
+        # Deployment shape, like smtp_configured: whether [systems] is declared at all.
+        # The nav uses it to decide whether the Systems tab exists, so a deployment that
+        # does not use the layer is offered no tab into an empty taxonomy.
+        "systems_declared": systems_declared(),
         # So a page can hide controls that would only 403. Every one of these is
         # still enforced server-side, independently of what the UI chooses to show.
         "capabilities": capabilities_of(user.role) if user is not None else [],
@@ -1327,6 +1334,34 @@ def portfolio_page() -> FileResponse:
     return _app_asset("portfolio.html")
 
 
+@app.get("/systems")
+def systems_page() -> FileResponse:
+    return _app_asset("systems.html")
+
+
+@app.get("/systems/data")
+def systems_data() -> dict:
+    """The systems view's dataset: one row per declared system, plus the restructure gap.
+
+    Readable by anyone who can see the roadmap, and gated by nothing: this is the
+    technology taxonomy and the products built on it, which is the same
+    visible-to-everyone transparency the board itself has. No cost data passes through
+    here, so there is no `view_cost` grant to respect.
+
+    `declared: false` (no [systems] table) is a first-class answer, not an empty error -
+    the page renders an explanation of what a system is and how to declare one, rather
+    than an empty table implying something broke.
+    """
+    return {
+        "declared": systems_declared(),
+        "systems": roadmap_store.system_rollup(),
+        "unattributed": roadmap_store.unattributed_report(),
+        # So the re-home control can offer real destinations without a second request.
+        "products": PRODUCTS,
+        "product_systems": {p: list(s) for p, s in PRODUCT_SYSTEMS.items()},
+    }
+
+
 def _session_scope_report() -> list[dict]:
     """Sessions whose scope doesn't hold together, one entry each.
 
@@ -1651,10 +1686,18 @@ def roadmap_data() -> dict:
     additive in the same way: `products` still lists every product flat, so a consumer
     that only needs labels - the session picker's badges, a chat header - keeps working
     without knowing the tree exists.
+
+    `systems` / `product_systems` / `unattributed` are additive in that same way, and all
+    three are empty on a deployment that declares no [systems] - which is what lets the
+    board render its system chips and its restructure banner without a second request,
+    and show neither when the layer is dormant.
     """
     return {
         "products": PRODUCTS,
         "product_parents": PRODUCT_PARENTS,
+        "systems": {s: spec.label for s, spec in SYSTEMS.items()},
+        "product_systems": {p: list(s) for p, s in PRODUCT_SYSTEMS.items()},
+        "unattributed": roadmap_store.unattributed_report(),
         "items": {
             product: [_with_ticket(item) for item in items]
             for product, items in roadmap_store.list_all().items()
@@ -1687,6 +1730,7 @@ def roadmap_by_initiative() -> dict:
         "pivot": "initiative",
         "products": PRODUCTS,
         "product_parents": PRODUCT_PARENTS,
+        "systems": {s: spec.label for s, spec in SYSTEMS.items()},
         "groups": portfolio_store.group_changes_by_initiative(changes),
         "trackers": tracker_store.describe(),
     }
@@ -1719,6 +1763,9 @@ def create_roadmap_item(product: str, request: Request, payload: dict = Body(...
             project_id=_resolve_project_id(payload),
             start_at=payload.get("start_at"),
             target_at=payload.get("target_at"),
+            # Required once [systems] is declared - the store raises, and this 400s with
+            # a message naming the systems this product actually touches.
+            system=payload.get("system"),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1760,6 +1807,9 @@ def update_roadmap_item(product: str, item_id: str, request: Request, payload: d
                 status=payload.get("status"),
                 title=payload.get("title"),
                 description=payload.get("description"),
+                # Re-attribute as part of the move. Omitted, the current system carries
+                # over and the move is refused if the destination does not touch it.
+                system=payload.get("system"),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1784,6 +1834,10 @@ def update_roadmap_item(product: str, item_id: str, request: Request, payload: d
             # after its target is a 400 with the reason, and the item is left untouched.
             start_at=payload.get("start_at"),
             target_at=payload.get("target_at"),
+            # NOT the ""-clears convention, deliberately: None leaves the attribution
+            # alone, any other value re-attributes, and "" is a 400 rather than a way to
+            # make a change unattributed again (see roadmap.validate_system).
+            system=payload.get("system"),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

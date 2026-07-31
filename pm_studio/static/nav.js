@@ -31,6 +31,18 @@
     { page: "sessions", href: "/", label: "Sessions", what: "the work itself" },
   ];
 
+  // Reference, not a stop on the work model - which is why it sits outside CORE_TABS and
+  // its arrow chain. Systems are the technology the products are built on; they carry no
+  // roadmap of their own, so they are something you look up rather than something intent
+  // flows through. Shown only when the deployment declares [systems] (see /auth/me), so
+  // an instance that does not use the layer is never offered a tab into an empty table.
+  var REFERENCE_TABS = [
+    {
+      page: "systems", href: "/systems", label: "Systems",
+      what: "the technology changes are contained within",
+    },
+  ];
+
   // The two that sit behind a role. `personal` says whether the page is reachable when
   // there is no identity at all: Time & cost is (it reports on "this machine"); People
   // is not - the roster endpoints are enterprise-only, so linking it from a personal
@@ -52,6 +64,7 @@
     sessions: { tab: "sessions" },
     portfolio: { tab: "portfolio" },
     roadmap: { tab: "roadmap" },
+    systems: { tab: "systems" },
     costing: { tab: "costing" },
     people: { tab: "people" },
     chat: { tab: "sessions", context: "session", subtab: "chat" },
@@ -129,6 +142,13 @@
       tabs.appendChild(makeTab(tab, current, "pmnav-tab"));
     });
 
+    if (info && info.systems_declared) {
+      tabs.appendChild(el("span", "pmnav-group-sep"));
+      REFERENCE_TABS.forEach(function (tab) {
+        tabs.appendChild(makeTab(tab, current, "pmnav-tab"));
+      });
+    }
+
     var admin = visibleAdminTabs(info);
     if (admin.length) {
       tabs.appendChild(el("span", "pmnav-group-sep"));
@@ -171,7 +191,7 @@
   // set - the bar above is the only place destinations are listed.
   function buildPageContext(spec) {
     var row = el("div", "pmnav-context");
-    var all = CORE_TABS.concat(ADMIN_TABS);
+    var all = CORE_TABS.concat(REFERENCE_TABS, ADMIN_TABS);
     var here = null;
     all.forEach(function (tab) { if (tab.page === spec.tab) here = tab; });
 

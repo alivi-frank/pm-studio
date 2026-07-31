@@ -97,6 +97,11 @@ must be promoted out of chat into one of the four layers above before a reset.
 - Cross-product work is handed off via the board (`origin_product`, lands untriaged),
   never built by the noticing session. The owning PM triages suggestions in or drops
   them.
+- Where `[systems]` is declared, every change names the one **system** it is contained
+  within — chosen by whose code actually changes, not by which name is closest to the
+  feature's. A change with no system is an inconsistency to close, not a resting state:
+  attribute it the next time you touch it. Never invent an attribution to clear the
+  error; if none of the product's systems fits, that is a question for the stakeholder.
 
 ## 6. Git discipline
 
