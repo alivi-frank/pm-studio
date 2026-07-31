@@ -21,6 +21,46 @@ pm_studio_local/
 Run `python -m pm_studio init` to scaffold all of it with commented templates
 (non-destructive: existing files are never touched).
 
+One optional file sits **outside** that directory: `.env` at the repo root, holding the
+secrets `config.toml` refers to by name. See [`.env`](#env) below.
+
+## `.env`
+
+`config.toml` is committed, so credentials are named there, never written: `token_env`,
+`email_env` and `password_env` hold the **name** of an environment variable. That
+variable has to exist in the server process, and at startup PM Studio fills it from an
+optional `.env` at your repo root:
+
+```bash
+# <repo root>/.env  - git-ignore this file
+PM_STUDIO_JIRA_TOKEN=your-api-token
+PM_STUDIO_JIRA_EMAIL=pm@acme.com
+```
+
+`python -m pm_studio` then picks the token up with no wrapper script and no `export`
+first. Worth knowing about it:
+
+- **Absent is normal.** No `.env`, no output, no behaviour change — export the variables
+  however you already do (shell profile, CI, systemd, a run script) and nothing here
+  applies.
+- **The environment always wins.** A variable already set in the process is left exactly
+  as it is; `.env` only fills the gaps. A real `export` is a deliberate act for that one
+  run, and a stale file must never quietly override it. (Set-but-empty counts as unset,
+  matching how every other credential read here treats `""`.)
+- **It reports names, never values.** A loaded file prints which variables it supplied,
+  so a missing credential is diagnosable from the startup log without putting a token in
+  it.
+- **The format is small on purpose:** `KEY=value` one per line, `#` comment lines, blank
+  lines, an optional `export ` prefix, and quoted values taken literally (`X="  spaced "`
+  keeps its spaces). No `$VAR` interpolation, no backslash escapes, no multi-line values
+  — a file needing those wants a shell, which is what `export` is for. Lines that are not
+  `KEY=value` are skipped with a warning naming the line number, rather than silently
+  leaving the variable unset.
+- **The whole file is loaded**, not just the keys PM Studio reads, and the dev agents it
+  spawns inherit the process environment. If your `.env` also carries unrelated settings
+  that would change how a subprocess behaves, keep those elsewhere or export only what
+  you want with a run script.
+
 ## `config.toml`
 
 ```toml
@@ -99,7 +139,8 @@ use_tls = true
 # lets a bare key like PROJ-123 be attributed to the right tracker.
 # ALWAYS use `token_env` (the NAME of an environment variable) rather than
 # `token` - pm_studio_local/ is normally committed, so an inline token is a token
-# in your git history. PM Studio warns loudly if you use `token`.
+# in your git history. PM Studio warns loudly if you use `token`. Put the value in
+# the git-ignored `.env` at your repo root (see the ".env" section) or export it.
 [[trackers]]
 id = "jira"                      # stable: every linked change stores this id
 provider = "jira"
@@ -307,7 +348,8 @@ board, nothing.
 > Two consequences worth internalising before you point this at a real instance:
 >
 > - `pm_studio_local/config.toml` is **committed**. Use `token_env` and `email_env` so no
->   credential is in it, and remember that `base_url` and `projects` alone disclose which
+>   credential is in it — put the values in the root `.env`, which is not — and remember
+>   that `base_url` and `projects` alone disclose which
 >   vendor instance you run and how your work is organised. If your repo is public, that is
 >   published.
 > - A sync writes `<workspace>/trackers.json` — a cache of ticket titles from the synced
@@ -366,8 +408,9 @@ colour rather than a wrong one. Colour is never the only signal.
 type, state or anything else in Jira or ADO. The board's own bucket/status stays
 independent, on purpose.
 
-**Credentials and cached data.** Tokens are read from the environment via `token_env`,
-are only ever sent in an `Authorization` header, and are scrubbed from every error
+**Credentials and cached data.** Tokens are read from the environment via `token_env`
+(filled from the git-ignored root `.env` if you keep it there), are only ever sent in an
+`Authorization` header, and are scrubbed from every error
 message before it is stored or served — `GET /trackers` cannot return one. The catalog
 cache at `<workspace>/trackers.json` holds ticket titles from your tracker, so it is
 treated like the other credential-bearing state: gitignored *and* unstaged from every

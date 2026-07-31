@@ -168,6 +168,11 @@ GITIGNORE_ENTRIES: tuple[str, ...] = (
     # The stores write `<name>.tmp` then atomically replace; a snapshot landing inside
     # that window would otherwise catch one.
     "{workspace_rel}/*.tmp",
+    # Not runtime state: the env file config.toml's `token_env`/`password_env` names point
+    # at (config._load_env_file). It is the one place a deployment is told to put an actual
+    # credential, so `init` ignores it before the operator writes one there. `git add -A`
+    # honours .gitignore, which is also what keeps it out of every session snapshot.
+    ".env",
 )
 
 GITIGNORE_HEADER = "# PM Studio runtime/bookkeeping state (per-session, not product content)"
@@ -175,7 +180,8 @@ GITIGNORE_HEADER = "# PM Studio runtime/bookkeeping state (per-session, not prod
 # Appended above the credential-bearing entries so the reason is visible in the file
 # itself, where an operator tidying their .gitignore will actually read it.
 GITIGNORE_SENSITIVE_NOTE = (
-    "# Keep these ignored: accounts.json holds password hashes and live login tokens,\n"
+    "# Keep these ignored: .env holds the API tokens config.toml names via token_env,\n"
+    "# accounts.json holds password hashes and live login tokens,\n"
     "# costing.json holds pay rates, audit/activity name who did what, and\n"
     "# trackers.json caches ticket titles pulled from your Jira/ADO."
 )
@@ -209,7 +215,7 @@ def _ensure_gitignore(root: Path, created: list[str]) -> None:
     sensitive = {
         entry.format(workspace_rel=CONFIG.workspace_rel)
         for entry in GITIGNORE_ENTRIES
-        if any(name in entry for name in ("accounts", "costing", "audit", "activity"))
+        if any(name in entry for name in (".env", "accounts", "costing", "audit", "activity"))
     }
     lines = ["", GITIGNORE_HEADER]
     # Ordinary state first, then the credential-bearing group under its own note.

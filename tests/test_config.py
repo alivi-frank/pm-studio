@@ -1,18 +1,23 @@
 """Tests for pm_studio_local/ config loading: defaults with nothing present, a full
-config.toml, the append-only local instruction fragments, and the [enterprise]/[smtp]
-tables that decide the operating mode."""
+config.toml, the append-only local instruction fragments, the [enterprise]/[smtp] tables
+that decide the operating mode, and the repo-root `.env` that supplies the `*_env`
+variables those tables name."""
 
+import io
 import os
 import tempfile
 import textwrap
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
 from pm_studio.config import (
     DEFAULT_REPO_LAYOUT,
+    ENV_FILE_NAME,
     MODE_ENTERPRISE,
     MODE_PERSONAL,
+    _parse_env_file,
     load_config,
 )
 
@@ -187,6 +192,143 @@ class SmtpConfigTest(unittest.TestCase):
         smtp = load_config(self.root).smtp
         self.assertIsNotNone(smtp)
         self.assertFalse(smtp.is_usable)
+
+
+class EnvFileParsingTest(unittest.TestCase):
+    """The parser alone - no filesystem, no os.environ."""
+
+    def test_the_shapes_a_real_env_file_has(self) -> None:
+        pairs, bad = _parse_env_file(
+            "# a comment\n"
+            "\n"
+            "PLAIN=value\n"
+            "  SPACED = spaced value \n"
+            "export EXPORTED=exported\n"
+            'DOUBLE="  kept  "\n'
+            "SINGLE='#not-a-comment'\n"
+            "EMPTY=\n"
+            "WITH_EQUALS=a=b=c\n"
+        )
+        self.assertEqual(
+            pairs,
+            [
+                ("PLAIN", "value"),
+                ("SPACED", "spaced value"),
+                ("EXPORTED", "exported"),
+                ("DOUBLE", "  kept  "),
+                ("SINGLE", "#not-a-comment"),
+                ("EMPTY", ""),
+                ("WITH_EQUALS", "a=b=c"),
+            ],
+        )
+        self.assertEqual(bad, [])
+
+    def test_unparseable_lines_are_reported_by_number(self) -> None:
+        """Named so the operator can fix the line instead of wondering why the var is
+        unset - silently dropping these is how a token goes missing."""
+        pairs, bad = _parse_env_file("GOOD=1\nno equals sign here\n=novalue\nexport\nA B=2\n")
+        self.assertEqual(pairs, [("GOOD", "1")])
+        self.assertEqual(bad, [2, 3, 4, 5])
+
+
+class EnvFileLoadingTest(unittest.TestCase):
+    """`.env` at the repo root, which is what makes `token_env` work with no wrapper
+    script exporting the variable first."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.local = self.root / "pm_studio_local"
+        self.local.mkdir()
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _write_env(self, body: str) -> None:
+        (self.root / ENV_FILE_NAME).write_text(textwrap.dedent(body))
+
+    def _write_tracker(self) -> None:
+        (self.local / "config.toml").write_text(textwrap.dedent("""\
+            [[trackers]]
+            id = "jira"
+            provider = "jira"
+            base_url = "https://acme.atlassian.net"
+            projects = ["PROJ"]
+            email_env = "PM_STUDIO_TEST_ENV_EMAIL"
+            token_env = "PM_STUDIO_TEST_ENV_TOKEN"
+        """))
+
+    def _load(self) -> object:
+        """Loads with the two test variables absent, and never leaks them to other tests."""
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PM_STUDIO_TEST_ENV_TOKEN", None)
+            os.environ.pop("PM_STUDIO_TEST_ENV_EMAIL", None)
+            with redirect_stdout(io.StringIO()):
+                return load_config(self.root)
+
+    def test_tracker_token_comes_from_the_env_file(self) -> None:
+        """The whole point: nothing exported this, the file did."""
+        self._write_tracker()
+        self._write_env("""\
+            PM_STUDIO_TEST_ENV_EMAIL=pm@example.com
+            PM_STUDIO_TEST_ENV_TOKEN=file-token
+        """)
+        tracker = self._load().trackers[0]
+        self.assertEqual(tracker.token, "file-token")
+        self.assertEqual(tracker.username, "pm@example.com")
+        self.assertTrue(tracker.is_usable)
+
+    def test_a_real_export_beats_the_file(self) -> None:
+        """A deliberate export for this process must win over a default in the repo."""
+        self._write_tracker()
+        self._write_env("PM_STUDIO_TEST_ENV_TOKEN=file-token\n")
+        with mock.patch.dict(os.environ, {"PM_STUDIO_TEST_ENV_TOKEN": "exported-token"}):
+            with redirect_stdout(io.StringIO()):
+                tracker = load_config(self.root).trackers[0]
+        self.assertEqual(tracker.token, "exported-token")
+
+    def test_an_empty_export_does_not_shadow_the_file(self) -> None:
+        """"" is how an unset variable reads everywhere else here, so the file fills it."""
+        self._write_tracker()
+        self._write_env("PM_STUDIO_TEST_ENV_TOKEN=file-token\n")
+        with mock.patch.dict(os.environ, {"PM_STUDIO_TEST_ENV_TOKEN": ""}):
+            with redirect_stdout(io.StringIO()):
+                tracker = load_config(self.root).trackers[0]
+        self.assertEqual(tracker.token, "file-token")
+
+    def test_no_env_file_is_a_silent_no_op(self) -> None:
+        """Most deployments have none; loading must not print or fail."""
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            cfg = load_config(self.root)
+        self.assertEqual(cfg.trackers, ())
+        self.assertEqual(stdout.getvalue(), "")
+
+    def test_what_was_loaded_is_reported_without_values(self) -> None:
+        """Names help diagnose a missing credential; values are the credential."""
+        self._write_env("PM_STUDIO_TEST_ENV_TOKEN=super-secret-value\n")
+        stdout = io.StringIO()
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PM_STUDIO_TEST_ENV_TOKEN", None)
+            with redirect_stdout(stdout):
+                load_config(self.root)
+        self.assertIn("PM_STUDIO_TEST_ENV_TOKEN", stdout.getvalue())
+        self.assertNotIn("super-secret-value", stdout.getvalue())
+
+    def test_smtp_password_also_comes_from_the_file(self) -> None:
+        """`.env` is merged before every env read, not just the tracker ones."""
+        (self.local / "config.toml").write_text(textwrap.dedent("""\
+            [smtp]
+            host = "smtp.example.com"
+            from_address = "studio@example.com"
+            password_env = "PM_STUDIO_TEST_ENV_SMTP"
+        """))
+        self._write_env("PM_STUDIO_TEST_ENV_SMTP=file-password\n")
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PM_STUDIO_TEST_ENV_SMTP", None)
+            with redirect_stdout(io.StringIO()):
+                smtp = load_config(self.root).smtp
+        self.assertEqual(smtp.password, "file-password")
 
 
 if __name__ == "__main__":

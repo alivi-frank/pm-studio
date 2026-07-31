@@ -20,6 +20,11 @@ Layout in the target repo (all optional - missing pieces fall back to defaults):
 
 The repo root is the process working directory (`python -m pm_studio` is run from the
 target repo's root), NOT this package's install location.
+
+One file outside `pm_studio_local/` is also read: an optional `.env` at the repo root,
+merged into the environment before any `*_env` name below is resolved (see
+_load_env_file). It stays outside because it holds the actual secrets and the host repo
+git-ignores it, while `pm_studio_local/` is committed.
 """
 
 import os
@@ -34,6 +39,11 @@ CONFIG_FILE_NAME = "config.toml"
 PM_INSTRUCTIONS_NAME = "PM_INSTRUCTIONS.md"
 DEV_INSTRUCTIONS_NAME = "DEV_INSTRUCTIONS.md"
 KNOWLEDGE_DIR_NAME = "knowledge"
+
+# Optional per-repo environment file, at the repo ROOT rather than inside
+# pm_studio_local/: it carries the credentials themselves, so it belongs in the file the
+# host repo already git-ignores, not in the directory it commits.
+ENV_FILE_NAME = ".env"
 
 DEFAULT_WORKSPACE_ROOT = "pm_studio"
 DEFAULT_HOST = "127.0.0.1"
@@ -233,6 +243,96 @@ def _read_optional(path: Path) -> str:
     if path.is_file():
         return path.read_text().strip()
     return ""
+
+
+def _parse_env_file(text: str) -> tuple[list[tuple[str, str]], list[int]]:
+    """Splits `.env` text into (assignments in file order, 1-based numbers of lines that
+    could not be read as one).
+
+    Deliberately small: `KEY=value` one per line, `#` comment lines, blank lines, an
+    optional `export ` prefix, and a single- or double-quoted value taken literally (which
+    is how a value keeps a leading space or a `#`). No `$VAR` interpolation, no backslash
+    escapes, no multi-line values - those are shell features, and a deployment that needs
+    them should export the variable from the shell that already implements them rather
+    than have this package grow a second, subtly different shell.
+    """
+    pairs: list[tuple[str, str]] = []
+    bad_lines: list[int] = []
+    for number, raw_line in enumerate(text.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # `export FOO=bar` is what a file meant to be `source`d looks like; the prefix is
+        # noise here. (`export=bar` is a variable named export, and splits differently.)
+        words = line.split(None, 1)
+        if words[0] == "export":
+            line = words[1] if len(words) > 1 else ""
+        key, sep, value = line.partition("=")
+        key = key.strip()
+        if not sep or not key or any(char.isspace() for char in key):
+            bad_lines.append(number)
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        pairs.append((key, value))
+    return pairs, bad_lines
+
+
+def _load_env_file(path: Path) -> None:
+    """Merges the target repo's `.env` into os.environ, before anything here reads it.
+
+    `.env` is a library convention, not an OS or shell feature: nothing in the shell or
+    the interpreter reads that file on its own, so a deployment keeping its tracker token
+    there has no such variable in os.environ unless something puts it there. This is that
+    something - it is what lets `token_env`/`email_env`/`password_env` name a variable the
+    operator only ever wrote in `.env`, with no wrapper script exporting it first.
+
+    A variable already set in the environment always WINS over the file: a real export -
+    from a run script, CI, systemd, a shell profile - is a deliberate act aimed at this one
+    process, while `.env` is a default sitting in the repo, and a stale file must never
+    quietly beat the environment. (Set-but-empty counts as unset, because every other env
+    read in this module already treats "" that way.)
+
+    A missing file is a silent no-op; most deployments have none. A file that IS read says
+    which variables it supplied, by NAME only - the values are credentials and never go
+    anywhere near a log.
+    """
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        # Unreadable is worth saying out loud (a mode-0600 file owned by someone else is
+        # exactly how a token goes missing) but never fatal: the studio boots without it.
+        print(f"[pm_studio] WARNING: could not read {path}: {exc}", file=sys.stderr)
+        return
+
+    pairs, bad_lines = _parse_env_file(text)
+    if bad_lines:
+        numbers = ", ".join(str(number) for number in bad_lines)
+        print(
+            f"[pm_studio] WARNING: {path} line(s) {numbers} are not `KEY=value` and were "
+            "skipped. A variable written there is not set.",
+            file=sys.stderr,
+        )
+
+    applied: list[str] = []
+    already_set: list[str] = []
+    for key, value in pairs:
+        if os.environ.get(key, ""):
+            already_set.append(key)
+            continue
+        os.environ[key] = value
+        applied.append(key)
+
+    if applied:
+        print(f"[pm_studio] {path}: set {', '.join(applied)}")
+    if already_set:
+        print(
+            f"[pm_studio] {path}: {', '.join(already_set)} already in the environment, "
+            "left unchanged"
+        )
 
 
 def _fatal(message: str) -> NoReturn:
@@ -556,6 +656,9 @@ def load_config(repo_root: Path | None = None) -> Config:
     """Builds the Config for one target repo. Every part is optional: with no
     pm_studio_local/ at all you get a fully generic (but working) deployment."""
     root = (repo_root or Path.cwd()).resolve()
+    # FIRST, before any `*_env` name is resolved below ([smtp] password, tracker tokens):
+    # the file can only supply a credential if it is merged in before the read.
+    _load_env_file(root / ENV_FILE_NAME)
     local_dir = root / LOCAL_DIR_NAME
 
     raw: dict = {}
