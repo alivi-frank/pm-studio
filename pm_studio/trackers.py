@@ -177,6 +177,11 @@ class Ticket:
     # list, not a tuple, so to_dict/from_dict round-trip through JSON unchanged; empty
     # and additive-by-default so a cache written before this existed still loads.
     components: list[str] = field(default_factory=list)
+    # Which tracker project the ticket belongs to - the other thing routes match on,
+    # for the project-IS-the-product shape. Jira: the key's prefix; ADO: the project
+    # the work item was queried from (its numeric id says nothing). Additive default
+    # for pre-existing caches, same as components.
+    project: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -188,6 +193,7 @@ class Ticket:
         # A catalog cached before components existed stores nothing for it; None must
         # come back as "no components", not as a None that breaks every iteration.
         known["components"] = list(known.get("components") or [])
+        known["project"] = str(known.get("project") or "")
         return cls(**known)  # type: ignore[arg-type]
 
 
@@ -348,6 +354,9 @@ class JiraClient:
                 for c in (fields.get("components") or [])
                 if str(c.get("name") or "").strip()
             ],
+            # "PROJ-123" belongs to project "PROJ" - the key encodes it, no extra field
+            # needed from the API.
+            project=key.rsplit("-", 1)[0] if "-" in key else "",
         )
 
     def fetch_catalog(self) -> tuple[list[Ticket], bool]:
@@ -503,6 +512,9 @@ class AdoClient:
                 if str(fields.get("System.AreaPath") or "").strip()
                 else []
             ),
+            # An ADO work item's numeric id says nothing about its project, so the
+            # project it was queried from travels with the ticket.
+            project=project,
         )
 
     def fetch_catalog(self) -> tuple[list[Ticket], bool]:

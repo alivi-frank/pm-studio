@@ -115,6 +115,41 @@ class RouteConfigTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self._write(self.BASE + 'import_types = ["Epic"]\n')
 
+    def test_project_route_parses(self) -> None:
+        """The project-IS-the-product shape: every ticket in it routes, component or not."""
+        cfg = self._write(self.BASE + """\
+            import_types = ["Epic"]
+
+            [[trackers.routes]]
+            project = "PROJ"
+            product = "checkout"
+            system = "claims"
+        """)
+        route = cfg.trackers[0].routes[0]
+        self.assertEqual((route.project, route.component, route.product),
+                         ("PROJ", "", "checkout"))
+
+    def test_route_matching_nothing_is_fatal(self) -> None:
+        with self.assertRaises(SystemExit):
+            self._write(self.BASE + """\
+                import_types = ["Epic"]
+
+                [[trackers.routes]]
+                product = "checkout"
+            """)
+
+    def test_project_route_outside_the_synced_projects_is_fatal(self) -> None:
+        """A route scoped to a project the tracker never pulls is a dead route the
+        config plainly declares - the silent-no-op failure the fatal exists for."""
+        with self.assertRaises(SystemExit):
+            self._write(self.BASE + """\
+                import_types = ["Epic"]
+
+                [[trackers.routes]]
+                project = "OTHER"
+                product = "checkout"
+            """)
+
 
 class ComponentsReachTheCatalogTest(unittest.TestCase):
     """Regression: the routing feature once shipped with the Ticket field added but the
@@ -164,6 +199,7 @@ def _ticket(key, raw_type="Story", components=(), state_category="To Do", title=
         title=title or f"Ticket {key}", state=state_category, url=f"https://x/{key}",
         synced_at=time.time(), state_category=state_category,
         components=list(components),
+        project=key.rsplit("-", 1)[0] if "-" in key else "",
     )
 
 
@@ -183,11 +219,13 @@ class ImportPassTest(unittest.TestCase):
 
     TRACKER = TrackerConfig(
         id="jira", provider="jira", label="Jira", base_url="https://x",
-        projects=("PROJ",), token="t",
+        projects=("PROJ", "OPSX"), token="t",
         import_types=("Epic", "Story"),
         routes=(
             TrackerRoute(component="Checkout Web", product="checkout", system="claims"),
             TrackerRoute(component="Ops Misc", product="ops"),
+            # The project-IS-the-product shape: everything in OPSX lands on ops.
+            TrackerRoute(project="OPSX", product="ops"),
         ),
     )
 
@@ -261,6 +299,21 @@ class ImportPassTest(unittest.TestCase):
         by_key = {i["ticket_key"]: i for i in self.store.list_product("checkout")}
         self.assertEqual(by_key["PROJ-3"]["status"], "in_progress")
         self.assertEqual(by_key["PROJ-4"]["status"], "done")
+
+    def test_project_route_imports_componentless_tickets(self) -> None:
+        """The PDMP shape: the project is the product, and its tickets carry no
+        components at all - a component-only router can never reach them."""
+        self._run([_ticket("OPSX-1", components=[])])
+        item = self.store.list_product("ops")[0]
+        self.assertEqual(item["ticket_key"], "OPSX-1")
+        self.assertIn("project route 'OPSX'", item["description"])
+
+    def test_component_route_beats_the_project_route(self) -> None:
+        """A ticket in a project-routed project whose component routes elsewhere goes
+        where the component says: the specific claim wins over the project default."""
+        self._run([_ticket("OPSX-2", components=["Checkout Web"])])
+        self.assertEqual(self.store.list_product("checkout")[0]["ticket_key"], "OPSX-2")
+        self.assertEqual(self.store.list_product("ops"), [])
 
     def test_unrouted_is_reported_never_guessed(self) -> None:
         self._run([

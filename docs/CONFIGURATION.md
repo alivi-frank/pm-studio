@@ -179,7 +179,17 @@ system = "claims"            # optional; must be one that product touches — fa
 [[trackers.routes]]
 component = "Search"
 product = "search"
+
+[[trackers.routes]]
+project = "SHOP"             # the project-IS-the-product shape: every ticket in
+product = "checkout"         # SHOP routes here, component or not
 ```
+
+A route matches by `component`, by `project`, or by both (that component within that
+project). **Component routes win over project routes** — the specific claim is the
+truer one, so a project-wide default never swallows the exceptions declared beside it.
+A `project` route must name a project the tracker actually syncs; anything else is a
+dead route and refuses to boot.
 
 `import_types` and `routes` only work together — declaring exactly one refuses to boot,
 because it would be a config that looks like it imports and silently doesn't. With

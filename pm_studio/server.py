@@ -1725,15 +1725,30 @@ def _import_routed_tickets() -> None:
             normalize_key(tid, key) for tid, key in roadmap_store.linked_ticket_refs()
         }
         types = {t.casefold() for t in config.import_types}
-        routes = {r.component.casefold(): r for r in config.routes}
+        # Most-specific match wins, tried in this order: component within a project,
+        # component anywhere, whole project. A project-wide default must not swallow
+        # the exceptions declared beside it.
+        by_proj_comp = {
+            (r.project.casefold(), r.component.casefold()): r
+            for r in config.routes if r.project and r.component
+        }
+        by_component = {
+            r.component.casefold(): r for r in config.routes if r.component and not r.project
+        }
+        by_project = {
+            r.project.casefold(): r for r in config.routes if r.project and not r.component
+        }
         imported = 0
         unrouted: dict[str, int] = {}
         for ticket in tracker_store.tickets_of(config.id):
             if ticket.raw_type.casefold() not in types:
                 continue
-            route = next(
-                (routes[c.casefold()] for c in ticket.components if c.casefold() in routes),
-                None,
+            proj = (ticket.project or "").casefold()
+            comps = [c.casefold() for c in ticket.components]
+            route = (
+                next((by_proj_comp[(proj, c)] for c in comps if (proj, c) in by_proj_comp), None)
+                or next((by_component[c] for c in comps if c in by_component), None)
+                or by_project.get(proj)
             )
             if route is None:
                 for c in ticket.components or ["(no component)"]:
@@ -1742,11 +1757,14 @@ def _import_routed_tickets() -> None:
             if normalize_key(config.id, ticket.key) in linked:
                 continue
             try:
+                matched = (
+                    f"component route {route.component!r}" if route.component
+                    else f"project route {route.project!r}"
+                )
                 item = roadmap_store.create(
                     product=route.product,
                     title=ticket.title or ticket.key,
-                    description=f"Imported from {config.label} {ticket.key} by component "
-                    f"route {route.component!r}.",
+                    description=f"Imported from {config.label} {ticket.key} by {matched}.",
                     bucket="later",
                     status=_imported_status(ticket),
                     system=route.system or None,
