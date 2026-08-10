@@ -132,6 +132,9 @@ class _StubTrackerStore:
     def tickets_of(self, tracker_id):
         return [t for t in self._tickets if t.tracker_id == tracker_id]
 
+    def describe(self) -> dict:
+        return {"configured": True, "trackers": []}
+
 
 class ImportPassTest(unittest.TestCase):
     """_import_routed_tickets against the real RoadmapStore."""
@@ -227,6 +230,16 @@ class ImportPassTest(unittest.TestCase):
         self.assertIn("Mystery Component", report["unrouted"])
         self.assertIn("(no component)", report["unrouted"])
         self.assertEqual(self.store.list_all(), {"checkout": [], "ops": []})
+
+    def test_described_trackers_carries_the_report_and_terminates(self) -> None:
+        """Regression: a scripted refactor once rewrote this function's own body into a
+        self-call, and nothing exercised it - every board load then 500ed on live
+        deployments while the whole suite stayed green. The one shape every TRACKERS
+        consumer gets must be tested as a real call."""
+        self._run([_ticket("PROJ-9", components=["Checkout Web"])])
+        described = server_module._described_trackers()
+        self.assertIn("imports", described)
+        self.assertEqual(described["imports"]["jira"]["imported"], 1)
 
     def test_type_filter_and_manual_links_are_respected(self) -> None:
         # A Bug is not in import_types; a manually linked ticket is not re-imported.

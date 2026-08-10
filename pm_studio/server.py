@@ -1673,7 +1673,7 @@ def sync_trackers(request: Request, payload: dict = Body(default={})) -> dict:
 def _described_trackers() -> dict:
     """tracker_store.describe() plus the last import pass - the one shape every
     consumer of TRACKERS gets, so the report can't exist on one surface only."""
-    return _described_trackers()
+    return {**tracker_store.describe(), "imports": dict(_import_report)}
 
 
 def _run_tracker_sync(tracker_id: str | None) -> None:
