@@ -47,7 +47,7 @@ class RouteConfigTest(unittest.TestCase):
 
         [[trackers]]
         provider = "jira"
-        base_url = "https://example.atlassian.net"
+        base_url = "https://acme.atlassian.net"
         projects = ["PROJ"]
         token = "t"
     """
