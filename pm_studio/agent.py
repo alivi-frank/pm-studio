@@ -19,6 +19,7 @@ from .roadmap import (
     owned_subtrees,
     parent_of,
     product_label,
+    product_meta,
     product_path_label,
     requires_system,
     subtree_products,
@@ -186,6 +187,31 @@ something belongs to the parent rather than to you, suggest it there \
 # if its examples don't carry `system`, every change it files is rejected (or, worse on a
 # product that declares no systems, lands unattributed) - and the PM is the source of most
 # changes on most boards.
+def _product_facts_line(product: str) -> str:
+    """One prompt line of the operator-declared facts about a product, or "" when none
+    are declared. The point is that the PM stops guessing who to name when work needs a
+    human decision - so the owner leads, and only declared fields appear rather than a
+    row of "unknown"s teaching the PM to ignore the line."""
+    meta = product_meta(product)
+    if meta is None:
+        return ""
+    bits = []
+    if meta.owner:
+        bits.append(f"owner {meta.owner}")
+    if meta.team:
+        bits.append(f"built by {meta.team}")
+    if meta.stage != "ga":
+        bits.append(f"stage: {meta.stage}")
+    facts = "; ".join(bits)
+    desc = f" {meta.description}" if meta.description else ""
+    if not facts and not desc:
+        return ""
+    return (
+        f'- Facts about "{product_label(product)}": {facts}.{desc} Raise product '
+        "decisions with the owner by name; these facts are context, not permissions.\n"
+    )
+
+
 def _describe_system(system: str) -> str:
     """"Rides & Logistics (id `rides`, services/rides)" - one system, named the way a PM
     needs it: the label to talk about, the id to put in a payload, and where its code lives
@@ -632,6 +658,10 @@ class PMAgent:
                     product_label=product_label(home),
                     parent_label=product_label(parent_of(home)),
                 )
+            # Who owns the home product and where it is in its life - before the systems
+            # and tracker blocks, because "who decides" outranks "where the code is" the
+            # moment the PM has a question only a human can answer.
+            roadmap_guidance += _product_facts_line(home)
             # Before the tracker block: what a change IS attributed to matters more to the
             # PM's next call than where it is mirrored.
             #

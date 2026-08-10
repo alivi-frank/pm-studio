@@ -1173,6 +1173,9 @@
   let SYSTEMS = {};
   let PRODUCT_SYSTEMS = {};
   let UNATTRIBUTED = { changes: [], count: 0, not_yet_in_scope: 0, products_missing_systems: [] };
+  // Operator-declared facts per product (owner/team/stage/description), only for
+  // products that declared any. Context on the section heading, never layout.
+  let PRODUCT_META = {};
   const systemsDeclared = () => Object.keys(SYSTEMS).length > 0;
   /* Attribution is scoped PER PRODUCT: a board is in scope once its product declares what
      it touches, and untouched until then. Mirrors roadmap.requires_system exactly - the
@@ -1858,11 +1861,15 @@
     // builds the whole board, so an unguarded one would hang the page.
     const productGroup = (product, seen = new Set()) => {
       seen.add(product);
+      const meta = PRODUCT_META[product];
       return {
         key: `product:${product}`,
         kind: "product",
         title: productLabel(product),
-        flags: [],
+        // The stage badge only when it says something: discovery/development/sunset are
+        // the states worth a glance, steady-state ga is not. Owner and team ride the
+        // heading's tooltip (see the head renderers) rather than being chrome.
+        flags: meta && meta.stage !== "ga" ? [[meta.stage, false]] : [],
         changes: itemsByProduct[product] ?? [],
         omit: { product: true },
         product,
@@ -2217,6 +2224,13 @@
     head.appendChild(el("span", "chevron", "▾"));
     head.appendChild(kindIcon(groupKind(group, depth)));
     head.appendChild(el("h2", null, group.title));
+    // Owner/team as the heading's tooltip: context on demand, not a row of chrome.
+    if (group.product && PRODUCT_META[group.product]) {
+      const m = PRODUCT_META[group.product];
+      const facts = [m.owner && `Owner: ${m.owner}`, m.team && `Team: ${m.team}`,
+                     m.description].filter(Boolean).join(" · ");
+      if (facts) head.title = facts;
+    }
     for (const [text, warn] of group.flags) head.appendChild(chip(text, warn ? "warn" : null));
 
     /* Untriaged cross-product suggestions are lifted to the section, not filed under
@@ -2800,6 +2814,7 @@
         PRODUCT_PARENTS = data.product_parents || {};
         SYSTEMS = data.systems || {};
         PRODUCT_SYSTEMS = data.product_systems || {};
+        PRODUCT_META = data.product_meta || {};
         UNATTRIBUTED = data.unattributed || UNATTRIBUTED;
         itemsByProduct = data.items;
         PORTFOLIO = data.portfolio || PORTFOLIO;

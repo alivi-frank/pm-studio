@@ -164,6 +164,32 @@ class TrackerConfig:
         return ""
 
 
+# A product's lifecycle stage. Closed vocabulary, unknown value fatal at load - the
+# same contract as [enterprise] mode: a typo must not silently mean something the
+# operator did not write. "ga" is the steady state and what an undeclared stage means.
+PRODUCT_STAGES = ("discovery", "development", "ga", "sunset")
+
+
+@dataclass(frozen=True)
+class ProductMeta:
+    """Operator-declared facts about one product: who owns it, who builds it, where it
+    is in its life. Context, not policy - nothing authorizes or bills against these.
+
+    Lives in config rather than a store or UI on purpose: this is the same kind of
+    slowly-changing, operator-owned fact as the taxonomy itself, and a second editable
+    home for it would drift from the first. All fields optional; a product with no
+    metadata simply has no entry (see Config.product_meta)."""
+
+    description: str = ""
+    owner: str = ""
+    team: str = ""
+    stage: str = "ga"
+
+    @property
+    def is_empty(self) -> bool:
+        return not (self.description or self.owner or self.team) and self.stage == "ga"
+
+
 @dataclass(frozen=True)
 class SystemSpec:
     """One declared system: a bounded piece of technology/code, the unit a change is
@@ -221,6 +247,11 @@ class Config:
     # the reverse (which products touch a system) is derived in roadmap.products_of_system
     # rather than stored, so the two can never disagree.
     product_systems: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # Operator-declared facts per product (owner, team, stage, description), only for
+    # the products that declared any - same opt-in-lookup pattern as product_parents,
+    # so a deployment that never writes a metadata key carries an empty dict and no
+    # consumer has to know the feature exists.
+    product_meta: dict[str, ProductMeta] = field(default_factory=dict)
     # Ids declared as BOTH a product and a system: the explicit, temporary state of an id
     # being reclassified from product to system. Its product board keeps loading and
     # stays fully usable, so the changes on it can be re-homed at the operator's pace
@@ -456,8 +487,9 @@ def _parse_systems(raw: dict, config_path: Path) -> dict[str, SystemSpec]:
 
 def _parse_products(
     raw: dict, config_path: Path, systems: dict[str, SystemSpec] | None = None
-) -> tuple[dict[str, str], dict[str, str], dict[str, tuple[str, ...]]]:
-    """Reads [products] into (id -> label, child id -> parent id, id -> systems touched).
+) -> tuple[dict[str, str], dict[str, str], dict[str, tuple[str, ...]], dict[str, ProductMeta]]:
+    """Reads [products] into (id -> label, child id -> parent id, id -> systems touched,
+    id -> metadata for the products that declared any).
 
     Two spellings, both first class. A flat table of plain strings is what every
     deployment had before hierarchy existed, and those lines keep working byte for byte:
@@ -509,6 +541,20 @@ def _parse_products(
     other: `parent` says which product contains this one, `systems` says which
     technology this product is built out of. Neither implies the other - a child product
     touches whatever it touches, independently of its parent.
+
+    A product may also carry METADATA - facts about it rather than structure:
+
+        [products.checkout]
+        label = "Checkout"
+        description = "Guest and member checkout, up to payment capture"
+        owner = "jane.doe"            # product decision-maker, free text
+        team = "Payments Engineering" # who builds it, free text
+        stage = "ga"                  # discovery | development | ga | sunset
+
+    All optional and all context, not policy: the PM prompt names them and the board
+    badges a non-ga stage, but nothing authorizes, blocks, or bills against them. An
+    unknown `stage` is fatal (see PRODUCT_STAGES); the free-text fields are not
+    validated beyond being strings.
     """
     declared = raw.get("products", {})
     if not isinstance(declared, dict):
@@ -518,6 +564,7 @@ def _parse_products(
     labels: dict[str, str] = {}
     parents: dict[str, str] = {}
     touches: dict[str, tuple[str, ...]] = {}
+    meta: dict[str, ProductMeta] = {}
     for key, value in declared.items():
         product_id = str(key)
         if isinstance(value, str):
@@ -537,6 +584,21 @@ def _parse_products(
         parent = str(value.get("parent", "")).strip()
         if parent:
             parents[product_id] = parent
+        stage = str(value.get("stage", "")).strip() or "ga"
+        if stage not in PRODUCT_STAGES:
+            _fatal(
+                f"{config_path} has product {product_id!r} with stage {stage!r}; it must "
+                f"be one of {', '.join(PRODUCT_STAGES)}. A typo here would silently read "
+                "as the steady state, so it is refused instead."
+            )
+        entry_meta = ProductMeta(
+            description=str(value.get("description", "")).strip(),
+            owner=str(value.get("owner", "")).strip(),
+            team=str(value.get("team", "")).strip(),
+            stage=stage,
+        )
+        if not entry_meta.is_empty:
+            meta[product_id] = entry_meta
         if "systems" in value:
             touched = value["systems"]
             if isinstance(touched, str) or not isinstance(touched, (list, tuple)):
@@ -619,7 +681,7 @@ def _parse_products(
     # Guaranteed by the cycle check above; asserted because a product missing here is
     # invisible everywhere downstream rather than loudly broken.
     assert len(ordered) == len(labels), "product ordering dropped a declared product"
-    return ordered, parents, touches
+    return ordered, parents, touches, meta
 
 
 def _parse_mode(raw: dict, config_path: Path) -> str:
@@ -843,7 +905,7 @@ def load_config(repo_root: Path | None = None) -> Config:
     # Systems first: a product declares which of them it touches, so they have to be
     # known before [products] can validate those references.
     systems = _parse_systems(raw, config_path)
-    products, product_parents, product_systems = _parse_products(raw, config_path, systems)
+    products, product_parents, product_systems, product_meta = _parse_products(raw, config_path, systems)
     # An id in both tables is the reclassification-in-progress state, not an error: see
     # Config.transitional_ids. Ordered by the [products] table so the report reads in the
     # order the operator sees their own board.
@@ -873,6 +935,7 @@ def load_config(repo_root: Path | None = None) -> Config:
         product_parents=product_parents,
         systems=systems,
         product_systems=product_systems,
+        product_meta=product_meta,
         transitional_ids=transitional_ids,
         repo_layout=str(project.get("layout", "")).strip() or DEFAULT_REPO_LAYOUT,
         models={str(k): str(v) for k, v in models_raw.items()},

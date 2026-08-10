@@ -8,7 +8,7 @@ from datetime import date
 from pathlib import Path
 from typing import Callable, Iterable, Literal
 
-from .config import CONFIG, CONFIG_FILE_NAME, LOCAL_DIR_NAME, SystemSpec
+from .config import CONFIG, CONFIG_FILE_NAME, LOCAL_DIR_NAME, ProductMeta, SystemSpec
 
 # Imported for the one rule that must not be re-implemented per caller: what makes two
 # spellings of a ticket key the SAME ticket. The 1:1 guarantee below is only as good as
@@ -170,6 +170,17 @@ PRODUCT_SYSTEMS: dict[str, tuple[str, ...]] = CONFIG.product_systems
 # product board keeps loading and stays writable so its changes can be re-homed at the
 # operator's pace; see config.Config.transitional_ids.
 TRANSITIONAL_IDS: tuple[str, ...] = CONFIG.transitional_ids
+
+# Operator-declared facts per product (owner/team/stage/description), only for products
+# that declared any - see config.ProductMeta. Context, not policy: consumers show these,
+# nothing enforces them.
+PRODUCT_META: dict[str, ProductMeta] = CONFIG.product_meta
+
+
+def product_meta(product: str) -> ProductMeta | None:
+    """The declared facts for one product, or None - which every consumer must treat as
+    "nothing declared", not as an error, since metadata is opt-in per product."""
+    return PRODUCT_META.get(product)
 
 
 def systems_declared() -> bool:
