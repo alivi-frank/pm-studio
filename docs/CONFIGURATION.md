@@ -216,6 +216,35 @@ parent simply gains children underneath it. The same goes for deepening an exist
 tree later — pointing a new product at a product that already has a parent needs no
 migration either.
 
+## Product metadata
+
+A product entry may carry facts about the product alongside its structure:
+
+```toml
+[products.checkout]
+label = "Checkout"
+parent = "web"
+description = "Guest and member checkout flows, up to payment capture"
+owner = "jane.doe"            # product decision-maker — free text
+team = "Payments Engineering" # who builds it — free text
+stage = "ga"                  # discovery | development | ga | sunset
+```
+
+All four are optional, and all four are **context, not policy**: a pinned PM's prompt
+gains one line naming them (so it raises product decisions with the owner by name
+instead of guessing), the board badges a product whose `stage` is not `ga`, and the
+owner/team/description ride the section heading's tooltip. Nothing authorizes, blocks,
+or bills against them — costing has its own roster, and roles live in `[enterprise]`.
+
+`stage` is a closed vocabulary and an unknown value refuses to boot, the same contract
+as `[enterprise] mode`: a typo must not silently mean the steady-state default. The
+free-text fields are not validated beyond being strings.
+
+Metadata lives here rather than in a store or UI deliberately. It is the same kind of
+slowly-changing, operator-owned fact as the taxonomy itself, and it changes by config
+edit — versioned by your own repo, where accountability for "who owns this product"
+belongs.
+
 ## Systems
 
 A **system** is a bounded piece of technology — a service, an app, a module — and it is

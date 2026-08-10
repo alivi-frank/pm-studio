@@ -1,5 +1,6 @@
 import asyncio
 import json
+from dataclasses import asdict
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -46,6 +47,7 @@ from .portfolio import (
     PortfolioStore,
 )
 from .roadmap import (
+    PRODUCT_META,
     PRODUCT_PARENTS,
     PRODUCT_SYSTEMS,
     PRODUCTS,
@@ -1711,6 +1713,9 @@ def roadmap_data() -> dict:
     return {
         "products": PRODUCTS,
         "product_parents": PRODUCT_PARENTS,
+        # Only the products that declared any metadata - additive like everything else
+        # here, and empty on a deployment that never wrote a metadata key.
+        "product_meta": {p: asdict(m) for p, m in PRODUCT_META.items()},
         "systems": {s: spec.label for s, spec in SYSTEMS.items()},
         "product_systems": {p: list(s) for p, s in PRODUCT_SYSTEMS.items()},
         "unattributed": roadmap_store.unattributed_report(),

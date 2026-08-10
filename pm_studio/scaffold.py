@@ -57,6 +57,18 @@ port = 8000
 # billing = {{ label = "Billing", parent = "web" }}
 # sso = {{ label = "SSO", parent = "auth" }}
 
+# A product can also carry METADATA - who owns it, who builds it, where it is in
+# its life, and a line of description. All optional, all context rather than
+# policy: the PM's prompt names them, the board badges a non-ga stage, nothing
+# authorizes or bills against them. `stage` is one of: discovery, development,
+# ga (the default), sunset - anything else refuses to boot.
+# [products.checkout]
+# label = "Checkout"
+# description = "Guest and member checkout, up to payment capture"
+# owner = "jane.doe"
+# team = "Payments Engineering"
+# stage = "development"
+
 # The SYSTEM taxonomy: the bounded pieces of technology your changes live in - a
 # service, an app, a module. A system is not a product. A product is the
 # business-facing thing (a line of business, or an umbrella over the technology
