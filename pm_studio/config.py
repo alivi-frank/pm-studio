@@ -115,15 +115,24 @@ class CostingConfig:
 
 @dataclass(frozen=True)
 class TrackerRoute:
-    """One import route: tickets carrying this tracker-side component (Jira component /
-    ADO area path) become changes on this product, attributed to this system.
+    """One import route: matching tickets become changes on this product, attributed to
+    this system.
+
+    Two match shapes, for the two shapes a tracker project comes in. A project that
+    serves MANY products routes by `component` (Jira component / ADO area path); a
+    project that IS one product routes by `project` - every ticket in it, component or
+    not. A route may set either or both (both = this component within that project).
+    Component routes always win over project routes: the more specific claim is the
+    truer one, and a project-wide default must not swallow the exceptions declared
+    beside it.
 
     `system` may be empty - the import then lands unattributed on an in-scope product,
     which the existing unattributed report surfaces. An imported change you can see
     beats a refused one you can't."""
 
-    component: str
     product: str
+    component: str = ""
+    project: str = ""
     system: str = ""
 
 
@@ -925,21 +934,43 @@ def _parse_trackers(
         known_product_systems = product_systems or {}
         known_systems = systems or {}
         routes: list[TrackerRoute] = []
-        seen_components: set[str] = set()
+        seen_matchers: set[tuple[str, str]] = set()
         for r_index, route in enumerate(routes_raw):
             r_where = f"{where} route #{r_index + 1}"
             if not isinstance(route, dict):
-                _fatal(f"{config_path} {r_where} must be a table with `component` and `product`")
+                _fatal(
+                    f"{config_path} {r_where} must be a table with `product` and a "
+                    "`component` and/or `project` to match on"
+                )
             component = str(route.get("component", "")).strip()
+            project = str(route.get("project", "")).strip()
             product = str(route.get("product", "")).strip()
             system = str(route.get("system", "")).strip()
-            if not component or not product:
-                _fatal(f"{config_path} {r_where} needs both `component` and `product`")
-            if component.casefold() in seen_components:
-                # Two routes for one component would import each ticket wherever the
+            if not product:
+                _fatal(f"{config_path} {r_where} needs a `product`")
+            if not component and not project:
+                _fatal(
+                    f"{config_path} {r_where} matches nothing - give it a `component`, "
+                    "a `project`, or both"
+                )
+            if project and project not in project_keys:
+                # A route scoped to a project the tracker does not sync can never fire:
+                # a dead route that the config plainly declares is the silent-no-op
+                # failure _fatal exists for.
+                _fatal(
+                    f"{config_path} {r_where} is scoped to project {project!r}, which "
+                    f"this tracker does not sync (projects: "
+                    f"{', '.join(project_keys) or 'none'})"
+                )
+            matcher = (project.casefold(), component.casefold())
+            if matcher in seen_matchers:
+                # Two routes with one matcher would import each ticket wherever the
                 # loop happened to look first - an ambiguity, not a preference.
-                _fatal(f"{config_path} {r_where} repeats component {component!r}")
-            seen_components.add(component.casefold())
+                _fatal(
+                    f"{config_path} {r_where} repeats the matcher "
+                    f"(project={project or '*'!r}, component={component or '*'!r})"
+                )
+            seen_matchers.add(matcher)
             if product not in known_products:
                 _fatal(
                     f"{config_path} {r_where} routes to product {product!r}, which is "
@@ -959,7 +990,11 @@ def _parse_trackers(
                         f"{config_path} {r_where} attributes to system {system!r}, but "
                         f"product {product!r} touches: {', '.join(declared)}"
                     )
-            routes.append(TrackerRoute(component=component, product=product, system=system))
+            routes.append(
+                TrackerRoute(
+                    product=product, component=component, project=project, system=system
+                )
+            )
 
         if bool(import_types) != bool(routes):
             missing, present = (
