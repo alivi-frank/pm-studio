@@ -299,7 +299,7 @@ class JiraClient:
     A 404/410 on the first is the documented signal that an instance does not have it.
     """
 
-    JQL_FIELDS = "summary,issuetype,status,parent"
+    JQL_FIELDS = "summary,issuetype,status,parent,components"
 
     def __init__(self, config: TrackerConfig) -> None:
         self.config = config
@@ -343,6 +343,11 @@ class JiraClient:
                 str((parent_fields.get("issuetype") or {}).get("name") or "").strip() or None
             ),
             state_category=str((status.get("statusCategory") or {}).get("name") or "").strip(),
+            components=[
+                str(c.get("name") or "").strip()
+                for c in (fields.get("components") or [])
+                if str(c.get("name") or "").strip()
+            ],
         )
 
     def fetch_catalog(self) -> tuple[list[Ticket], bool]:
@@ -451,6 +456,8 @@ class AdoClient:
         # parent_type is resolved from the catalog after a sync (see _link_ado_parents)
         # rather than costing one extra call per work item.
         "System.Parent",
+        # The area path is ADO's component taxonomy - what import routes match on.
+        "System.AreaPath",
     )
 
     def __init__(self, config: TrackerConfig) -> None:
@@ -489,6 +496,13 @@ class AdoClient:
             parent_key=(str(parent).strip() if parent else None),
             # ADO has no status-category concept; its State is already the coarse value.
             state_category=str(fields.get("System.State") or "").strip(),
+            # One area path per work item, as a one-element list so import routes match
+            # Jira components and ADO areas identically.
+            components=(
+                [str(fields.get("System.AreaPath") or "").strip()]
+                if str(fields.get("System.AreaPath") or "").strip()
+                else []
+            ),
         )
 
     def fetch_catalog(self) -> tuple[list[Ticket], bool]:

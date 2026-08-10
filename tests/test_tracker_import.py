@@ -116,6 +116,48 @@ class RouteConfigTest(unittest.TestCase):
             self._write(self.BASE + 'import_types = ["Epic"]\n')
 
 
+class ComponentsReachTheCatalogTest(unittest.TestCase):
+    """Regression: the routing feature once shipped with the Ticket field added but the
+    FETCH of it silently missing - the field list and both providers' parsers had been
+    edited by unasserted string replacement that no-opped. Every synced ticket then
+    carried components=[], every route missed, and the suite stayed green because
+    nothing pinned what the providers actually request and parse."""
+
+    def test_jira_requests_and_parses_components(self) -> None:
+        from pm_studio.trackers import JiraClient
+        self.assertIn("components", JiraClient.JQL_FIELDS)
+        config = TrackerConfig(
+            id="jira", provider="jira", label="J",
+            base_url="https://acme.atlassian.net", projects=("PROJ",), token="t",
+        )
+        ticket = JiraClient(config)._ticket(
+            {"key": "PROJ-1", "fields": {
+                "summary": "S", "issuetype": {"name": "Story"},
+                "status": {"name": "To Do", "statusCategory": {"name": "To Do"}},
+                "components": [{"name": "Checkout Web"}, {"name": ""}],
+            }},
+            now=0.0,
+        )
+        self.assertEqual(ticket.components, ["Checkout Web"])
+
+    def test_ado_requests_and_parses_the_area_path(self) -> None:
+        from pm_studio.trackers import AdoClient
+        self.assertIn("System.AreaPath", AdoClient.FIELDS)
+        config = TrackerConfig(
+            id="ado", provider="ado", label="A",
+            base_url="https://dev.azure.com/acme", projects=("Portal",), token="t",
+            organization="acme",
+        )
+        ticket = AdoClient(config)._ticket(
+            {"id": 7, "fields": {
+                "System.Title": "T", "System.WorkItemType": "User Story",
+                "System.State": "Active", "System.AreaPath": "Portal\\Web",
+            }},
+            project="Portal", now=0.0,
+        )
+        self.assertEqual(ticket.components, ["Portal\\Web"])
+
+
 def _ticket(key, raw_type="Story", components=(), state_category="To Do", title=None):
     return Ticket(
         tracker_id="jira", provider="jira", key=key, type="story", raw_type=raw_type,
