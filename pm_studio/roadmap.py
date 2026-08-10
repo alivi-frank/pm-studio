@@ -680,6 +680,7 @@ class RoadmapStore:
         start_at: str | None = None,
         target_at: str | None = None,
         system: str | None = None,
+        system_required: bool = True,
     ) -> RoadmapItem:
         if product not in PRODUCTS:
             raise ValueError(f"Unknown product: {product}")
@@ -688,7 +689,11 @@ class RoadmapStore:
             raise ValueError(f"Unknown origin_product: {origin}")
         # Validated against the OWNING product, not the origin: the change is contained
         # within the system its own board's product is built on, whoever suggested it.
-        resolved_system = validate_system(product, system)
+        # `system_required=False` is for the tracker import only (see server.py): a
+        # route without a system lands its imports unattributed - into the existing
+        # unattributed report - because an imported change you can see beats a refused
+        # one you can't. Every interactive path keeps the requirement.
+        resolved_system = validate_system(product, system, required=system_required)
         start = parse_date(start_at, "start_at")
         target = parse_date(target_at, "target_at")
         _check_order(start, target)

@@ -1618,8 +1618,12 @@ def get_trackers() -> dict:
     Never includes a token: the payload is assembled field by field in
     TrackerStore.describe() precisely so that adding a config field later cannot leak one
     by accident.
+
+    `imports` is the last import pass per routing tracker: changes created, and the
+    components that had importable tickets but no route - the "reported, never guessed"
+    half of import routing. Empty for a deployment with no routes.
     """
-    return tracker_store.describe()
+    return _described_trackers()
 
 
 @app.get("/trackers/tickets")
@@ -1658,12 +1662,18 @@ def sync_trackers(request: Request, payload: dict = Body(default={})) -> dict:
         )
     if tracker_store.is_syncing:
         # Not an error: the caller wanted a fresh catalog and one is already being built.
-        return {"status": "already_syncing", **tracker_store.describe()}
+        return {"status": "already_syncing", **_described_trackers()}
     tracker_id = (payload.get("tracker_id") or "").strip() or None
     if tracker_id and CONFIG.tracker(tracker_id) is None:
         raise HTTPException(status_code=404, detail=f"Unknown tracker: {tracker_id}")
     threading.Thread(target=_run_tracker_sync, args=(tracker_id,), daemon=True).start()
-    return {"status": "syncing", **tracker_store.describe()}
+    return {"status": "syncing", **_described_trackers()}
+
+
+def _described_trackers() -> dict:
+    """tracker_store.describe() plus the last import pass - the one shape every
+    consumer of TRACKERS gets, so the report can't exist on one surface only."""
+    return _described_trackers()
 
 
 def _run_tracker_sync(tracker_id: str | None) -> None:
@@ -1675,9 +1685,91 @@ def _run_tracker_sync(tracker_id: str | None) -> None:
         # Linked tickets outside the configured projects are not in the catalog pull, so
         # fetch those individually - otherwise they would render as unresolved forever.
         tracker_store.refresh_missing(roadmap_store.linked_ticket_refs())
+        _import_routed_tickets()
     except Exception as exc:  # noqa: BLE001
         print(f"[trackers] sync failed: {exc}")
-    _on_roadmap_update({"type": "trackers_synced", "trackers": tracker_store.describe()})
+    _on_roadmap_update({"type": "trackers_synced", "trackers": _described_trackers()})
+
+
+# Per-tracker outcome of the last import pass, additive on GET /trackers: how many
+# changes the last cycle created, and which components had importable tickets but no
+# route. The unrouted side is the report half of "reported, never guessed" - no
+# catch-all product is invented for a component nobody has routed.
+_import_report: dict[str, dict] = {}
+
+
+def _imported_status(ticket) -> str:
+    """The coarse state a fresh import starts in, keyed on the ticket's state category
+    (stable across workflow-specific names) rather than its raw state."""
+    category = (ticket.state_category or ticket.state or "").casefold()
+    if any(word in category for word in ("done", "closed", "resolved", "completed")):
+        return "done"
+    if any(word in category for word in ("progress", "active", "doing")):
+        return "in_progress"
+    return "pending"
+
+
+def _import_routed_tickets() -> None:
+    """The tail of every sync: turn routed, unlinked tickets into linked changes.
+
+    Idempotent by construction - the 1:1 change⇄ticket link is the dedupe, checked
+    against linked_ticket_refs up front and enforced by link_ticket's own guard under
+    the store lock, so re-syncs and restarts never double-import. One direction only:
+    nothing here ever writes back to the tracker, and the change's bucket/status are
+    the PM's to manage from the moment it lands.
+    """
+    for config in CONFIG.trackers:
+        if not config.imports:
+            continue
+        linked = {
+            normalize_key(tid, key) for tid, key in roadmap_store.linked_ticket_refs()
+        }
+        types = {t.casefold() for t in config.import_types}
+        routes = {r.component.casefold(): r for r in config.routes}
+        imported = 0
+        unrouted: dict[str, int] = {}
+        for ticket in tracker_store.tickets_of(config.id):
+            if ticket.raw_type.casefold() not in types:
+                continue
+            route = next(
+                (routes[c.casefold()] for c in ticket.components if c.casefold() in routes),
+                None,
+            )
+            if route is None:
+                for c in ticket.components or ["(no component)"]:
+                    unrouted[c] = unrouted.get(c, 0) + 1
+                continue
+            if normalize_key(config.id, ticket.key) in linked:
+                continue
+            try:
+                item = roadmap_store.create(
+                    product=route.product,
+                    title=ticket.title or ticket.key,
+                    description=f"Imported from {config.label} {ticket.key} by component "
+                    f"route {route.component!r}.",
+                    bucket="later",
+                    status=_imported_status(ticket),
+                    system=route.system or None,
+                    system_required=False,
+                )
+                roadmap_store.link_ticket(item.id, config.id, ticket.key)
+            except TicketAlreadyLinked:
+                # Lost the race to a concurrent manual link - theirs wins; remove the
+                # change this pass just created so the ticket keeps exactly one.
+                roadmap_store.delete(item.id)
+                continue
+            except ValueError as exc:
+                print(f"[trackers] import of {ticket.key} skipped: {exc}")
+                continue
+            imported += 1
+            _audit(None, "roadmap.item_imported", f"{route.product}/{item.id}", ticket.key)
+        _import_report[config.id] = {
+            "imported": imported,
+            "unrouted": {c: n for c, n in sorted(unrouted.items(), key=lambda kv: -kv[1])},
+            "unrouted_total": sum(unrouted.values()),
+        }
+        if imported:
+            print(f"[trackers] {config.id}: imported {imported} change(s)")
 
 
 def _tracker_sync_loop() -> None:
@@ -1730,7 +1822,7 @@ def roadmap_data() -> dict:
         },
         # So the board can render the badge palette and the picker without a second
         # round trip. Empty/`configured: false` when no [[trackers]] are declared.
-        "trackers": tracker_store.describe(),
+        "trackers": _described_trackers(),
     }
 
 
@@ -1753,7 +1845,7 @@ def roadmap_by_initiative() -> dict:
         "product_parents": PRODUCT_PARENTS,
         "systems": {s: spec.label for s, spec in SYSTEMS.items()},
         "groups": portfolio_store.group_changes_by_initiative(changes),
-        "trackers": tracker_store.describe(),
+        "trackers": _described_trackers(),
     }
 
 
