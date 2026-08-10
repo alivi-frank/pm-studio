@@ -112,6 +112,22 @@
   }
   .counts { margin-top: 10px; font-size: 0.82em; color: var(--ink-muted); }
   .counts strong { color: var(--ink-primary); font-weight: 600; }
+  .counts .show-changes { color: var(--accent); text-decoration: none; }
+  .change-list { display: none; margin-top: 8px; }
+  .change-list.open { display: grid; gap: 4px; }
+  .change-row {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    font-size: 0.8em;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--page);
+  }
+  .change-row .status { color: var(--ink-muted); font-size: 0.9em; flex: none; min-width: 70px; }
+  .change-row .title { color: var(--ink-primary); }
+  .change-row .on { color: var(--ink-muted); margin-left: auto; flex: none; }
   .flag {
     display: inline-block;
     padding: 1px 7px;
@@ -462,6 +478,39 @@
       counts.appendChild(el("strong", null, String(system.open_changes)));
       counts.appendChild(document.createTextNode(` open of ${system.changes} change${system.changes === 1 ? "" : "s"}`));
       card.appendChild(counts);
+
+      // The retrieval path after a reclassification: the count expands into the actual
+      // changes, fetched per system across every board (GET /systems/{id}/changes), each
+      // naming the board it lives on - so "where did X's work go?" is answered here
+      // rather than by remembering which products it was re-homed onto.
+      if (system.changes > 0) {
+        const toggle = el("a", "show-changes", "show");
+        toggle.href = "#";
+        counts.appendChild(document.createTextNode(" — "));
+        counts.appendChild(toggle);
+        const listHost = el("div", "change-list");
+        card.appendChild(listHost);
+        let loaded = false;
+        toggle.addEventListener("click", (event) => {
+          event.preventDefault();
+          const open = listHost.classList.toggle("open");
+          toggle.textContent = open ? "hide" : "show";
+          if (loaded || !open) return;
+          loaded = true;
+          api(`/systems/${encodeURIComponent(system.id)}/changes`)
+            .then((changes) => {
+              listHost.textContent = "";
+              changes.forEach((c) => {
+                const row = el("div", "change-row");
+                row.appendChild(el("span", "status", c.status));
+                row.appendChild(el("span", "title", c.title));
+                row.appendChild(el("span", "on", `on ${data.products[c.product] || c.product}`));
+                listHost.appendChild(row);
+              });
+            })
+            .catch((err) => { loaded = false; showError(err.message); });
+        });
+      }
 
       host.appendChild(card);
     });

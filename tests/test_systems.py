@@ -394,6 +394,17 @@ class AttributionTest(unittest.TestCase):
         self.assertEqual(stored.system, "claims")
         self.assertEqual(stored.bucket, "later")
 
+    def test_list_by_system_slices_across_boards(self) -> None:
+        """The retrieval half of a reclassification: one system's work, wherever the
+        changes now live. Both boards contribute; each record still names its board."""
+        a = self.store.create("checkout", "On checkout", system="claims")
+        b = self.store.create("portal", "On portal", system="claims")
+        self.store.create("checkout", "Other system", system="rides")
+        ids = [c["id"] for c in self.store.list_by_system("claims")]
+        self.assertEqual(sorted(ids), sorted([a.id, b.id]))
+        products = {c["product"] for c in self.store.list_by_system("claims")}
+        self.assertEqual(products, {"checkout", "portal"})
+
     def test_origin_product_does_not_decide_the_constraint(self) -> None:
         """A suggestion is validated against the OWNING board's product: the change is
         contained within the system that board's product is built on, whoever raised it."""
