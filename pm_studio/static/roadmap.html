@@ -158,8 +158,11 @@
   /* The indent itself is the parent body's rail, which the sub-section sits inside
      along with the parent's own project rows - a child product IS a sibling of those
      rows, and the heading, the glyph and the fold are what say it is a board and they
-     are not. What is left here is only the spacing between them. */
-  .subgroups { display: flex; flex-direction: column; gap: 14px; margin: 16px 0 0; }
+     are not. What is left here is only the spacing between them. Sub-products sit
+     ABOVE the parent's own rows, so the margin that separates the two lives on the
+     bottom - and only when rows actually follow. */
+  .subgroups { display: flex; flex-direction: column; gap: 14px; margin: 2px 0 0; }
+  .subgroups:not(:last-child) { margin-bottom: 16px; }
   section.group.sub { margin-bottom: 0; }
   section.group.sub > .group-head h2 { font-size: 0.9em; font-weight: 620; }
   /* Dashed, so the depth is legible at a glance even when a parent's own rows are
@@ -275,6 +278,23 @@
   }
   .project.open .project-body { display: block; }
   .project-empty { font-size: 0.78em; color: var(--ink-muted); padding: 2px 0; }
+  /* The door to a section's closed projects. A quiet text row rather than a project-
+     shaped card: what it reveals is history, and it must not read as one more live row
+     in the plan. Used by both views - the timeline gives it the gutter's own padding. */
+  .closed-toggle {
+    align-self: flex-start;
+    border: 0;
+    background: none;
+    font: inherit;
+    font-size: 0.75em;
+    color: var(--ink-muted);
+    cursor: pointer;
+    padding: 3px 4px;
+    border-radius: 5px;
+    white-space: nowrap;
+  }
+  .closed-toggle:hover { color: var(--ink-secondary); background: var(--hover); }
+  .closed-toggle .twisty { display: inline-block; width: 12px; }
 
   /* Shipped / in progress / pending, as a share of the project. Deliberately NOT the
      only signal: the counts beside it say the same thing in words, so the row reads
@@ -1254,13 +1274,24 @@
      The two structural levels persist; an open card is a transient reading state and
      deliberately does not. A project starts CLOSED and there is no stored default that
      can change that, which is what makes the section read as a plan rather than as a
-     backlog the first time you land on it. */
-  const collapsed = new Set(JSON.parse(localStorage.getItem("roadmapCollapsedGroups") || "[]"));
+     backlog the first time you land on it. Sections work the same way: what persists
+     is the set the user OPENED, so a board with thirty products lands as thirty
+     headings and their tallies, not thirty open boards - the same first-visit altitude
+     the project rows already keep. (The old roadmapCollapsedGroups key stored the
+     inverse and is simply ignored - under the new default everything it named as
+     collapsed is collapsed anyway.) */
+  const expanded = new Set(JSON.parse(localStorage.getItem("roadmapExpandedGroups") || "[]"));
   const openProjects = new Set(JSON.parse(localStorage.getItem("roadmapOpenProjects") || "[]"));
   const openCards = new Set();
+  /* Which sections are currently showing their closed projects. Transient like the
+     open cards: revealing history is a reading act, and next visit it should be folded
+     away again. */
+  const revealClosed = new Set();
 
-  function persistCollapsed() {
-    localStorage.setItem("roadmapCollapsedGroups", JSON.stringify([...collapsed]));
+  const isCollapsed = (key) => !expanded.has(key);
+
+  function persistExpanded() {
+    localStorage.setItem("roadmapExpandedGroups", JSON.stringify([...expanded]));
   }
 
   function persistOpenProjects() {
@@ -1346,7 +1377,7 @@
     // Nested sections included: a sub-product section is one of the things "all" means,
     // and leaving them out would make "expand all" open a parent onto folded children.
     const keys = groupKeys(currentGroups());
-    const allCollapsed = keys.length > 0 && keys.every((k) => collapsed.has(k));
+    const allCollapsed = keys.length > 0 && keys.every((k) => isCollapsed(k));
     const button = el("button", "pmnav-action", allCollapsed ? "Expand all" : "Collapse all");
     button.type = "button";
     button.title = allCollapsed
@@ -1356,9 +1387,9 @@
     button.addEventListener("click", () => {
       const hadFocus = document.activeElement === button;
       for (const key of keys) {
-        if (allCollapsed) collapsed.delete(key); else collapsed.add(key);
+        if (allCollapsed) expanded.add(key); else expanded.delete(key);
       }
-      persistCollapsed();
+      persistExpanded();
       renderAll();
       // renderAll() rebuilds the slot, so the button that was just clicked no longer
       // exists - without this, a keyboard user is dropped back to the top of the page
@@ -1910,7 +1941,7 @@
     const out = [];
     for (const group of groups) {
       out.push({ group, depth });
-      if (!collapsed.has(group.key)) out.push(...flatGroups(group.subgroups || [], depth + 1));
+      if (!isCollapsed(group.key)) out.push(...flatGroups(group.subgroups || [], depth + 1));
     }
     return out;
   }
@@ -2093,6 +2124,17 @@
     return rows;
   }
 
+  /* A closed project with nothing left open is history: true about the section but not
+     part of its plan, so both views fold it away behind a "show closed" toggle. A
+     closed project still holding open changes is NOT history - work stranded in a
+     project somebody closed is exactly the kind of wrong the board exists to show, so
+     it stays on the board wearing its "closed" chip. */
+  function isHistoryRow(row) {
+    return !!row.project
+      && row.project.status === "closed"
+      && !row.changes.some((c) => c.status !== "done");
+  }
+
   // ---- the now / next / later view ----
 
   /* The lanes now belong to ONE project rather than to a whole section, so `row` is a
@@ -2210,17 +2252,18 @@
     return node;
   }
 
-  /* One section, with its sub-product sections drawn inside its own body. The parent's
-     OWN project rows come first and the children follow, so a parent reads as "here is
-     what I run directly, and here is each sub-product below it" - one place to look for
-     the family, at whatever depth the taxonomy declared. */
+  /* One section, with its sub-product sections drawn inside its own body. The
+     sub-products come FIRST and the parent's own project rows follow, so a parent
+     reads as "here is the family below me, and here is what I run directly" - the
+     children are boards in their own right and the parent's loose rows are the
+     residue, not the headline. */
   function groupSection(group, depth) {
     const section = el("section", "group" + (depth ? " sub" : ""));
-    if (collapsed.has(group.key)) section.classList.add("collapsed");
+    if (isCollapsed(group.key)) section.classList.add("collapsed");
 
     const head = el("button", "group-head");
     head.type = "button";
-    head.setAttribute("aria-expanded", String(!collapsed.has(group.key)));
+    head.setAttribute("aria-expanded", String(!isCollapsed(group.key)));
     head.appendChild(el("span", "chevron", "▾"));
     head.appendChild(kindIcon(groupKind(group, depth)));
     head.appendChild(el("h2", null, group.title));
@@ -2241,14 +2284,21 @@
     const suggested = new Set(suggestions.map((i) => i.id));
     const planned = group.changes.filter((i) => !suggested.has(i.id));
     const rows = projectRows(group, planned);
+    // The plan and the history, split once and used everywhere below: the current rows
+    // are what the section draws, the closed ones wait behind the toggle.
+    const currentRows = rows.filter((r) => !isHistoryRow(r));
+    const closedRows = rows.filter(isHistoryRow);
 
     const open = planned.filter((i) => i.status !== "done");
     const live = open.filter((i) => i.status === "in_progress").length;
     const subgroups = group.subgroups || [];
     const tally = el("div", "tally");
     // Projects first: the section's headline is now how many bets it is running, and
-    // the change counts are the size of them.
-    tally.appendChild(el("span", null, `${rows.length} project${rows.length === 1 ? "" : "s"}`));
+    // the change counts are the size of them. The closed count rides along because a
+    // folded heading is all most sections ever show - it is the summary, so it has to
+    // say the history exists even though the rows below hide it.
+    tally.appendChild(el("span", null, `${currentRows.length} project${currentRows.length === 1 ? "" : "s"}`));
+    if (closedRows.length) tally.appendChild(el("span", null, `${closedRows.length} closed`));
     tally.appendChild(el("span", null, `${open.length} open`));
     if (live) tally.appendChild(el("span", "live", `${live} in progress`));
     if (suggestions.length) tally.appendChild(el("span", null, `${suggestions.length} to triage`));
@@ -2268,9 +2318,9 @@
 
     head.addEventListener("click", () => {
       const nowCollapsed = section.classList.toggle("collapsed");
-      if (nowCollapsed) collapsed.add(group.key); else collapsed.delete(group.key);
+      if (nowCollapsed) expanded.delete(group.key); else expanded.add(group.key);
       head.setAttribute("aria-expanded", String(!nowCollapsed));
-      persistCollapsed();
+      persistExpanded();
       // The nav's collapse-all label is a function of every section's state.
       const slot = document.getElementById("pm-nav-slot");
       if (slot) mountControls(slot);
@@ -2283,19 +2333,34 @@
       for (const item of suggestions) triage.appendChild(suggestionCard(item));
       body.appendChild(triage);
     }
+    if (subgroups.length) {
+      const nested = el("div", "subgroups");
+      for (const sub of subgroups) nested.appendChild(groupSection(sub, depth + 1));
+      body.appendChild(nested);
+    }
     if (rows.length) {
       const list = el("div", "projects");
-      for (const row of rows) list.appendChild(projectNode(row));
+      for (const row of currentRows) list.appendChild(projectNode(row));
+      if (closedRows.length) {
+        const shown = revealClosed.has(group.key);
+        const toggle = el("button", "closed-toggle");
+        toggle.type = "button";
+        toggle.setAttribute("aria-expanded", String(shown));
+        toggle.appendChild(el("span", "twisty", shown ? "▾" : "▸"));
+        toggle.appendChild(document.createTextNode(
+          `${shown ? "Hide" : "Show"} ${closedRows.length} closed project${closedRows.length === 1 ? "" : "s"}`));
+        toggle.addEventListener("click", () => {
+          if (shown) revealClosed.delete(group.key); else revealClosed.add(group.key);
+          renderAll();
+        });
+        list.appendChild(toggle);
+        if (shown) for (const row of closedRows) list.appendChild(projectNode(row));
+      }
       body.appendChild(list);
     } else if (!suggestions.length && !subgroups.length) {
       // Said only when there is genuinely nothing here. A parent whose work all lives in
       // its sub-products is not empty, and the sections below say so themselves.
       body.appendChild(el("div", "project-empty", "No projects or changes here yet."));
-    }
-    if (subgroups.length) {
-      const nested = el("div", "subgroups");
-      for (const sub of subgroups) nested.appendChild(groupSection(sub, depth + 1));
-      body.appendChild(nested);
     }
     section.appendChild(body);
     return section;
@@ -2602,7 +2667,7 @@
     // Flat with depth, not nested: this view's whole point is one shared axis, so a
     // sub-product is an indented heading in the same column of rows rather than a box.
     for (const { group, depth } of flatGroups()) {
-      const isFolded = collapsed.has(group.key);
+      const isFolded = isCollapsed(group.key);
       const header = el("button", "gantt-group" + (isFolded ? " collapsed" : "") + (depth ? " sub" : ""));
       if (depth) {
         // One step per level, set here rather than in CSS: the gutter is a fixed width the
@@ -2623,10 +2688,13 @@
       // Same flags the lane view puts on a section head - "no initiative" or "closed"
       // must not be information you can only get by switching views.
       for (const [text, warn] of group.flags) tally.appendChild(chip(text, warn ? "warn" : null));
-      const rows = projectRows(group, group.changes);
+      const allRows = projectRows(group, group.changes);
+      const rows = allRows.filter((r) => !isHistoryRow(r));
+      const closedRows = allRows.filter(isHistoryRow);
       const open = group.changes.filter((i) => i.status !== "done").length;
       tally.appendChild(el("span", null,
         `${rows.length} project${rows.length === 1 ? "" : "s"} · ` +
+        (closedRows.length ? `${closedRows.length} closed · ` : "") +
         `${group.changes.length} change${group.changes.length === 1 ? "" : "s"} · ${open} open`));
       // Folded, a parent's own heading is all that is left of its family, so it has to
       // say the sub-products exist - open, they say it themselves as their own headings.
@@ -2641,22 +2709,27 @@
       // A full re-render, unlike the project twisty: folding a section removes a
       // variable number of rows, and rebuilding is simpler than tracking them all.
       header.addEventListener("click", () => {
-        if (isFolded) collapsed.delete(group.key); else collapsed.add(group.key);
-        persistCollapsed();
+        if (isFolded) expanded.add(group.key); else expanded.delete(group.key);
+        persistExpanded();
         renderAll();
       });
       body.appendChild(header);
 
       if (isFolded) continue;
 
-      if (!rows.length) {
+      if (!rows.length && !closedRows.length) {
         // A parent that runs nothing directly is not empty - its sub-products' headings
         // come next, so saying "no changes" under it would contradict them.
         if (!subgroups.length) body.appendChild(el("div", "gantt-empty", "No changes."));
         continue;
       }
 
-      for (const projectRow of rows) {
+      // History last, and only when asked for - the same fold the lane view offers,
+      // sharing its revealClosed set so switching views doesn't re-hide what you opened.
+      const showClosed = revealClosed.has(group.key);
+      const drawnRows = showClosed ? rows.concat(closedRows) : rows;
+
+      for (const projectRow of drawnRows) {
         // Everything on one axis, but out-of-range history would add rows that draw
         // nothing - so it is counted instead of listed.
         const drawn = [];
@@ -2744,6 +2817,22 @@
           label.setAttribute("aria-expanded", String(nowOpen));
           persistOpenProjects();
         });
+      }
+
+      if (closedRows.length) {
+        const toggle = el("button", "closed-toggle");
+        toggle.type = "button";
+        toggle.setAttribute("aria-expanded", String(showClosed));
+        toggle.appendChild(el("span", "twisty", showClosed ? "▾" : "▸"));
+        toggle.appendChild(document.createTextNode(
+          `${showClosed ? "Hide" : "Show"} ${closedRows.length} closed project${closedRows.length === 1 ? "" : "s"}`));
+        // A full re-render like the section fold above it: the closed rows are a
+        // variable number of gantt rows, and rebuilding is simpler than tracking them.
+        toggle.addEventListener("click", () => {
+          if (showClosed) revealClosed.delete(group.key); else revealClosed.add(group.key);
+          renderAll();
+        });
+        body.appendChild(toggle);
       }
     }
 
