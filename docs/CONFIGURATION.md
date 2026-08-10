@@ -160,6 +160,43 @@ projects = ["Platform"]
 token_env = "PM_STUDIO_ADO_PAT"  # an ADO personal access token
 ```
 
+## Tracker import routing
+
+A tracker can go beyond syncing a catalog: it can **create changes** from its own
+tickets, routed onto products by component.
+
+```toml
+[[trackers]]
+provider = "jira"
+# ... connection keys ...
+import_types = ["Epic", "Story", "Bug"]   # which ticket types become changes
+
+[[trackers.routes]]
+component = "Checkout Web"   # Jira component / ADO area path
+product = "checkout"         # must be a declared product — fatal if not
+system = "claims"            # optional; must be one that product touches — fatal if not
+
+[[trackers.routes]]
+component = "Search"
+product = "search"
+```
+
+`import_types` and `routes` only work together — declaring exactly one refuses to boot,
+because it would be a config that looks like it imports and silently doesn't. With
+neither, tracker behavior is exactly what it always was.
+
+After each sync, every catalog ticket whose type is in `import_types` and whose
+component matches a route becomes a change on the routed product — `later` bucket,
+status mapped from the ticket's state category, linked to its ticket in the same call.
+The 1:1 link is the dedupe: re-syncs and restarts never double-import, and a manually
+linked ticket is never re-imported. Nothing is ever written back to the tracker.
+
+A ticket with **no matching route is reported, never guessed**: the board's tracker
+strip counts unrouted importable tickets and names their components (the fix is a
+config line, not an investigation). No catch-all product is invented. A route without
+a `system` imports unattributed — into the existing unattributed report — because an
+imported change you can see beats a refused one you can't.
+
 ## Hierarchical products
 
 A product declared with a `parent` is a **sub-product** of it:

@@ -172,6 +172,11 @@ class Ticket:
     # the many workflow-specific names in `state` and is therefore what a bucket/status
     # mapping should key on.
     state_category: str = ""
+    # The tracker-side taxonomy this ticket carries: Jira components (several), or the
+    # ADO area path (one). What import routes match on (see TrackerConfig.routes). A
+    # list, not a tuple, so to_dict/from_dict round-trip through JSON unchanged; empty
+    # and additive-by-default so a cache written before this existed still loads.
+    components: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -180,6 +185,9 @@ class Ticket:
     def from_dict(cls, data: dict) -> "Ticket":
         known = {f: data.get(f) for f in cls.__dataclass_fields__}
         known["synced_at"] = float(known.get("synced_at") or 0.0)
+        # A catalog cached before components existed stores nothing for it; None must
+        # come back as "no components", not as a None that breaks every iteration.
+        known["components"] = list(known.get("components") or [])
         return cls(**known)  # type: ignore[arg-type]
 
 
@@ -720,6 +728,12 @@ class TrackerStore:
             return None
         with self._lock:
             return self._state.tickets.get(_catalog_key(tracker_id, key))
+
+    def tickets_of(self, tracker_id: str) -> list[Ticket]:
+        """One tracker's whole catalog, as Ticket objects - what the import pass walks.
+        A snapshot under the lock, so a concurrent sync can't mutate mid-iteration."""
+        with self._lock:
+            return [t for t in self._state.tickets.values() if t.tracker_id == tracker_id]
 
     def search(self, query: str = "", tracker_id: str = "", limit: int = 50) -> list[dict]:
         """Candidate tickets for the link picker: substring match on key or title."""

@@ -346,6 +346,17 @@ cost figure quietly mean something other than what it says:
 
 ## 3c. `trackers.py` — external issue trackers (Jira / Azure DevOps)
 
+**Import routing** (optional, per tracker): `import_types` + `[[trackers.routes]]`
+(component → product, optional system) turn catalog tickets into linked changes at the
+tail of every sync (`server._import_routed_tickets`). Routes are validated fatally at
+load against the product/system taxonomies. Idempotent via the 1:1 link guard —
+`linked_ticket_refs` up front, `TicketAlreadyLinked` under the store lock as the race
+backstop. Unrouted importable tickets are counted per component and reported on
+`GET /trackers` and the board's tracker strip, never guessed onto a catch-all. Tickets
+carry `components` (Jira components / ADO area path) in the catalog for this; a cache
+written before that field existed loads as "no components".
+
+
 Owns everything *about* a ticket; `roadmap.py` owns only the link to it.
 
 **The 1:1 link.** A `RoadmapItem` carries `tracker_id` + `ticket_key`, both defaulting to

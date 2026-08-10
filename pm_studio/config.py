@@ -114,6 +114,20 @@ class CostingConfig:
 
 
 @dataclass(frozen=True)
+class TrackerRoute:
+    """One import route: tickets carrying this tracker-side component (Jira component /
+    ADO area path) become changes on this product, attributed to this system.
+
+    `system` may be empty - the import then lands unattributed on an in-scope product,
+    which the existing unattributed report surfaces. An imported change you can see
+    beats a refused one you can't."""
+
+    component: str
+    product: str
+    system: str = ""
+
+
+@dataclass(frozen=True)
 class TrackerConfig:
     """One external issue tracker PM Studio pulls ticket metadata from.
 
@@ -145,6 +159,16 @@ class TrackerConfig:
     # How often the background sync re-pulls this tracker. Per tracker because a busy
     # Jira and a quiet ADO project don't deserve the same polling rate.
     sync_interval_minutes: float = DEFAULT_SYNC_INTERVAL_MINUTES
+    # IMPORT: which ticket types become changes, and how their components route onto
+    # products. Both empty = the historical behavior byte for byte (catalog sync and
+    # manual linking only). Declaring exactly one of the two is fatal at load - it
+    # would be a config that looks like it imports and silently doesn't.
+    import_types: tuple[str, ...] = ()
+    routes: tuple[TrackerRoute, ...] = ()
+
+    @property
+    def imports(self) -> bool:
+        return bool(self.import_types and self.routes)
 
     @property
     def is_usable(self) -> bool:
@@ -756,13 +780,36 @@ def _parse_smtp(raw: dict) -> SmtpConfig | None:
 TRACKER_PROVIDERS = ("jira", "ado")
 
 
-def _parse_trackers(raw: dict, config_path: Path) -> tuple[TrackerConfig, ...]:
+def _parse_trackers(
+    raw: dict,
+    config_path: Path,
+    products: dict[str, str] | None = None,
+    product_systems: dict[str, tuple[str, ...]] | None = None,
+    systems: dict[str, SystemSpec] | None = None,
+) -> tuple[TrackerConfig, ...]:
     """Reads the optional `[[trackers]]` array-of-tables.
 
     Malformed entries are dropped with a warning rather than being fatal: an unreachable
     tracker must never stop the studio from booting, because the roadmap board is useful
     without it. A bad *provider*, though, is loud - it is a typo that would otherwise look
     like "sync silently does nothing".
+
+    IMPORT ROUTES are the exception to drop-with-warning: they are validated fatally,
+    against the product and system taxonomies passed in. A route that quietly skipped a
+    misspelled product would import that component's tickets nowhere while the config
+    plainly says otherwise - the exact failure mode _fatal exists for:
+
+        [[trackers]]
+        # ... connection keys ...
+        import_types = ["Epic", "Story", "Bug"]   # which ticket types become changes
+
+        [[trackers.routes]]
+        component = "Checkout Web"   # Jira component / ADO area path
+        product = "checkout"         # must be a declared product
+        system = "claims"            # optional; must be one that product touches
+
+    `import_types` and `routes` only work together, so declaring exactly one of them
+    is fatal too, rather than a config that looks like it imports and silently doesn't.
     """
     entries = raw.get("trackers")
     if not isinstance(entries, list):
@@ -857,6 +904,73 @@ def _parse_trackers(raw: dict, config_path: Path) -> tuple[TrackerConfig, ...]:
         # and hammering someone's tracker is worse than quietly slowing down.
         interval = max(MIN_SYNC_INTERVAL_MINUTES, interval)
 
+        import_types_raw = entry.get("import_types", [])
+        if isinstance(import_types_raw, str) or not isinstance(import_types_raw, (list, tuple)):
+            _fatal(
+                f"{config_path} {where} has `import_types` as a "
+                f"{type(import_types_raw).__name__}; it must be an array of ticket "
+                'types, e.g. import_types = ["Epic", "Story"]'
+            )
+        import_types = tuple(
+            str(t).strip() for t in import_types_raw if str(t).strip()
+        )
+
+        routes_raw = entry.get("routes", [])
+        if not isinstance(routes_raw, list):
+            _fatal(
+                f"{config_path} {where} has `routes` as a {type(routes_raw).__name__}; "
+                "declare each route as its own [[trackers.routes]] table"
+            )
+        known_products = products or {}
+        known_product_systems = product_systems or {}
+        known_systems = systems or {}
+        routes: list[TrackerRoute] = []
+        seen_components: set[str] = set()
+        for r_index, route in enumerate(routes_raw):
+            r_where = f"{where} route #{r_index + 1}"
+            if not isinstance(route, dict):
+                _fatal(f"{config_path} {r_where} must be a table with `component` and `product`")
+            component = str(route.get("component", "")).strip()
+            product = str(route.get("product", "")).strip()
+            system = str(route.get("system", "")).strip()
+            if not component or not product:
+                _fatal(f"{config_path} {r_where} needs both `component` and `product`")
+            if component.casefold() in seen_components:
+                # Two routes for one component would import each ticket wherever the
+                # loop happened to look first - an ambiguity, not a preference.
+                _fatal(f"{config_path} {r_where} repeats component {component!r}")
+            seen_components.add(component.casefold())
+            if product not in known_products:
+                _fatal(
+                    f"{config_path} {r_where} routes to product {product!r}, which is "
+                    f"not declared (declared: {', '.join(known_products) or 'none'})"
+                )
+            if system:
+                # The same two rules validate_system enforces on create, applied at load
+                # so a bad route fails at boot, not at 3am mid-sync.
+                if system not in known_systems:
+                    _fatal(
+                        f"{config_path} {r_where} attributes to system {system!r}, which "
+                        f"is not declared (declared: {', '.join(known_systems) or 'none'})"
+                    )
+                declared = known_product_systems.get(product, ())
+                if declared and system not in declared:
+                    _fatal(
+                        f"{config_path} {r_where} attributes to system {system!r}, but "
+                        f"product {product!r} touches: {', '.join(declared)}"
+                    )
+            routes.append(TrackerRoute(component=component, product=product, system=system))
+
+        if bool(import_types) != bool(routes):
+            missing, present = (
+                ("routes", "import_types") if import_types else ("import_types", "routes")
+            )
+            _fatal(
+                f"{config_path} {where} declares `{present}` without `{missing}`; the "
+                "two only import together, so this config looks like it imports and "
+                "silently would not"
+            )
+
         trackers.append(
             TrackerConfig(
                 id=tracker_id,
@@ -869,6 +983,8 @@ def _parse_trackers(raw: dict, config_path: Path) -> tuple[TrackerConfig, ...]:
                 token=token,
                 organization=organization,
                 sync_interval_minutes=interval,
+                import_types=import_types,
+                routes=tuple(routes),
             )
         )
     return tuple(trackers)
@@ -946,7 +1062,7 @@ def load_config(repo_root: Path | None = None) -> Config:
         mode=_parse_mode(raw, config_path),
         smtp=_parse_smtp(raw),
         costing=_parse_costing(raw),
-        trackers=_parse_trackers(raw, config_path),
+        trackers=_parse_trackers(raw, config_path, products, product_systems, systems),
     )
 
 

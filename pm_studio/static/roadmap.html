@@ -2862,6 +2862,22 @@
       }
       chipEl.appendChild(el("span", null, text));
       bar.appendChild(chipEl);
+
+      // The last import pass, for a tracker that routes: what landed, and which
+      // components had importable tickets nobody has routed yet - named, so the fix
+      // is a config line rather than an investigation. Silent when routing is off.
+      const imp = (TRACKERS.imports || {})[tracker.id];
+      if (imp) {
+        if (imp.imported) {
+          bar.appendChild(el("span", "tracker-chip ok", `↳ imported ${imp.imported} change${imp.imported === 1 ? "" : "s"}`));
+        }
+        if (imp.unrouted_total) {
+          const c = el("span", "tracker-chip never",
+            `↳ ${imp.unrouted_total} importable ticket${imp.unrouted_total === 1 ? "" : "s"} with no route`);
+          c.title = Object.entries(imp.unrouted).map(([k, n]) => `${k}: ${n}`).join("\n");
+          bar.appendChild(c);
+        }
+      }
     }
 
     const button = el("button", null, TRACKERS.syncing ? "Syncing…" : "Sync now");
