@@ -1363,6 +1363,21 @@ def systems_data() -> dict:
     }
 
 
+@app.get("/systems/{system_id}/changes")
+def list_system_changes(system_id: str) -> list[dict]:
+    """Every change attributed to one system, across all product boards.
+
+    The retrieval half of a reclassification: after a drained product's changes are
+    re-homed onto real products, "all the work done on X" stops being one board and
+    becomes this cross-board slice - each record still carries the board it lives on
+    (`product`) and where it came from (`origin_product`), so provenance survives the
+    move. Same read-visibility as the boards themselves.
+    """
+    if system_id not in SYSTEMS:
+        raise HTTPException(status_code=404, detail=f"Unknown system: {system_id}")
+    return roadmap_store.list_by_system(system_id)
+
+
 def _session_scope_report() -> list[dict]:
     """Sessions whose scope doesn't hold together, one entry each.
 
