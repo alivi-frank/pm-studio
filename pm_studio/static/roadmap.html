@@ -198,6 +198,30 @@
   .kind-project { --kind-ink: var(--kind-project); width: 12.5px; height: 12.5px; }
   .kind-loose { --kind-ink: var(--ink-muted); width: 12.5px; height: 12.5px; }
 
+  /* ---- the activity glyphs ---------------------------------------------------------
+     One per section heading, right after the title: is this board being worked, done
+     with, or dormant? Shape first here too - a play triangle, a check, a pause - with
+     the status hues as the scan aid. Smaller than the kind glyph on purpose: it
+     annotates the row, it doesn't identify it. */
+  .state {
+    flex: 0 0 auto;
+    display: inline-flex;
+    width: 13px;
+    height: 13px;
+  }
+  .state svg { width: 100%; height: 100%; display: block; }
+  .state.active { color: var(--status-in-progress); }
+  .state.completed { color: var(--status-done); }
+  .state.inactive { color: var(--ink-muted); }
+
+  /* What the Show filter is currently hiding - one line at the foot of the board, so
+     "where did my product go" always has an answer on the page itself. */
+  .filter-note {
+    font-size: 0.78em;
+    color: var(--ink-muted);
+    padding: 8px 4px 0;
+  }
+
   /* ---- the project row: what a section shows FIRST -------------------------------
      A section used to open straight onto every one of its changes, which is the right
      altitude for doing the work and the wrong one for reading the plan: twelve titles
@@ -1288,6 +1312,21 @@
      away again. */
   const revealClosed = new Set();
 
+  /* Which activity states the board shows sections for. "active" alone is the default
+     altitude - the plan you are running - and adding "inactive" or "completed" back is
+     a choice that persists like the other two view axes. Never allowed to go empty:
+     a board filtered down to nothing teaches the user the filter broke, not that they
+     toggled the last state off. */
+  const STATE_VALUES = ["active", "inactive", "completed"];
+  const visibleStates = new Set(
+    JSON.parse(localStorage.getItem("roadmapVisibleStates") || '["active"]')
+      .filter((s) => STATE_VALUES.includes(s)));
+  if (!visibleStates.size) visibleStates.add("active");
+
+  function persistVisibleStates() {
+    localStorage.setItem("roadmapVisibleStates", JSON.stringify([...visibleStates]));
+  }
+
   const isCollapsed = (key) => !expanded.has(key);
 
   function persistExpanded() {
@@ -1402,9 +1441,39 @@
     return button;
   }
 
+  /* The Show filter: which activity states the board draws sections for. The same
+     .pmnav-seg clothes as the pickers beside it, but multi-select - each state is its
+     own toggle, and the one thing you cannot do is turn the last one off (a board
+     filtered to nothing looks broken, not filtered). Counts on the buttons so "show
+     completed" says up front whether there is anything there to show. */
+  function stateFilterControl() {
+    const counts = stateCounts(currentGroups());
+    const wrap = el("div", "pmnav-seg");
+    wrap.setAttribute("role", "group");
+    wrap.setAttribute("aria-label", "Show sections by activity");
+    for (const value of STATE_VALUES) {
+      const on = visibleStates.has(value);
+      const button = el("button", null,
+        counts[value] ? `${STATE_META[value].label} ${counts[value]}` : STATE_META[value].label);
+      button.type = "button";
+      button.setAttribute("aria-pressed", String(on));
+      button.title = STATE_META[value].hint;
+      button.addEventListener("click", () => {
+        if (on && visibleStates.size === 1) return;
+        if (on) visibleStates.delete(value); else visibleStates.add(value);
+        persistVisibleStates();
+        renderAll();
+      });
+      wrap.appendChild(button);
+    }
+    return wrap;
+  }
+
   function mountControls(slot) {
     slot.textContent = "";
     slot.appendChild(collapseAllButton());
+    slot.appendChild(el("span", "pmnav-seg-label", "Show"));
+    slot.appendChild(stateFilterControl());
     slot.appendChild(el("span", "pmnav-seg-label", "Group by"));
     slot.appendChild(segmented("Group changes by", [
       ["product", "Product", "One section per product board"],
@@ -1515,6 +1584,32 @@
   function groupKind(group, depth) {
     if (group.kind === "initiative") return "initiative";
     return depth ? "subproduct" : "product";
+  }
+
+  /* The activity glyph a section heading carries and the Show filter's vocabulary -
+     label and meaning in one place so the icon tooltip, the filter button and the
+     hidden-note all say the same thing. */
+  const STATE_META = {
+    active: { label: "Active", hint: "Working — open changes in Now or Next" },
+    inactive: { label: "Inactive", hint: "Inactive — nothing in Now or Next" },
+    completed: { label: "Completed", hint: "Completed — an initiative all of whose work is done" },
+  };
+  const STATE_SHAPES = {
+    // A play triangle: this board is being worked right now.
+    active: '<path d="M5.2 3.1 12.8 8l-7.6 4.9z" fill="currentColor" stroke="none"/>',
+    // A check: nothing left underneath it.
+    completed: '<path d="M3 8.6 6.4 12 13 4.4"/>',
+    // A pause: parked, not finished - it still holds work, just none of it soon.
+    inactive: '<path d="M6 3.4v9.2M10 3.4v9.2"/>',
+  };
+  function stateIcon(state) {
+    const node = el("span", `state ${state}`);
+    node.title = STATE_META[state].hint;
+    node.innerHTML =
+      '<svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor"'
+      + ' stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">'
+      + STATE_SHAPES[state] + "</svg>";
+    return node;
   }
 
   // Rebuilt whenever the work model changes, rather than per card - a full board render
@@ -1933,6 +2028,75 @@
     return (group.subgroups || []).flatMap((g) => [g, ...groupDescendants(g)]);
   }
 
+  /* Is this section being worked, done with, or dormant? Decided over the whole
+     subtree - a parent whose only movement is in a grandchild is still moving, and
+     hiding it would hide the path to that grandchild.
+
+     In precedence order:
+       active     any open change in Now or Next, or anything in progress - the
+                  definition of "being worked" is imminence, not lifecycle.
+       completed  initiatives only. An initiative is a bet, so it can be won: there is
+                  work, and every piece of it is finished - all changes done, no
+                  declared project still waiting to start. An initiative with no work
+                  at all is NOT completed - nothing was done - and closing one changes
+                  nothing here: only its children's work can complete it.
+       inactive   the rest: only Later-bucket work, an untouched plan, or nothing at
+                  all. Parked, not finished. A product lives here whenever it isn't
+                  moving - products are ongoing things, never "completed", however
+                  much of their history has shipped.
+
+     A closed initiative holding open Now/Next work classifies active, not completed -
+     stranded work is exactly what the board must keep in view. */
+  function groupState(group) {
+    const changes = groupChanges(group);
+    const open = changes.filter((c) => c.status !== "done");
+    if (open.some((c) =>
+      c.status === "in_progress" || c.bucket === "now" || c.bucket === "next")) return "active";
+    if (group.kind !== "initiative") return "inactive";
+    // A declared project with no changes yet is plan nobody has started - it keeps its
+    // initiative out of "completed" the same way an open change would.
+    const unstarted = (group.projectIds || []).some((id) => {
+      const project = PROJECTS_BY_ID[id];
+      return project && project.status === "open" && !changes.some((c) => c.project_id === id);
+    });
+    if (changes.length && !open.length && !unstarted) return "completed";
+    return "inactive";
+  }
+
+  /* Counts by state, one walk for both consumers: the filter buttons count every
+     section (visible or not), the hidden-note counts only what the filter is actually
+     hiding - and stops descending there, because a hidden parent hides its children
+     as a family, and "5 hidden" for one folded-away subtree would read as five
+     separate disappearances. */
+  function stateCounts(groups, { hiddenOnly = false } = {}) {
+    const counts = { active: 0, inactive: 0, completed: 0 };
+    const walk = (list) => {
+      for (const group of list) {
+        const state = groupState(group);
+        const shown = visibleStates.has(state);
+        if (!hiddenOnly || !shown) counts[state] += 1;
+        if (hiddenOnly && !shown) continue;
+        walk(group.subgroups || []);
+      }
+    };
+    walk(groups);
+    return counts;
+  }
+
+  /* The one line that answers "where did my product go" without leaving the page.
+     Null when the filter is hiding nothing, so it costs no space on a full board. */
+  function hiddenNote(groups, className) {
+    const counts = stateCounts(groups, { hiddenOnly: true });
+    const parts = STATE_VALUES
+      .filter((s) => counts[s])
+      .map((s) => `${counts[s]} ${STATE_META[s].label.toLowerCase()}`);
+    if (!parts.length) return null;
+    const kind = groupBy === "initiative" ? "initiative" : "product";
+    const total = STATE_VALUES.reduce((n, s) => n + counts[s], 0);
+    return el("div", className,
+      `${parts.join(", ")} ${total === 1 ? kind : kind + "s"} hidden — use the Show filter in the nav.`);
+  }
+
   /* The sections as a flat sequence with depth, for the timeline - it draws rows on one
      shared axis, so nesting is indentation there rather than a box inside a box. A
      folded parent takes its sub-products with it: they are inside it, so they fold with
@@ -1940,6 +2104,9 @@
   function flatGroups(groups = currentGroups(), depth = 0) {
     const out = [];
     for (const group of groups) {
+      // The Show filter applies at every depth, and a filtered section takes its
+      // subtree with it - same containment rule as the fold.
+      if (!visibleStates.has(groupState(group))) continue;
       out.push({ group, depth });
       if (!isCollapsed(group.key)) out.push(...flatGroups(group.subgroups || [], depth + 1));
     }
@@ -2267,6 +2434,7 @@
     head.appendChild(el("span", "chevron", "▾"));
     head.appendChild(kindIcon(groupKind(group, depth)));
     head.appendChild(el("h2", null, group.title));
+    head.appendChild(stateIcon(groupState(group)));
     // Owner/team as the heading's tooltip: context on demand, not a row of chrome.
     if (group.product && PRODUCT_META[group.product]) {
       const m = PRODUCT_META[group.product];
@@ -2334,9 +2502,20 @@
       body.appendChild(triage);
     }
     if (subgroups.length) {
-      const nested = el("div", "subgroups");
-      for (const sub of subgroups) nested.appendChild(groupSection(sub, depth + 1));
-      body.appendChild(nested);
+      // The Show filter reaches in here too: an active parent does not exempt its
+      // dormant children. What it hides it counts, in place, so the family a heading
+      // promised ("+N open in M sub-products") never just silently shrinks.
+      const shownSubs = subgroups.filter((sub) => visibleStates.has(groupState(sub)));
+      if (shownSubs.length) {
+        const nested = el("div", "subgroups");
+        for (const sub of shownSubs) nested.appendChild(groupSection(sub, depth + 1));
+        body.appendChild(nested);
+      }
+      if (shownSubs.length < subgroups.length) {
+        const n = subgroups.length - shownSubs.length;
+        body.appendChild(el("div", "filter-note",
+          `${n} sub-product${n === 1 ? "" : "s"} hidden by the Show filter.`));
+      }
     }
     if (rows.length) {
       const list = el("div", "projects");
@@ -2367,7 +2546,12 @@
   }
 
   function renderBoard() {
-    for (const group of currentGroups()) board.appendChild(groupSection(group, 0));
+    const groups = currentGroups();
+    for (const group of groups) {
+      if (visibleStates.has(groupState(group))) board.appendChild(groupSection(group, 0));
+    }
+    const note = hiddenNote(groups, "filter-note");
+    if (note) board.appendChild(note);
   }
 
   /* ---- the timeline view ----------------------------------------------------------
@@ -2683,6 +2867,7 @@
       headLine.appendChild(el("span", "chevron", "▾"));
       headLine.appendChild(kindIcon(groupKind(group, depth)));
       headLine.appendChild(el("h2", null, group.title));
+      headLine.appendChild(stateIcon(groupState(group)));
       header.appendChild(headLine);
       const tally = el("div", "tally");
       // Same flags the lane view puts on a section head - "no initiative" or "closed"
@@ -2835,6 +3020,9 @@
         body.appendChild(toggle);
       }
     }
+
+    const note = hiddenNote(currentGroups(), "gantt-empty filter-note");
+    if (note) body.appendChild(note);
 
     gantt.appendChild(body);
     scroll.appendChild(gantt);
