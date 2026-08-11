@@ -1451,7 +1451,12 @@
     const wrap = el("div", "pmnav-seg");
     wrap.setAttribute("role", "group");
     wrap.setAttribute("aria-label", "Show sections by activity");
-    for (const value of STATE_VALUES) {
+    // Only the states this lens can produce: a product is never completed, so in the
+    // product lens a Completed toggle is a button that can't ever show anything.
+    const states = groupBy === "initiative"
+      ? STATE_VALUES
+      : STATE_VALUES.filter((s) => s !== "completed");
+    for (const value of states) {
       const on = visibleStates.has(value);
       const button = el("button", null,
         counts[value] ? `${STATE_META[value].label} ${counts[value]}` : STATE_META[value].label);
