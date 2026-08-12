@@ -136,6 +136,26 @@
     white-space: nowrap;
   }
   .group-head .tally .live { color: var(--status-in-progress); font-weight: 600; }
+  .group-head .info {
+    flex: 0 0 auto;
+    font-size: 0.85em;
+    line-height: 1;
+    color: var(--ink-muted);
+  }
+  .group-head .info:hover, .group-head .info.open { color: var(--accent); }
+  /* Indented to start under the title (4px head padding + 16px chevron + 7px gap),
+     so it reads as the heading's own aside rather than a row of the board. */
+  .group-desc {
+    margin: 6px 0 4px 27px;
+    padding: 8px 10px;
+    max-width: 70ch;
+    font-size: 0.82em;
+    line-height: 1.5;
+    color: var(--ink-secondary);
+    background: var(--hover);
+    border-radius: 7px;
+    white-space: pre-wrap;
+  }
   section.group.collapsed .group-body { display: none; }
   /* Everything a section contains - its projects, its triage, its sub-products - hangs
      off ONE rail dropped from under the section's own chevron, at every depth. Nesting
@@ -1311,6 +1331,9 @@
      open cards: revealing history is a reading act, and next visit it should be folded
      away again. */
   const revealClosed = new Set();
+  /* Which initiative sections are currently showing their description. Transient for
+     the same reason as revealClosed: reading the why is a reading act. */
+  const revealDesc = new Set();
 
   /* Which activity states the board shows sections for. "active" alone is the default
      altitude - the plan you are running - and adding "inactive" or "completed" back is
@@ -2150,6 +2173,7 @@
         key: `initiative:${initiative.id}`,
         kind: "initiative",
         title: initiative.title,
+        description: initiative.description || "",
         flags,
         changes,
         omit: {},
@@ -2440,6 +2464,26 @@
     head.appendChild(kindIcon(groupKind(group, depth)));
     head.appendChild(el("h2", null, group.title));
     head.appendChild(stateIcon(groupState(group)));
+    // The initiative's description on demand: an ⓘ in the heading toggles it open
+    // below. A span with a button role rather than a button, because the heading
+    // already IS a button and nesting one inside it is invalid HTML.
+    if (group.description) {
+      const info = el("span", "info" + (revealDesc.has(group.key) ? " open" : ""), "ⓘ");
+      info.setAttribute("role", "button");
+      info.tabIndex = 0;
+      info.title = revealDesc.has(group.key) ? "Hide description" : "Show description";
+      const flip = (event) => {
+        event.stopPropagation();
+        if (revealDesc.has(group.key)) revealDesc.delete(group.key);
+        else revealDesc.add(group.key);
+        renderAll();
+      };
+      info.addEventListener("click", flip);
+      info.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); flip(event); }
+      });
+      head.appendChild(info);
+    }
     // Owner/team as the heading's tooltip: context on demand, not a row of chrome.
     if (group.product && PRODUCT_META[group.product]) {
       const m = PRODUCT_META[group.product];
@@ -2499,6 +2543,11 @@
       if (slot) mountControls(slot);
     });
     section.appendChild(head);
+    // Outside group-body on purpose: a folded section shows only its heading, and the
+    // description should be readable without unfolding the whole board underneath it.
+    if (group.description && revealDesc.has(group.key)) {
+      section.appendChild(el("div", "group-desc", group.description));
+    }
 
     const body = el("div", "group-body");
     if (suggestions.length) {

@@ -130,6 +130,27 @@
     background: var(--warn-bg);
   }
   .flag.catch-all { color: var(--accent); background: var(--note-bg); }
+  .info-toggle {
+    padding: 0 2px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--ink-muted);
+    font-size: 0.85em;
+    line-height: 1;
+    vertical-align: baseline;
+  }
+  .info-toggle:hover, .info-toggle.open { color: var(--accent); }
+  .desc {
+    margin-top: 6px;
+    padding: 8px 10px;
+    font-size: 0.82em;
+    line-height: 1.5;
+    color: var(--ink-secondary);
+    background: var(--note-bg);
+    border-radius: 7px;
+    white-space: pre-wrap;
+  }
   .empty { font-size: 0.85em; color: var(--ink-muted); }
   .banner {
     margin-bottom: 18px;
@@ -343,6 +364,26 @@
       }
       row.append(title, actions);
       item.appendChild(row);
+
+      if (initiative.description) {
+        const info = document.createElement("button");
+        info.type = "button";
+        info.className = "info-toggle";
+        info.textContent = "ⓘ";
+        info.title = "Show description";
+        const desc = document.createElement("div");
+        desc.className = "desc";
+        desc.textContent = initiative.description;
+        desc.hidden = true;
+        info.addEventListener("click", () => {
+          desc.hidden = !desc.hidden;
+          info.classList.toggle("open", !desc.hidden);
+          info.title = desc.hidden ? "Show description" : "Hide description";
+        });
+        title.appendChild(document.createTextNode(" "));
+        title.appendChild(info);
+        item.appendChild(desc);
+      }
 
       const owned = data.projects.filter((p) => p.initiative_id === initiative.id);
       const meta = document.createElement("div");
