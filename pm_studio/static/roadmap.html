@@ -262,6 +262,11 @@
   }
   .project:hover { border-color: rgba(128, 128, 128, 0.32); }
   .project.open { border-color: var(--border); }
+  /* Re-parenting by drag (initiative lens): the row being carried dims so the board
+     reads "this is in your hand", and the section under the cursor answers with a
+     dashed inset - a frame around the drop, not a repaint of everything in it. */
+  .project.dragging { opacity: 0.45; }
+  .group.drop-ok { outline: 2px dashed var(--accent); outline-offset: -2px; border-radius: 7px; }
   .project-head {
     display: flex;
     align-items: center;
@@ -411,6 +416,10 @@
     font-size: 0.75em;
     padding: 2px 3px 4px;
   }
+  /* Reprioritizing by drag: same grammar as the project drag above - the card in hand
+     dims, the lane that would take it answers with the dashed inset. */
+  .card.dragging { opacity: 0.45; }
+  .lane.drop-ok { outline: 2px dashed var(--accent); outline-offset: -2px; }
 
   /* ---- the change card ------------------------------------------------------------
      Collapsed it is one line: a status dot, the title, and whatever metadata the change
@@ -2367,6 +2376,56 @@
 
   // ---- the now / next / later view ----
 
+  /* ---- dragging a change between horizons -----------------------------------------
+     The other drag the board supports, and the cheaper of the two: `bucket` is a
+     purely local field (no tracker has a horizon), so a drop is one PATCH on the
+     change and Jira/ADO never hears about it. Scoped to the three lanes of the card's
+     OWN project row: dropping into another project's lane would be a re-homing, which
+     is a different decision with its own controls on the open card. */
+  let draggingChange = null; // { item, rowKey }
+
+  function wireChangeDrag(card, main, item, rowKey) {
+    // The title strip, not the whole card: an open card body is full of controls.
+    main.draggable = true;
+    main.addEventListener("dragstart", (event) => {
+      draggingChange = { item, rowKey };
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", item.title);
+      card.classList.add("dragging");
+    });
+    main.addEventListener("dragend", () => {
+      draggingChange = null;
+      card.classList.remove("dragging");
+      for (const l of document.querySelectorAll(".lane.drop-ok")) l.classList.remove("drop-ok");
+    });
+  }
+
+  function wireLaneDrop(lane, rowKey, bucket) {
+    const accepts = () =>
+      !!draggingChange && draggingChange.rowKey === rowKey && draggingChange.item.bucket !== bucket;
+    lane.addEventListener("dragover", (event) => {
+      if (!accepts()) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      lane.classList.add("drop-ok");
+    });
+    lane.addEventListener("dragleave", (event) => {
+      if (!lane.contains(event.relatedTarget)) lane.classList.remove("drop-ok");
+    });
+    lane.addEventListener("drop", (event) => {
+      lane.classList.remove("drop-ok");
+      if (!accepts()) return;
+      event.preventDefault();
+      const item = draggingChange.item;
+      draggingChange = null;
+      // Optimistic like the project drag; patchItem's failure path already alerts
+      // with the server's reason and reloads the board back to the truth.
+      item.bucket = bucket;
+      renderAll();
+      patchItem(item, { bucket });
+    });
+  }
+
   /* The lanes now belong to ONE project rather than to a whole section, so `row` is a
      project row - but the shape it needs ({ changes, omit, addTo }) is the same one a
      group had, and untriaged suggestions have already been lifted out of it by
@@ -2402,7 +2461,12 @@
       }
 
       if (!items.length) lane.appendChild(el("div", "lane-empty", "—"));
-      for (const item of items) lane.appendChild(itemCard(item, row.omit));
+      for (const item of items) {
+        const card = itemCard(item, row.omit);
+        wireChangeDrag(card, card.querySelector(".card-main"), item, row.key);
+        lane.appendChild(card);
+      }
+      wireLaneDrop(lane, row.key, value);
       lanes.appendChild(lane);
     }
     container.appendChild(lanes);
@@ -2424,6 +2488,92 @@
       details.appendChild(list);
       container.appendChild(details);
     }
+  }
+
+  /* ---- dragging a project between initiatives (initiative lens only) --------------
+     The one re-parenting the model supports as a drag: a project has exactly one
+     initiative_id, so a drop is a single PATCH and nothing else moves - its changes
+     keep their products, buckets and tickets. The product lens deliberately has no
+     drag: a project has no product to move between (see projectRows), and a change's
+     board is a different operation with its own controls. Catch-all rows never drag -
+     they are auto-created plumbing, and the server refuses them anyway. */
+  let draggingProjectId = null;
+
+  function draggableProject(row) {
+    return groupBy === "initiative" && row.project
+      && !row.project.is_catch_all && !row.project.catch_all_for_initiative;
+  }
+
+  function wireProjectDrag(node, head, project) {
+    // The head, not the whole row: the open body is full of its own controls, and a
+    // card that starts a drag when you meant to select a title reads as broken.
+    head.draggable = true;
+    head.addEventListener("dragstart", (event) => {
+      draggingProjectId = project.id;
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", project.title);
+      node.classList.add("dragging");
+    });
+    head.addEventListener("dragend", () => {
+      draggingProjectId = null;
+      node.classList.remove("dragging");
+      for (const s of document.querySelectorAll(".group.drop-ok")) s.classList.remove("drop-ok");
+    });
+  }
+
+  function wireInitiativeDrop(section, initiativeId) {
+    // Dropping where the project already lives is a no-op, so it is not a target.
+    const accepts = () => {
+      const project = draggingProjectId ? PROJECTS_BY_ID[draggingProjectId] : null;
+      return !!project && (project.initiative_id || null) !== initiativeId;
+    };
+    section.addEventListener("dragover", (event) => {
+      if (!accepts()) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      section.classList.add("drop-ok");
+    });
+    section.addEventListener("dragleave", (event) => {
+      if (!section.contains(event.relatedTarget)) section.classList.remove("drop-ok");
+    });
+    section.addEventListener("drop", (event) => {
+      section.classList.remove("drop-ok");
+      if (!accepts()) return;
+      event.preventDefault();
+      moveProjectToInitiative(draggingProjectId, initiativeId);
+      draggingProjectId = null;
+    });
+  }
+
+  function moveProjectToInitiative(projectId, initiativeId) {
+    const project = PROJECTS_BY_ID[projectId];
+    if (!project) return;
+    // Optimistic, same contract as patchItem: the board redraws from local state now,
+    // the server's portfolio_changed broadcast confirms it for everyone else, and a
+    // refusal rolls back to the truth with the reason on screen.
+    const previous = project.initiative_id;
+    project.initiative_id = initiativeId;
+    project.is_unaligned = !initiativeId;
+    renderAll();
+    fetch(`/portfolio/projects/${projectId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initiative_id: initiativeId || "" }),
+    })
+      .then((r) => {
+        if (r.ok) return;
+        return r.json().catch(() => ({})).then((body) => {
+          project.initiative_id = previous;
+          project.is_unaligned = !previous;
+          alert(body.detail || "That project could not be moved.");
+          loadBoard();
+        });
+      })
+      .catch(() => {
+        project.initiative_id = previous;
+        project.is_unaligned = !previous;
+        loadBoard();
+      });
   }
 
   /* One project row: the strategic line, with the whole Now / Next / Later board for
@@ -2468,6 +2618,7 @@
       head.setAttribute("aria-expanded", String(nowOpen));
       persistOpenProjects();
     });
+    if (draggableProject(row)) wireProjectDrag(node, head, row.project);
     node.appendChild(head);
 
     const body = el("div", "project-body");
@@ -2490,6 +2641,12 @@
   function groupSection(group, depth) {
     const section = el("section", "group" + (depth ? " sub" : ""));
     if (isCollapsed(group.key)) section.classList.add("collapsed");
+    // Every initiative section takes drops, folded or not - the heading is enough of a
+    // target - and "Unaligned" (initiative:none) is one too: dropping there is how a
+    // project is deliberately detached.
+    if (groupBy === "initiative" && group.kind === "initiative") {
+      wireInitiativeDrop(section, group.key === "initiative:none" ? null : group.key.slice("initiative:".length));
+    }
 
     const head = el("button", "group-head");
     head.type = "button";

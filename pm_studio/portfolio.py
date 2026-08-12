@@ -643,6 +643,11 @@ class PortfolioStore:
                     )
                 project.status = new_status
                 project.closed_at = _now() if new_status == "closed" else None
+            if (clear_initiative or initiative_id is not None) and project.is_any_catch_all:
+                raise PortfolioError(
+                    "A catch-all project cannot move between initiatives - where it "
+                    "hangs is what makes its spend attribution mean anything."
+                )
             if clear_initiative:
                 project.initiative_id = None
             elif initiative_id is not None:

@@ -211,6 +211,15 @@ class PortfolioShapeTest(unittest.TestCase):
         with self.assertRaises(PortfolioError):
             self.store.update_initiative(result["initiative_id"], status="closed")
 
+    def test_the_catch_all_cannot_move_between_initiatives(self) -> None:
+        """Its spend attribution only means anything where it was created."""
+        result = self.store.ensure_maintenance_scaffold()
+        other = self.store.create_initiative("Growth")
+        with self.assertRaises(PortfolioError):
+            self.store.update_project(result["project_id"], initiative_id=other.id)
+        with self.assertRaises(PortfolioError):
+            self.store.update_project(result["project_id"], clear_initiative=True)
+
     # ---- lifecycle + persistence ----
 
     def test_closing_stamps_and_reopening_clears(self) -> None:
