@@ -2070,8 +2070,12 @@
      hiding it would hide the path to that grandchild.
 
      In precedence order:
-       active     any open change in Now or Next, or anything in progress - the
-                  definition of "being worked" is imminence, not lifecycle.
+       active     any open change in Now or Next - imminence by bucket, nothing else.
+                  Deliberately NOT "anything in progress": an in-progress change
+                  parked in Later (tracker imports produce these in bulk) does not
+                  make the board it sits on part of the current plan. The subtree
+                  walk supplies the other half of the definition: a product is
+                  active when a child product is.
        completed  initiatives only. An initiative is a bet, so it can be won: there is
                   work, and every piece of it is finished - all changes done, no
                   declared project still waiting to start. An initiative with no work
@@ -2087,8 +2091,7 @@
   function groupState(group) {
     const changes = groupChanges(group);
     const open = changes.filter((c) => c.status !== "done");
-    if (open.some((c) =>
-      c.status === "in_progress" || c.bucket === "now" || c.bucket === "next")) return "active";
+    if (open.some((c) => c.bucket === "now" || c.bucket === "next")) return "active";
     if (group.kind !== "initiative") return "inactive";
     // A declared project with no changes yet is plan nobody has started - it keeps its
     // initiative out of "completed" the same way an open change would.
@@ -2100,19 +2103,29 @@
     return "inactive";
   }
 
+  /* Whether the Show filter draws this section. Its own state matching is the normal
+     case; a section whose state does NOT match still renders as a pass-through when a
+     descendant's does - the filter counts every depth, so every section it counts must
+     be reachable, and hiding an active parent must not orphan the inactive
+     sub-products inside it. */
+  function groupVisible(group) {
+    if (visibleStates.has(groupState(group))) return true;
+    return (group.subgroups || []).some(groupVisible);
+  }
+
   /* Counts by state, one walk for both consumers: the filter buttons count every
      section (visible or not), the hidden-note counts only what the filter is actually
      hiding - and stops descending there, because a hidden parent hides its children
      as a family, and "5 hidden" for one folded-away subtree would read as five
-     separate disappearances. */
+     separate disappearances. A pass-through parent is on screen, so it is never
+     "hidden" - the walk just continues past it looking for children that are. */
   function stateCounts(groups, { hiddenOnly = false } = {}) {
     const counts = { active: 0, inactive: 0, completed: 0 };
     const walk = (list) => {
       for (const group of list) {
-        const state = groupState(group);
-        const shown = visibleStates.has(state);
-        if (!hiddenOnly || !shown) counts[state] += 1;
-        if (hiddenOnly && !shown) continue;
+        if (hiddenOnly && groupVisible(group)) { walk(group.subgroups || []); continue; }
+        counts[groupState(group)] += 1;
+        if (hiddenOnly) continue;
         walk(group.subgroups || []);
       }
     };
@@ -2141,9 +2154,9 @@
   function flatGroups(groups = currentGroups(), depth = 0) {
     const out = [];
     for (const group of groups) {
-      // The Show filter applies at every depth, and a filtered section takes its
-      // subtree with it - same containment rule as the fold.
-      if (!visibleStates.has(groupState(group))) continue;
+      // The Show filter applies at every depth - but through groupVisible, so a
+      // filtered-out parent still appears when something inside it matches.
+      if (!groupVisible(group)) continue;
       out.push({ group, depth });
       if (!isCollapsed(group.key)) out.push(...flatGroups(group.subgroups || [], depth + 1));
     }
@@ -2750,7 +2763,7 @@
       // The Show filter reaches in here too: an active parent does not exempt its
       // dormant children. What it hides it counts, in place, so the family a heading
       // promised ("+N open in M sub-products") never just silently shrinks.
-      const shownSubs = subgroups.filter((sub) => visibleStates.has(groupState(sub)));
+      const shownSubs = subgroups.filter(groupVisible);
       if (shownSubs.length) {
         const nested = el("div", "subgroups");
         for (const sub of shownSubs) nested.appendChild(groupSection(sub, depth + 1));
@@ -2793,7 +2806,7 @@
   function renderBoard() {
     const groups = currentGroups();
     for (const group of groups) {
-      if (visibleStates.has(groupState(group))) board.appendChild(groupSection(group, 0));
+      if (groupVisible(group)) board.appendChild(groupSection(group, 0));
     }
     const note = hiddenNote(groups, "filter-note");
     if (note) board.appendChild(note);
