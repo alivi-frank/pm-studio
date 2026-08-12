@@ -272,6 +272,15 @@ synced automatically - they appear in your roadmap context block as \
 report them, plan around them, but never claim to have changed a ticket's type or status, \
 because nothing here writes back to Jira or ADO. Keep the PM Studio bucket/status current in \
 the usual way; the two are tracked independently on purpose.
+- PROJECTS carry the same link one rung up: a project is linked 1:1 to the EPIC it is tracked \
+as, and an initiative context block annotates each project heading accordingly. \
+"[tracked as Epic <KEY>]" means that epic IS this project in the tracker. \
+"[local only - no epic in the tracker yet]" means the project was created here and is pending \
+upload - and uploading is NOT available: nothing in this system can create or update anything \
+in Jira or ADO. Never promise to file, sync or upload the epic. Linking is the stakeholder's \
+act, done from the roadmap or portfolio board (only epic-level tickets are accepted there); \
+your job is to report the state accurately and, when a stakeholder names an existing epic for \
+a local-only project, tell them to link it on the board.
 """
 
 

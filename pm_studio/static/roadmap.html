@@ -1573,6 +1573,54 @@
     return node;
   }
 
+  /* The epic a project is tracked as, drawn inside a heading that is itself a <button> -
+     so both affordances here are spans with a role, the same trick the section head's ⓘ
+     plays, because nesting a real <a> or <button> inside a button is invalid HTML.
+
+     Linked: the badge, opening the ticket in the tracker (re-linking and unlinking live
+     on the Portfolio page, where the project has room for controls). Unlinked: the
+     pending-upload state - the project was created locally and nothing in the tracker
+     knows it yet, since the sync cannot upload; the chip says so and opens the epic
+     picker for the case where the epic already exists and just needs linking. Null when
+     there is nothing to say: no trackers, a catch-all, or the synthetic "No project" row. */
+  function projectEpicNode(project) {
+    if (!project || !TRACKERS.configured) return null;
+    if (project.ticket) {
+      const badge = ticketBadge({ ...project.ticket, url: "" }, true);
+      const url = project.ticket.url;
+      if (url && !project.ticket.unresolved) {
+        badge.setAttribute("role", "link");
+        badge.tabIndex = 0;
+        badge.style.cursor = "pointer";
+        const go = (event) => {
+          event.stopPropagation();
+          window.open(url, "_blank", "noopener");
+        };
+        badge.addEventListener("click", go);
+        badge.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") { event.preventDefault(); go(event); }
+        });
+      }
+      return badge;
+    }
+    if (project.is_catch_all || project.catch_all_for_initiative) return null;
+    const pending = chip("not in tracker", "warn");
+    pending.title =
+      "Created locally — pending upload to the tracker, which isn't available yet.\n" +
+      "If the epic already exists there, click to link it.";
+    pending.setAttribute("role", "button");
+    pending.tabIndex = 0;
+    const open = (event) => {
+      event.stopPropagation();
+      openEpicPicker(project);
+    };
+    pending.addEventListener("click", open);
+    pending.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(event); }
+    });
+    return pending;
+  }
+
   // ---- the change, in its two shapes ----
 
   function chip(text, className) {
@@ -2602,6 +2650,10 @@
     head.appendChild(kindIcon(row.project ? "project" : "loose"));
     head.appendChild(el("span", "project-name" + (row.project ? "" : " loose"), row.title));
     for (const [text, warn] of row.flags) head.appendChild(chip(text, warn ? "warn" : null));
+    // The epic this project is tracked as - or the pending-upload chip when it only
+    // exists locally (see projectEpicNode).
+    const epic = projectEpicNode(row.project);
+    if (epic) head.appendChild(epic);
     // The one flag that isn't about the project's shape but about its health, so it is
     // the one that gets a fill.
     if (row.roll.overdue) head.appendChild(chip(`${row.roll.overdue} overdue`, "late"));
@@ -3199,11 +3251,22 @@
         const roll = projectRow.roll;
         label.appendChild(el("span", "count", `${roll.done}/${roll.total}`));
         label.appendChild(meter(roll));
+        /* No epic badge here, unlike the lane view's project head: the gantt label
+           column is too narrow to give the badge room without truncating the name it
+           exists to identify. The link still reads from the tooltip, and the lane view
+           and portfolio page carry the visible affordances. */
+        const epicNote = projectRow.project && TRACKERS.configured
+          ? (projectRow.project.ticket
+              ? `\ntracked as ${projectRow.project.ticket.raw_type || "Epic"} ${projectRow.project.ticket.key}`
+              : (projectRow.project.is_catch_all || projectRow.project.catch_all_for_initiative
+                  ? "" : "\nnot in the tracker yet — created locally, pending upload"))
+          : "";
         label.title =
           `${projectRow.title} — ${roll.total} change${roll.total === 1 ? "" : "s"}, ` +
           `${roll.done} shipped, ${roll.live} in progress` +
           (roll.overdue ? `, ${roll.overdue} overdue` : "") +
-          (earlier ? `\n${earlier} shipped before ${shortDate(ax.start)}` : "");
+          (earlier ? `\n${earlier} shipped before ${shortDate(ax.start)}` : "") +
+          epicNote;
         head.appendChild(label);
 
         const track = el("div", "gantt-track");
@@ -3450,18 +3513,50 @@
   const pickerSub = document.getElementById("picker-sub");
   const pickerUnlink = document.getElementById("picker-unlink");
   const pickerLink = document.getElementById("picker-link");
-  let pickerItem = null;
+  /* What the picker is linking right now: a change (`kind: "item"`) or a project's
+     epic (`kind: "project"`). One dialog serves both because the flow is identical -
+     search or paste, pick, PATCH - and only the target URL and the type filter differ. */
+  let pickerTarget = null;
   let searchTimer = null;
 
   function openTicketPicker(item) {
-    pickerItem = item;
+    openPicker({
+      kind: "item",
+      title: item.title,
+      ticket: item.ticket,
+      url: `/roadmap/${item.product}/items/${item.id}`,
+      heading: "Link a ticket",
+      sub: item.ticket
+        ? `"${item.title}" is linked to ${item.ticket.key}. Pick another ticket to move the link, or unlink it.`
+        : `Link "${item.title}" to one ticket. A ticket can belong to one change only.`,
+    });
+  }
+
+  function openEpicPicker(project) {
+    openPicker({
+      kind: "project",
+      title: project.title,
+      ticket: project.ticket,
+      url: `/portfolio/projects/${project.id}`,
+      // Only epic-level tickets are offered (and accepted server-side): a project is
+      // what an epic is in the tracker's own hierarchy.
+      type: "epic",
+      heading: "Link an epic",
+      sub: project.ticket
+        ? `"${project.title}" is tracked as ${project.ticket.key}. Pick another epic to move the link, or unlink it.`
+        : `"${project.title}" only exists locally so far — it is pending upload to the tracker, which isn't ` +
+          "available yet. If its epic already exists there, link it here.",
+    });
+  }
+
+  function openPicker(target) {
+    pickerTarget = target;
     pickerInput.value = "";
     pickerNote.textContent = "";
     pickerNote.classList.remove("error");
-    pickerSub.textContent = item.ticket
-      ? `"${item.title}" is linked to ${item.ticket.key}. Pick another ticket to move the link, or unlink it.`
-      : `Link "${item.title}" to one ticket. A ticket can belong to one change only.`;
-    pickerUnlink.classList.toggle("hidden", !item.ticket);
+    document.getElementById("picker-title").textContent = target.heading;
+    pickerSub.textContent = target.sub;
+    pickerUnlink.classList.toggle("hidden", !target.ticket);
     picker.classList.add("open");
     pickerInput.focus();
     searchTickets("");
@@ -3469,12 +3564,13 @@
 
   function closeTicketPicker() {
     picker.classList.remove("open");
-    pickerItem = null;
+    pickerTarget = null;
     pickerResults.textContent = "";
   }
 
   function searchTickets(query) {
-    fetch(`/trackers/tickets?q=${encodeURIComponent(query)}&limit=50`)
+    const type = pickerTarget && pickerTarget.type ? `&type=${pickerTarget.type}` : "";
+    fetch(`/trackers/tickets?q=${encodeURIComponent(query)}&limit=50${type}`)
       .then((r) => r.json())
       .then(({ tickets }) => {
         pickerResults.textContent = "";
@@ -3492,8 +3588,9 @@
           row.appendChild(el("span", "row-title", ticket.title || "(no title)"));
           // Already-linked tickets are shown but unpickable: seeing that PROJ-12 is taken
           // is more useful than it silently missing from the list.
-          const alreadyThis = pickerItem && pickerItem.ticket && pickerItem.ticket.key === ticket.key
-            && pickerItem.ticket.tracker_id === ticket.tracker_id;
+          const current = pickerTarget && pickerTarget.ticket;
+          const alreadyThis = current && current.key === ticket.key
+            && current.tracker_id === ticket.tracker_id;
           if (ticket.linked && !alreadyThis) {
             row.appendChild(el("span", "row-taken", "linked elsewhere"));
             row.disabled = true;
@@ -3508,11 +3605,11 @@
   }
 
   function submitLink(payload) {
-    if (!pickerItem) return;
+    if (!pickerTarget) return;
     pickerNote.textContent = "Linking…";
     pickerNote.classList.remove("error");
     pickerLink.disabled = true;
-    fetch(`/roadmap/${pickerItem.product}/items/${pickerItem.id}`, {
+    fetch(pickerTarget.url, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),

@@ -10,7 +10,9 @@ on top of the roadmap items that already exist:
   concept for it; a change simply gains a single `project_id`.
 - A **Project** belongs to exactly one Initiative. `initiative_id = None` is a real,
   reportable state called **unaligned** - allowed, so nobody is blocked mid-work, but
-  surfaced so it gets fixed.
+  surfaced so it gets fixed. A project may also be linked 1:1 to the epic-level ticket
+  it is tracked as in Jira/ADO (see `link_epic`); unlinked means it was created locally
+  and is pending upload to the tracker, which the sync cannot do yet.
 - An **Initiative** has many Projects and may serve **several Goals**. That is the only
   many-to-many relationship in the model.
 
@@ -54,6 +56,11 @@ from typing import Callable, Literal
 
 from .config import CONFIG
 
+# Same import, same reason as roadmap.py: what makes two spellings of a ticket key the
+# SAME ticket is trackers.py's one rule, and the project⇄epic 1:1 below is only as good
+# as that definition. (trackers.py imports only config - no cycle.)
+from .trackers import normalize_key
+
 PORTFOLIO_PATH = CONFIG.workspace_dir / "portfolio.json"
 
 Lifecycle = Literal["open", "closed"]
@@ -69,6 +76,27 @@ DEFAULT_CATCH_ALL_PROJECT = "Unplanned work"
 
 class PortfolioError(Exception):
     """A rejected portfolio operation. The message is safe to show a user."""
+
+
+class EpicAlreadyLinked(Exception):
+    """Raised when an epic ticket is already linked to a different project.
+
+    The project⇄epic link is 1:1 in both directions, exactly like the change⇄ticket
+    link (see roadmap.TicketAlreadyLinked, whose shape this mirrors): one project holds
+    at most one ticket by construction, and this is the check that stops two projects
+    naming the same epic. Carries the conflicting project so the caller can say WHICH
+    project already owns it.
+    """
+
+    def __init__(self, tracker_id: str, ticket_key: str, project: "Project") -> None:
+        self.tracker_id = tracker_id
+        self.ticket_key = ticket_key
+        self.project = project
+        super().__init__(
+            f"{ticket_key} is already linked to the project \"{project.title}\" "
+            f"(id {project.id}). An epic can be linked to one project only - "
+            "unlink it there first."
+        )
 
 
 def _now() -> float:
@@ -154,6 +182,16 @@ class Project:
     # Optional and defaulted, so portfolio.json files written before it existed load
     # unchanged.
     catch_all_for_initiative: str | None = None
+    # The 1:1 link to the EPIC-level ticket this project is tracked as in one configured
+    # external tracker (see trackers.py) - the project-rung counterpart of the
+    # change⇄ticket link on RoadmapItem, with the same split: only the reference lives
+    # here, and the ticket's type/title/state/URL come from the synced catalog at read
+    # time. Both None means the project exists ONLY here: created locally and pending
+    # upload to the tracker - a real, reportable state, not an error, since the upload
+    # direction of the sync is not built yet. Defaults keep pre-existing portfolio.json
+    # files loading untouched.
+    tracker_id: str | None = None
+    ticket_key: str | None = None
 
     @property
     def is_unaligned(self) -> bool:
@@ -256,6 +294,9 @@ class PortfolioStore:
             "projects": self.list_projects(),
             "catch_all_project_id": self.catch_all_project_id,
             "unaligned": self.unaligned_report(),
+            # Which open projects have no epic link yet (see pending_upload_report).
+            # Additive; consumers on a deployment with no [[trackers]] ignore it.
+            "pending_upload": self.pending_upload_report(),
         }
 
     def get_goal(self, goal_id: str) -> Goal | None:
@@ -269,6 +310,44 @@ class PortfolioStore:
 
     def project_exists(self, project_id: str) -> bool:
         return project_id in self._projects
+
+    def project_for_ticket(self, tracker_id: str, ticket_key: str) -> Project | None:
+        """Which project holds this epic, if any - the read side of the 1:1 link,
+        mirroring roadmap.RoadmapStore.item_for_ticket."""
+        wanted = normalize_key(tracker_id, ticket_key)
+        return next(
+            (
+                p
+                for p in self._projects.values()
+                if p.tracker_id == tracker_id
+                and p.ticket_key
+                and normalize_key(tracker_id, p.ticket_key) == wanted
+            ),
+            None,
+        )
+
+    def linked_ticket_refs(self) -> list[tuple[str, str]]:
+        """Every (tracker_id, key) a project is linked to, for the sync to keep fresh -
+        joined with the roadmap's own refs by the caller (see server._run_tracker_sync)."""
+        return [
+            (p.tracker_id, p.ticket_key)
+            for p in self._projects.values()
+            if p.tracker_id and p.ticket_key
+        ]
+
+    def pending_upload_report(self) -> list[dict]:
+        """Open projects that exist only here: no epic link, so nothing in the tracker
+        knows about them yet. Reported, never blocked - same posture as unaligned_report:
+        the upload half of the sync does not exist yet, so this is the work statement,
+        not an error list. Catch-alls are exempt: they are auto-created plumbing for cost
+        attribution, not projects anyone would file an epic for."""
+        return [
+            {"id": p.id, "title": p.title}
+            for p in self._sorted(self._projects)
+            if p.status == "open"
+            and p.tracker_id is None
+            and not p.is_any_catch_all
+        ]
 
     @property
     def catch_all_project_id(self) -> str | None:
@@ -652,6 +731,62 @@ class PortfolioStore:
                 project.initiative_id = None
             elif initiative_id is not None:
                 project.initiative_id = self._validate_initiative_id(initiative_id)
+            project.updated_at = _now()
+            self._save()
+        self._notify({"type": "portfolio_changed", "entity": "project", "id": project_id})
+        return project
+
+    def link_epic(self, project_id: str, tracker_id: str, ticket_key: str) -> Project:
+        """Links a project to one epic-level ticket, 1:1.
+
+        Same contract as roadmap.RoadmapStore.link_ticket, on purpose: re-linking the
+        same pair is a no-op rather than a conflict against the project itself, a
+        DIFFERENT project already holding the ticket raises EpicAlreadyLinked, and the
+        check and the write share one lock hold so two concurrent links cannot both
+        pass. Whether the ticket actually IS an epic is the caller's check (server.py) -
+        this store deliberately knows nothing about the ticket catalog.
+
+        Catch-alls are refused: they are auto-created attribution plumbing, and pinning
+        one to a tracker epic would present unplanned-work bookkeeping as a planned
+        deliverable in the other system.
+        """
+        key = normalize_key(tracker_id, ticket_key)
+        if not tracker_id or not key:
+            raise PortfolioError(
+                "tracker_id and ticket_key are both required to link an epic"
+            )
+        with self._lock:
+            project = self._projects.get(project_id)
+            if project is None:
+                raise PortfolioError(f"Unknown project: {project_id}")
+            if project.is_any_catch_all:
+                raise PortfolioError(
+                    "A catch-all project cannot be linked to an epic - it is "
+                    "auto-created plumbing for unplanned work, not a deliverable "
+                    "the tracker should know about."
+                )
+            for other in self._projects.values():
+                if other.id == project_id or other.tracker_id != tracker_id or not other.ticket_key:
+                    continue
+                if normalize_key(tracker_id, other.ticket_key) == key:
+                    raise EpicAlreadyLinked(tracker_id, key, other)
+            project.tracker_id = tracker_id
+            project.ticket_key = key
+            project.updated_at = _now()
+            self._save()
+        self._notify({"type": "portfolio_changed", "entity": "project", "id": project_id})
+        return project
+
+    def unlink_epic(self, project_id: str) -> Project:
+        """Clears the epic link, returning the project to the local-only (pending
+        upload) state. Idempotent, like unlink_ticket: clearing a clear field is not
+        an error."""
+        with self._lock:
+            project = self._projects.get(project_id)
+            if project is None:
+                raise PortfolioError(f"Unknown project: {project_id}")
+            project.tracker_id = None
+            project.ticket_key = None
             project.updated_at = _now()
             self._save()
         self._notify({"type": "portfolio_changed", "entity": "project", "id": project_id})

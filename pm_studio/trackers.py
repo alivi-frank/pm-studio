@@ -761,13 +761,22 @@ class TrackerStore:
         with self._lock:
             return [t for t in self._state.tickets.values() if t.tracker_id == tracker_id]
 
-    def search(self, query: str = "", tracker_id: str = "", limit: int = 50) -> list[dict]:
-        """Candidate tickets for the link picker: substring match on key or title."""
+    def search(
+        self, query: str = "", tracker_id: str = "", limit: int = 50, canonical: str = ""
+    ) -> list[dict]:
+        """Candidate tickets for the link picker: substring match on key or title.
+
+        `canonical` narrows to one canonical type slug (see CANONICAL_TYPES), applied
+        before the limit so asking for epics cannot come back empty just because fifty
+        stories sort ahead of them.
+        """
         needle = (query or "").strip().lower()
         with self._lock:
             tickets = list(self._state.tickets.values())
         if tracker_id:
             tickets = [t for t in tickets if t.tracker_id == tracker_id]
+        if canonical:
+            tickets = [t for t in tickets if t.type == canonical]
         if needle:
             tickets = [
                 t for t in tickets if needle in t.key.lower() or needle in t.title.lower()

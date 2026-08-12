@@ -130,6 +130,31 @@
     background: var(--warn-bg);
   }
   .flag.catch-all { color: var(--accent); background: var(--note-bg); }
+  /* The epic a project is tracked as — the same badge language roadmap.html uses for
+     linked tickets, trimmed to the two states this page can show: an epic, or a link
+     whose ticket the last sync did not resolve. */
+  .ticket-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 1px 7px;
+    font-size: 0.72em;
+    font-weight: 600;
+    border: 1px solid var(--ticket-color, var(--border));
+    border-left: 3px solid var(--ticket-color, var(--border));
+    border-radius: 5px;
+    background: var(--ticket-bg, transparent);
+    color: var(--ticket-color, var(--ink-secondary));
+    text-decoration: none;
+    vertical-align: baseline;
+  }
+  a.ticket-badge:hover { text-decoration: underline; }
+  .ticket-badge .ticket-state { font-weight: 400; opacity: 0.8; }
+  .ticket-badge[data-type="epic"] { --ticket-color: #8b5cf6; --ticket-bg: rgba(139, 92, 246, 0.10); }
+  .ticket-badge.unresolved { border-style: dashed; --ticket-color: var(--ink-muted); --ticket-bg: transparent; }
+  @media (prefers-color-scheme: dark) {
+    .ticket-badge[data-type="epic"] { --ticket-color: #a78bfa; --ticket-bg: rgba(167, 139, 250, 0.16); }
+  }
   .info-toggle {
     padding: 0 2px;
     border: 0;
@@ -446,8 +471,64 @@
         title.appendChild(document.createTextNode(" "));
         title.appendChild(flag);
       }
+      // The tracker rung: a project is tracked as an EPIC in Jira/ADO, 1:1. Linked, it
+      // wears the epic's badge; unlinked (and real — catch-alls are local plumbing by
+      // design) it is flagged as existing only here, pending an upload the sync cannot
+      // do yet. Nothing renders on a deployment with no [[trackers]] at all.
+      const anyCatchAll = project.is_catch_all || project.catch_all_for_initiative;
+      if (data.trackers_configured) {
+        title.appendChild(document.createTextNode(" "));
+        if (project.ticket) {
+          const badge = document.createElement(project.ticket.url ? "a" : "span");
+          badge.className = "ticket-badge" + (project.ticket.unresolved ? " unresolved" : "");
+          badge.dataset.type = project.ticket.type || "other";
+          if (project.ticket.url) {
+            badge.href = project.ticket.url;
+            badge.target = "_blank";
+            badge.rel = "noopener noreferrer";
+          }
+          badge.append(project.ticket.unresolved ? "Not synced · " : "", project.ticket.key);
+          if (project.ticket.state) {
+            const state = document.createElement("span");
+            state.className = "ticket-state";
+            state.textContent = project.ticket.state;
+            badge.append(" ", state);
+          }
+          badge.title = project.ticket.unresolved
+            ? `${project.ticket.key} is linked in ${project.ticket.tracker_label || project.ticket.tracker_id} ` +
+              "but was not in the last sync."
+            : `${project.ticket.raw_type || "Epic"} ${project.ticket.key} — ${project.ticket.title || "(no title)"}\n` +
+              `${project.ticket.tracker_label || project.ticket.tracker_id}` +
+              (project.ticket.state ? ` · ${project.ticket.state}` : "");
+          title.appendChild(badge);
+        } else if (!anyCatchAll) {
+          const flag = document.createElement("span");
+          flag.className = "flag";
+          flag.textContent = "not in tracker";
+          flag.title = "Created locally — pending upload to the tracker, which isn't available yet. " +
+            "If the epic already exists there, link it with the Epic… button.";
+          title.appendChild(flag);
+        }
+      }
       const actions = document.createElement("span");
       actions.className = "actions";
+      if (data.trackers_configured && !anyCatchAll) {
+        const epicBtn = document.createElement("button");
+        epicBtn.className = "ghost";
+        epicBtn.textContent = project.ticket ? "Epic…" : "Link epic";
+        epicBtn.title = project.ticket
+          ? `Change or remove the ${project.ticket.key} link`
+          : "Link this project to the epic it is tracked as in Jira/ADO";
+        epicBtn.addEventListener("click", () => {
+          const pasted = prompt(
+            "Paste the epic's URL or key (e.g. PROJ-123).\nLeave blank to unlink — the project then counts as local-only, pending upload.",
+            project.ticket ? project.ticket.key : ""
+          );
+          if (pasted === null) return;
+          act(() => api(`/portfolio/projects/${project.id}`, json("PATCH", { ticket: pasted.trim() })));
+        });
+        actions.append(epicBtn);
+      }
       if (!project.is_catch_all) {
         actions.append(lifecycleButton("projects", project), deleteButton("projects", project));
       }

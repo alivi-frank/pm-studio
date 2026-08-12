@@ -43,6 +43,7 @@ from .portfolio import (
     DEFAULT_CATCH_ALL_PROJECT,
     DEFAULT_MAINTENANCE_GOAL,
     DEFAULT_MAINTENANCE_INITIATIVE,
+    EpicAlreadyLinked,
     PortfolioError,
     PortfolioStore,
 )
@@ -59,7 +60,14 @@ from .roadmap import (
     systems_declared,
 )
 from .sessions import DEFAULT_SESSION_ID, SessionManager, SessionRuntime
-from .trackers import TrackerError, TrackerStore, normalize_key
+from .trackers import (
+    TYPE_EPIC,
+    Ticket,
+    TrackerError,
+    TrackerStore,
+    canonical_type,
+    normalize_key,
+)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -121,7 +129,8 @@ def _lookup_ticket(tracker_id: str, key: str) -> dict | None:
 
 
 def _with_ticket(item: dict) -> dict:
-    """Joins a roadmap change to its linked ticket for the wire.
+    """Joins a roadmap change - or a project, which carries the same two link fields -
+    to its linked ticket for the wire.
 
     The item stores only `tracker_id` + `ticket_key` (see roadmap.py); everything the card
     renders - canonical type for the colour, the tracker's own type name for the label,
@@ -204,12 +213,30 @@ def _initiative_context(initiative_id: str) -> tuple[str, list[str]] | None:
         # seeing.
         if project.get("catch_all_for_initiative") and not changes:
             continue
-        groups.append(
-            (
-                f'Project "{project["title"]}" [{project["status"]}] (id `{project["id"]}`)',
-                changes,
-            )
+        project_heading = (
+            f'Project "{project["title"]}" [{project["status"]}] (id `{project["id"]}`)'
         )
+        # The same tracked-as annotation a change's line carries, one rung up: the PM
+        # should see which epic a project IS in Jira/ADO without asking. Its absence is
+        # only stated when there are trackers to be absent from - and it means "created
+        # locally, not uploaded yet", never an error, because the upload half of the
+        # sync does not exist.
+        if project.get("ticket_key"):
+            ticket = _lookup_ticket(project["tracker_id"], project["ticket_key"])
+            if ticket:
+                project_heading += (
+                    f' [tracked as {ticket["raw_type"]} {project["ticket_key"]}'
+                    f' ({ticket["state"]}) in {project["tracker_id"]}]'
+                )
+            else:
+                project_heading += (
+                    f' [linked to {project["ticket_key"]} in {project["tracker_id"]}]'
+                )
+        elif tracker_store.is_configured and not project.get("catch_all_for_initiative"):
+            project_heading += (
+                " [local only - no epic in the tracker yet; upload sync is not available]"
+            )
+        groups.append((project_heading, changes))
     if not groups:
         return (
             f"{heading}\n\nNo projects under this initiative yet - so there are no changes "
@@ -1428,11 +1455,20 @@ def _session_scope_report() -> list[dict]:
 
 @app.get("/portfolio/data")
 def portfolio_data() -> dict:
-    """Goals, initiatives, projects, the catch-all id, and the unaligned report."""
+    """Goals, initiatives, projects, the catch-all id, and the unaligned report.
+
+    Projects come joined to their epic ticket (`ticket`, same shape as a change's),
+    and `trackers_configured` is what lets the page tell "no epic yet - pending
+    upload" apart from "this deployment has no trackers at all", where the whole
+    linking layer should stay invisible.
+    """
+    snapshot = portfolio_store.snapshot()
+    snapshot["projects"] = [_with_ticket(p) for p in snapshot["projects"]]
     return {
-        **portfolio_store.snapshot(),
+        **snapshot,
         "unassigned_changes": roadmap_store.unassigned_items(),
         "session_scope": _session_scope_report(),
+        "trackers_configured": tracker_store.is_configured,
     }
 
 
@@ -1553,7 +1589,7 @@ def delete_initiative(initiative_id: str, request: Request) -> dict:
 
 @app.post("/portfolio/projects")
 def create_project(request: Request, payload: dict = Body(...)) -> dict:
-    _require(request, "manage_roadmap")
+    actor = _require(request, "manage_roadmap")
     try:
         project = portfolio_store.create_project(
             title=payload.get("title") or "",
@@ -1562,14 +1598,22 @@ def create_project(request: Request, payload: dict = Body(...)) -> dict:
         )
     except PortfolioError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return project.to_public_dict()
+    # Linking at creation is one call instead of create-then-PATCH, same as a change. A
+    # failed link raises and leaves the project created but unlinked - i.e. in the
+    # ordinary local/pending-upload state, which is exactly what an unlinked project
+    # means, so there is nothing to roll back.
+    if payload.get("ticket") or payload.get("ticket_key"):
+        project = _apply_epic_link(actor, project.id, payload)
+    return _with_ticket(project.to_public_dict())
 
 
 @app.patch("/portfolio/projects/{project_id}")
 def update_project(project_id: str, request: Request, payload: dict = Body(default={})) -> dict:
     """`initiative_id: ""` deliberately makes the project unaligned; omitting the key
-    leaves its parent alone."""
-    _require(request, "manage_roadmap")
+    leaves its parent alone. `ticket` / `ticket_key` link the project to its epic
+    (`""` unlinks, returning it to the local/pending-upload state), keyed on presence
+    like every other clearing field here."""
+    actor = _require(request, "manage_roadmap")
     raw_initiative = payload.get("initiative_id")
     try:
         project = portfolio_store.update_project(
@@ -1582,7 +1626,9 @@ def update_project(project_id: str, request: Request, payload: dict = Body(defau
         )
     except PortfolioError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return project.to_public_dict()
+    if "ticket" in payload or "ticket_key" in payload:
+        project = _apply_epic_link(actor, project_id, payload)
+    return _with_ticket(project.to_public_dict())
 
 
 @app.delete("/portfolio/projects/{project_id}")
@@ -1627,17 +1673,26 @@ def get_trackers() -> dict:
 
 
 @app.get("/trackers/tickets")
-def search_tickets(q: str = "", tracker_id: str = "", limit: int = 50) -> dict:
+def search_tickets(q: str = "", tracker_id: str = "", limit: int = 50, type: str = "") -> dict:
     """Candidate tickets for the link picker, from the synced catalog only - this endpoint
-    never calls out to a tracker, so typing in the picker cannot generate API traffic."""
-    tickets = tracker_store.search(q, tracker_id, max(1, min(limit, 200)))
+    never calls out to a tracker, so typing in the picker cannot generate API traffic.
+
+    `type` filters on the CANONICAL type slug (see trackers.CANONICAL_TYPES): the
+    project picker asks for `type=epic` so it offers only the rung a project can link
+    to, whatever the tracker's own name for that rung is.
+    """
+    tickets = tracker_store.search(q, tracker_id, max(1, min(limit, 200)), canonical=type)
     # Which candidates are already taken, so the picker can grey them out instead of
     # letting someone choose one and only then be refused by the 1:1 check. A set of
     # tuples rather than a joined string: how a catalog key is spelled is trackers.py's
     # business, and duplicating that format here is what invites the two to drift apart.
+    # BOTH stores' links count as taken - one ticket backs one thing, change or project
+    # (see _apply_ticket_link / _apply_epic_link).
     taken = {
         (tid, normalize_key(tid, key))
-        for tid, key in roadmap_store.linked_ticket_refs()
+        for tid, key in (
+            roadmap_store.linked_ticket_refs() + portfolio_store.linked_ticket_refs()
+        )
     }
     for ticket in tickets:
         tid = ticket["tracker_id"]
@@ -1671,21 +1726,36 @@ def sync_trackers(request: Request, payload: dict = Body(default={})) -> dict:
 
 
 def _described_trackers() -> dict:
-    """tracker_store.describe() plus the last import pass - the one shape every
-    consumer of TRACKERS gets, so the report can't exist on one surface only."""
-    return {**tracker_store.describe(), "imports": dict(_import_report)}
+    """tracker_store.describe() plus the last import passes - the one shape every
+    consumer of TRACKERS gets, so the reports can't exist on one surface only."""
+    return {
+        **tracker_store.describe(),
+        "imports": dict(_import_report),
+        "epic_imports": dict(_epic_report),
+    }
 
 
 def _run_tracker_sync(tracker_id: str | None) -> None:
     """One sync pass, off the event loop. Never raises - TrackerStore.sync records each
     tracker's failure in its own status entry, and this wrapper is the last backstop so a
-    bug here cannot kill the thread silently."""
+    bug here cannot kill the thread silently.
+
+    Pass order matters. Epics become projects FIRST, so that by the time the change
+    import runs, an epic-level ticket is already project-held and cannot be imported as
+    a change; the assignment pass runs LAST, so changes the import just created land in
+    their epic's project in the same cycle instead of waiting for the next one.
+    """
     try:
         tracker_store.sync(tracker_id)
         # Linked tickets outside the configured projects are not in the catalog pull, so
         # fetch those individually - otherwise they would render as unresolved forever.
-        tracker_store.refresh_missing(roadmap_store.linked_ticket_refs())
+        # Projects' epic links ride along: their badges resolve from the same catalog.
+        tracker_store.refresh_missing(
+            roadmap_store.linked_ticket_refs() + portfolio_store.linked_ticket_refs()
+        )
+        _sync_epic_projects()
         _import_routed_tickets()
+        _assign_changes_to_epic_projects()
     except Exception as exc:  # noqa: BLE001
         print(f"[trackers] sync failed: {exc}")
     _on_roadmap_update({"type": "trackers_synced", "trackers": _described_trackers()})
@@ -1697,6 +1767,217 @@ def _run_tracker_sync(tracker_id: str | None) -> None:
 # catch-all product is invented for a component nobody has routed.
 _import_report: dict[str, dict] = {}
 
+# Per-tracker outcome of the last EPIC pass (see _sync_epic_projects): projects linked
+# to existing epics vs created from new ones, changes filed under their epic's project,
+# and everything that was skipped with the reason - held by a change, unrouted, done,
+# or ambiguous. Same posture as _import_report: the skips are the report half of
+# "reported, never guessed".
+_epic_report: dict[str, dict] = {}
+
+
+def _epic_parent_key(config, ticket: Ticket) -> str | None:
+    """The normalized key of a ticket's parent, when that parent is epic-level - the
+    hierarchy fact both epic passes turn on. None for a top-level ticket, and for a
+    parent whose type is not the epic rung (a subtask's parent story says nothing about
+    which project the change belongs to)."""
+    if not ticket.parent_key or canonical_type(ticket.parent_type) != TYPE_EPIC:
+        return None
+    return normalize_key(config.id, ticket.parent_key)
+
+
+def _sync_epic_projects() -> None:
+    """Epics become projects - the same posture as _import_routed_tickets one rung up,
+    plus the one-time cleanup a deployment that predates the link needs.
+
+    Dedupe comes FIRST, because most deployments already created their projects by hand
+    while mirroring the tracker's epics - importing blindly would twin every one of
+    them. So, per routing tracker, three idempotent steps:
+
+    1. LINK by evidence: an unlinked project whose linked changes' tickets all parent
+       to ONE epic already is that epic locally - link the two rather than creating a
+       twin. This is the hierarchy argument run in reverse: a change's parent epic
+       should be its project, so a project's changes point back at its epic.
+    2. LINK by title: an unlinked project titled exactly like exactly one epic (and no
+       other unlinked project competing for that title) is linked too - the fallback
+       for projects whose changes aren't ticket-linked yet.
+    3. CREATE the rest: a routed, still-open epic nobody holds becomes a new linked
+       project. It lands unaligned - which initiative an epic serves is a human call,
+       and the unaligned report is the existing place that call is requested.
+
+    Anything else is counted, not guessed: an epic held by a CHANGE (a pre-link import
+    took it - unlink it there to let it become a project), an unrouted one, a
+    done-category one (history, not a plan), and any project whose evidence points at
+    several epics.
+    """
+    for config in CONFIG.trackers:
+        if not config.imports:
+            continue
+        report = {
+            "projects_linked": 0,
+            "projects_created": 0,
+            "changes_assigned": 0,
+            "held_by_changes": 0,
+            "unrouted_epics": 0,
+            "skipped_done": 0,
+            "contested_epics": 0,
+            "ambiguous": [],
+        }
+        _epic_report[config.id] = report
+        tickets = tracker_store.tickets_of(config.id)
+        by_key = {normalize_key(config.id, t.key): t for t in tickets}
+        epics = {k: t for k, t in by_key.items() if t.type == TYPE_EPIC}
+
+        def free(epic_key: str) -> bool:
+            """Nobody holds this epic yet, in either store."""
+            return (
+                portfolio_store.project_for_ticket(config.id, epic_key) is None
+                and roadmap_store.item_for_ticket(config.id, epic_key) is None
+            )
+
+        # Which epic(s) each project's changes point back at. Keys the epic may carry
+        # even when it is outside the synced catalog - the parent TYPE travels on the
+        # child ticket, so linking to an unsynced epic is legitimate and resolves on
+        # the next refresh_missing.
+        evidence: dict[str, set[str]] = {}
+        for items in roadmap_store.list_all().values():
+            for change in items:
+                if change.get("tracker_id") != config.id or not change.get("ticket_key"):
+                    continue
+                ticket = by_key.get(normalize_key(config.id, change["ticket_key"]))
+                if ticket is None:
+                    continue
+                parent = _epic_parent_key(config, ticket)
+                if parent and change.get("project_id"):
+                    evidence.setdefault(change["project_id"], set()).add(parent)
+
+        # Epics tangled in an ambiguity are withheld from the creation step below: one
+        # of them very likely IS the project we just declined to link, and importing it
+        # anyway would create exactly the twin this pass exists to avoid. A human
+        # resolves the link; whatever is genuinely new imports on the next sync.
+        contested: set[str] = set()
+
+        # Step 1: evidence. Catch-alls are exempt exactly as they are from linking.
+        still_unlinked = []
+        for project in portfolio_store.list_projects():
+            if (
+                project["tracker_id"] is not None
+                or project["is_catch_all"]
+                or project["catch_all_for_initiative"]
+            ):
+                continue
+            parents = evidence.get(project["id"], set())
+            if len(parents) > 1:
+                # Its changes span several epics: not this pass's call to make.
+                report["ambiguous"].append(project["title"])
+                contested.update(parents)
+                continue
+            if len(parents) == 1:
+                epic_key = next(iter(parents))
+                if free(epic_key):
+                    portfolio_store.link_epic(project["id"], config.id, epic_key)
+                    report["projects_linked"] += 1
+                    continue
+            still_unlinked.append(project)
+
+        # Step 2: exact title match, unique on BOTH sides - two projects sharing a
+        # title, or two epics sharing one, is ambiguity, not a coin toss.
+        epic_titles: dict[str, list[str]] = {}
+        for key, epic in epics.items():
+            title = epic.title.strip().casefold()
+            if title:
+                epic_titles.setdefault(title, []).append(key)
+        project_titles: dict[str, list[dict]] = {}
+        for project in still_unlinked:
+            project_titles.setdefault(project["title"].strip().casefold(), []).append(project)
+        for title, candidates in project_titles.items():
+            keys = epic_titles.get(title) or []
+            if not keys:
+                continue
+            if len(candidates) > 1 or len(keys) > 1:
+                report["ambiguous"].extend(p["title"] for p in candidates)
+                contested.update(keys)
+                continue
+            if free(keys[0]):
+                portfolio_store.link_epic(candidates[0]["id"], config.id, keys[0])
+                report["projects_linked"] += 1
+
+        # Step 3: what remains genuinely new. Routed like the change import, so an
+        # area nobody has declared yet stays out; done-category epics are history and
+        # would import as instant clutter, so they are counted instead.
+        maps = _route_maps(config)
+        for epic_key, epic in epics.items():
+            if portfolio_store.project_for_ticket(config.id, epic_key) is not None:
+                continue
+            if epic_key in contested:
+                report["contested_epics"] += 1
+                continue
+            if roadmap_store.item_for_ticket(config.id, epic_key) is not None:
+                report["held_by_changes"] += 1
+                continue
+            if _match_route(maps, epic) is None:
+                report["unrouted_epics"] += 1
+                continue
+            if _imported_status(epic) == "done":
+                report["skipped_done"] += 1
+                continue
+            project = portfolio_store.create_project(
+                title=epic.title or epic.key,
+                description=f"Imported from {config.label} {epic.key}.",
+            )
+            try:
+                portfolio_store.link_epic(project.id, config.id, epic_key)
+            except EpicAlreadyLinked:
+                # Lost the race to a concurrent manual link - theirs wins; remove the
+                # project this pass just created so the epic keeps exactly one.
+                portfolio_store.delete_project(project.id)
+                continue
+            report["projects_created"] += 1
+            _audit(None, "portfolio.project_imported", project.id, epic_key)
+        if report["projects_created"] or report["projects_linked"]:
+            print(
+                f"[trackers] {config.id}: epics -> {report['projects_created']} project(s) "
+                f"created, {report['projects_linked']} linked"
+            )
+
+
+def _assign_changes_to_epic_projects() -> None:
+    """A change whose ticket parents to an epic belongs to that epic's project - fill
+    the assignment in wherever it is MISSING. Runs after the change import so a change
+    and its project meet in the same sync cycle.
+
+    Only ever fills None: a change a human deliberately filed under some other project
+    is their statement, and silently overriding it with the tracker's hierarchy would
+    make the board fight its own users. The unassigned report shrinking is the whole
+    effect.
+    """
+    for config in CONFIG.trackers:
+        if not config.imports:
+            continue
+        report = _epic_report.get(config.id)
+        by_key = {
+            normalize_key(config.id, t.key): t for t in tracker_store.tickets_of(config.id)
+        }
+        for items in roadmap_store.list_all().values():
+            for change in items:
+                if (
+                    change.get("project_id")
+                    or change.get("tracker_id") != config.id
+                    or not change.get("ticket_key")
+                ):
+                    continue
+                ticket = by_key.get(normalize_key(config.id, change["ticket_key"]))
+                if ticket is None:
+                    continue
+                parent = _epic_parent_key(config, ticket)
+                if parent is None:
+                    continue
+                project = portfolio_store.project_for_ticket(config.id, parent)
+                if project is None:
+                    continue
+                roadmap_store.update(change["id"], project_id=project.id)
+                if report is not None:
+                    report["changes_assigned"] += 1
+
 
 def _imported_status(ticket) -> str:
     """The coarse state a fresh import starts in, keyed on the ticket's state category
@@ -1707,6 +1988,36 @@ def _imported_status(ticket) -> str:
     if any(word in category for word in ("progress", "active", "doing")):
         return "in_progress"
     return "pending"
+
+
+def _route_maps(config) -> tuple[dict, dict, dict]:
+    """The three lookup tables one tracker's routes compile to, built once per pass.
+    Shared by the change import and the epic import so "routed" means one thing."""
+    by_proj_comp = {
+        (r.project.casefold(), r.component.casefold()): r
+        for r in config.routes if r.project and r.component
+    }
+    by_component = {
+        r.component.casefold(): r for r in config.routes if r.component and not r.project
+    }
+    by_project = {
+        r.project.casefold(): r for r in config.routes if r.project and not r.component
+    }
+    return by_proj_comp, by_component, by_project
+
+
+def _match_route(maps: tuple[dict, dict, dict], ticket):
+    """Most-specific match wins, tried in this order: component within a project,
+    component anywhere, whole project. A project-wide default must not swallow the
+    exceptions declared beside it. None when nothing routes the ticket."""
+    by_proj_comp, by_component, by_project = maps
+    proj = (ticket.project or "").casefold()
+    comps = [c.casefold() for c in ticket.components]
+    return (
+        next((by_proj_comp[(proj, c)] for c in comps if (proj, c) in by_proj_comp), None)
+        or next((by_component[c] for c in comps if c in by_component), None)
+        or by_project.get(proj)
+    )
 
 
 def _import_routed_tickets() -> None:
@@ -1721,35 +2032,25 @@ def _import_routed_tickets() -> None:
     for config in CONFIG.trackers:
         if not config.imports:
             continue
+        # BOTH stores' links count: a ticket a project holds must not also become a
+        # change - the same one-ticket-one-thing rule the interactive paths enforce.
+        # The epic pass runs first (see _run_tracker_sync), so on a deployment whose
+        # import_types accidentally include the epic rung, an epic is already a project
+        # by the time this pass sees it, and is skipped here rather than duplicated.
         linked = {
-            normalize_key(tid, key) for tid, key in roadmap_store.linked_ticket_refs()
+            normalize_key(tid, key)
+            for tid, key in (
+                roadmap_store.linked_ticket_refs() + portfolio_store.linked_ticket_refs()
+            )
         }
         types = {t.casefold() for t in config.import_types}
-        # Most-specific match wins, tried in this order: component within a project,
-        # component anywhere, whole project. A project-wide default must not swallow
-        # the exceptions declared beside it.
-        by_proj_comp = {
-            (r.project.casefold(), r.component.casefold()): r
-            for r in config.routes if r.project and r.component
-        }
-        by_component = {
-            r.component.casefold(): r for r in config.routes if r.component and not r.project
-        }
-        by_project = {
-            r.project.casefold(): r for r in config.routes if r.project and not r.component
-        }
+        maps = _route_maps(config)
         imported = 0
         unrouted: dict[str, int] = {}
         for ticket in tracker_store.tickets_of(config.id):
             if ticket.raw_type.casefold() not in types:
                 continue
-            proj = (ticket.project or "").casefold()
-            comps = [c.casefold() for c in ticket.components]
-            route = (
-                next((by_proj_comp[(proj, c)] for c in comps if (proj, c) in by_proj_comp), None)
-                or next((by_component[c] for c in comps if c in by_component), None)
-                or by_project.get(proj)
-            )
+            route = _match_route(maps, ticket)
             if route is None:
                 for c in ticket.components or ["(no component)"]:
                     unrouted[c] = unrouted.get(c, 0) + 1
@@ -1835,7 +2136,9 @@ def roadmap_data() -> dict:
         },
         "portfolio": {
             "initiatives": portfolio_store.list_initiatives(),
-            "projects": portfolio_store.list_projects(),
+            # Joined to their epic tickets like the items above: the initiative lens
+            # draws a badge per project row, and it must not need a second request.
+            "projects": [_with_ticket(p) for p in portfolio_store.list_projects()],
             "catch_all_project_id": portfolio_store.catch_all_project_id,
         },
         # So the board can render the badge palette and the picker without a second
@@ -1857,12 +2160,20 @@ def roadmap_by_initiative() -> dict:
         for items in roadmap_store.list_all().values()
         for item in items
     ]
+    groups = portfolio_store.group_changes_by_initiative(changes)
+    # The nested project entries get the same epic join the flat lists get - the
+    # grouping is the portfolio's, the catalog is this module's, so the join happens
+    # here on the assembled shape.
+    for group in groups:
+        for entry in group["projects"]:
+            if entry["project"] is not None:
+                entry["project"] = _with_ticket(entry["project"])
     return {
         "pivot": "initiative",
         "products": PRODUCTS,
         "product_parents": PRODUCT_PARENTS,
         "systems": {s: spec.label for s, spec in SYSTEMS.items()},
-        "groups": portfolio_store.group_changes_by_initiative(changes),
+        "groups": groups,
         "trackers": _described_trackers(),
     }
 
@@ -1981,12 +2292,23 @@ def update_roadmap_item(product: str, item_id: str, request: Request, payload: d
     return _with_ticket(item.to_public_dict())
 
 
-def _apply_ticket_link(actor: User | None, item_id: str, payload: dict) -> RoadmapItem:
-    """Links or unlinks a change's ticket from a roadmap PATCH.
+def _is_unlink(payload: dict) -> bool:
+    """Whether a link payload means "clear the link": `"ticket": ""` or
+    `"ticket_key": ""`, the same present-but-empty convention owner/project_id use."""
+    reference = payload.get("ticket")
+    return (reference is not None and not str(reference).strip()) or (
+        "ticket_key" in payload and not (payload.get("ticket_key") or "").strip()
+    )
+
+
+def _resolve_ticket(payload: dict) -> tuple[str, str, Ticket]:
+    """Resolves a link payload to (tracker_id, key, ticket), or raises the HTTP error
+    that says why not. The shared half of linking a change and linking a project - one
+    payload convention, one existence check, one set of failure shapes.
 
     Accepts either a single `ticket` value - a full URL or a bare key, resolved against the
     configured trackers - or an explicit `tracker_id` + `ticket_key` pair for a caller that
-    already knows both. An empty value unlinks.
+    already knows both.
 
     A link is refused unless the ticket actually EXISTS in its tracker: without that, a
     typo would sit on the card forever as an unresolved badge, which looks identical to a
@@ -1996,13 +2318,6 @@ def _apply_ticket_link(actor: User | None, item_id: str, payload: dict) -> Roadm
     reference = payload.get("ticket")
     explicit_key = (payload.get("ticket_key") or "").strip()
     explicit_tracker = (payload.get("tracker_id") or "").strip()
-
-    # Unlink: `"ticket": ""` or `"ticket_key": ""`.
-    if (reference is not None and not str(reference).strip()) or (
-        "ticket_key" in payload and not explicit_key
-    ):
-        _audit(actor, "roadmap.ticket_unlinked", item_id)
-        return roadmap_store.unlink_ticket(item_id)
 
     if not tracker_store.is_configured:
         raise HTTPException(
@@ -2042,6 +2357,30 @@ def _apply_ticket_link(actor: User | None, item_id: str, payload: dict) -> Roadm
             detail=f"{key} was not found in {tracker_id}. Check the key, or that the "
             "configured credential can see that project.",
         )
+    return tracker_id, key, ticket
+
+
+def _apply_ticket_link(actor: User | None, item_id: str, payload: dict) -> RoadmapItem:
+    """Links or unlinks a change's ticket from a roadmap PATCH. An empty value unlinks;
+    resolution and existence checking are _resolve_ticket's (see there)."""
+    if _is_unlink(payload):
+        _audit(actor, "roadmap.ticket_unlinked", item_id)
+        return roadmap_store.unlink_ticket(item_id)
+
+    tracker_id, key, ticket = _resolve_ticket(payload)
+
+    # One ticket backs ONE thing in PM Studio, across both stores: each store enforces
+    # 1:1 among its own records, and this is the cross-store half. Without it, an epic
+    # could be a project here and a change there, and the two would drift apart while
+    # both claiming to BE that ticket.
+    holder = portfolio_store.project_for_ticket(tracker_id, key)
+    if holder is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{key} is already linked to the project \"{holder.title}\" "
+            f"(id {holder.id}). A ticket can back one change or one project, not "
+            "both - unlink it from the project first.",
+        )
 
     try:
         item = roadmap_store.link_ticket(item_id, tracker_id, key)
@@ -2053,6 +2392,51 @@ def _apply_ticket_link(actor: User | None, item_id: str, payload: dict) -> Roadm
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _audit(actor, "roadmap.ticket_linked", item_id, f"{tracker_id}/{ticket.key}")
     return item
+
+
+def _apply_epic_link(actor: User | None, project_id: str, payload: dict):
+    """Links or unlinks a project's epic from a portfolio POST/PATCH - the project-rung
+    twin of _apply_ticket_link, with one extra rule: the ticket must actually BE an
+    epic-level one. A project is what an epic is in the tracker's own hierarchy, and
+    silently letting a Story stand in for one would make every "tracked as" annotation
+    a small lie. The check keys on the canonical type, so ADO's "Epic" and a renamed
+    "Initiative"/"Theme" all pass while a Story or Bug is refused by name.
+    """
+    if _is_unlink(payload):
+        _audit(actor, "portfolio.epic_unlinked", project_id)
+        try:
+            return portfolio_store.unlink_epic(project_id)
+        except PortfolioError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    tracker_id, key, ticket = _resolve_ticket(payload)
+
+    if ticket.type != TYPE_EPIC:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{ticket.key} is a {ticket.raw_type}, not an epic-level ticket. "
+            "A project links to the epic it is tracked as; stories, tasks and bugs "
+            "link to the project's changes instead.",
+        )
+
+    # The other direction of the cross-store rule in _apply_ticket_link.
+    holder = roadmap_store.item_for_ticket(tracker_id, key)
+    if holder is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{key} is already linked to the change \"{holder.title}\" "
+            f"(id {holder.id}) on the {holder.product} board. A ticket can back one "
+            "change or one project, not both - unlink it there first.",
+        )
+
+    try:
+        project = portfolio_store.link_epic(project_id, tracker_id, key)
+    except EpicAlreadyLinked as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PortfolioError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit(actor, "portfolio.epic_linked", project_id, f"{tracker_id}/{ticket.key}")
+    return project
 
 
 @app.delete("/roadmap/{product}/items/{item_id}")
