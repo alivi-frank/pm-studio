@@ -2181,6 +2181,9 @@
         // out its own destination from the changes it holds.
         product: products.size === 1 ? [...products][0] : null,
         projectIds: projects.map((p) => p.id),
+        // For the sort below: within one activity state, closed initiatives sink
+        // below open ones. A fact of its own, not read back out of the flags.
+        closed: initiative.status === "closed",
       };
     });
 
@@ -2204,8 +2207,27 @@
     return groups;
   }
 
+  /* What is moving first, then what is parked, then what is finished - the same order
+     at every depth, so the top of any list is always the work being run right now.
+     Within one state, whatever is CLOSED sinks below what is still open: two parked
+     initiatives are not the same thing when one of them somebody has already called
+     done, and "inactive but still ours" reads wrong sitting under a shelf of legacy.
+     (Products are never closed, so the tiebreak is a no-op in the product lens.)
+     Stable beyond that, so remaining ties keep the taxonomy's (or the portfolio's)
+     own order - the initiative lens's trailing "Unaligned" group stays behind the
+     open initiatives that share its state. */
+  const STATE_RANK = { active: 0, inactive: 1, completed: 2 };
+  function sortGroupsByState(groups) {
+    for (const group of groups) sortGroupsByState(group.subgroups || []);
+    // groupState walks the whole subtree, so it is taken once per group here rather
+    // than on every comparison the sort makes.
+    const rank = new Map(groups.map((g) => [g.key, STATE_RANK[groupState(g)] * 2 + (g.closed ? 1 : 0)]));
+    groups.sort((a, b) => rank.get(a.key) - rank.get(b.key));
+    return groups;
+  }
+
   function currentGroups() {
-    return groupBy === "initiative" ? groupsByInitiative() : groupsByProduct();
+    return sortGroupsByState(groupBy === "initiative" ? groupsByInitiative() : groupsByProduct());
   }
 
   /* ---- the project level ----------------------------------------------------------
@@ -2317,7 +2339,19 @@
 
     const rows = ids.map((id) => row(PROJECTS_BY_ID[id], byProject.get(id) || []));
     if (byProject.has(null)) rows.push(row(null, byProject.get(null)));
-    return rows;
+    /* The same active / inactive / completed order the sections themselves keep, one
+       level down: a row is active when it holds open Now/Next work, completed when it
+       is history (see isHistoryRow), parked otherwise - and within one state a closed
+       project sinks below the open ones, the same tiebreak sortGroupsByState applies.
+       Stable beyond that, so remaining ties keep the portfolio's own order and the
+       "No project" row stays last among its peers. History rows land at the end either
+       way - both views already split them off behind the "show closed" toggle. */
+    const rowRank = (r) =>
+      (r.changes.some((c) => c.status !== "done" && (c.bucket === "now" || c.bucket === "next"))
+        ? 0 : isHistoryRow(r) ? 2 : 1) * 2
+      + (r.project && r.project.status === "closed" ? 1 : 0);
+    const rank = new Map(rows.map((r) => [r.key, rowRank(r)]));
+    return rows.sort((a, b) => rank.get(a.key) - rank.get(b.key));
   }
 
   /* A closed project with nothing left open is history: true about the section but not
