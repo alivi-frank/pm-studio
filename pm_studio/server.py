@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from dataclasses import asdict
 import threading
 import time
@@ -1775,6 +1776,16 @@ _import_report: dict[str, dict] = {}
 _epic_report: dict[str, dict] = {}
 
 
+_TITLE_NORM = re.compile(r"[^0-9a-z]+")
+
+
+def _normalize_title(title: str) -> str:
+    """A title as humans repeat it: case, punctuation and spacing dropped, so
+    'Vendor "Pay To" Changes' in the tracker and 'Vendor Pay To Changes' typed by hand
+    are the same name. Matching only - never stored, never shown."""
+    return _TITLE_NORM.sub(" ", (title or "").casefold()).strip()
+
+
 def _epic_parent_key(config, ticket: Ticket) -> str | None:
     """The normalized key of a ticket's parent, when that parent is epic-level - the
     hierarchy fact both epic passes turn on. None for a top-level ticket, and for a
@@ -1804,10 +1815,17 @@ def _sync_epic_projects() -> None:
        project. It lands unaligned - which initiative an epic serves is a human call,
        and the unaligned report is the existing place that call is requested.
 
-    Anything else is counted, not guessed: an epic held by a CHANGE (a pre-link import
-    took it - unlink it there to let it become a project), an unrouted one, a
-    done-category one (history, not a plan), and any project whose evidence points at
-    several epics.
+    Before any of that, the pass RECLAIMS its own mess: a deployment whose
+    import_types included the epic rung had every epic imported as a CHANGE before
+    projects could link, and each of those changes now blocks its epic from backing a
+    project. One is deleted only when it is provably still the import artifact and
+    nothing more - the description is exactly the stamp the import wrote, no project,
+    no owner - so the only thing removed is a duplicate of the epic this pass is about
+    to represent properly. A change anyone touched is somebody's work and stays put.
+
+    Anything else is counted, not guessed: an epic held by a change someone touched
+    (unlink it there to let it become a project), an unrouted one, a done-category one
+    (history, not a plan), and any project whose evidence points at several epics.
     """
     for config in CONFIG.trackers:
         if not config.imports:
@@ -1816,6 +1834,8 @@ def _sync_epic_projects() -> None:
             "projects_linked": 0,
             "projects_created": 0,
             "changes_assigned": 0,
+            "reclaimed_from_changes": 0,
+            "twins_merged": 0,
             "held_by_changes": 0,
             "unrouted_epics": 0,
             "skipped_done": 0,
@@ -1826,6 +1846,65 @@ def _sync_epic_projects() -> None:
         tickets = tracker_store.tickets_of(config.id)
         by_key = {normalize_key(config.id, t.key): t for t in tickets}
         epics = {k: t for k, t in by_key.items() if t.type == TYPE_EPIC}
+
+        # Reclaim first, so a freed epic flows through the very steps below in the
+        # same pass instead of blocking its project for one more sync (see docstring).
+        for epic_key in epics:
+            holder = roadmap_store.item_for_ticket(config.id, epic_key)
+            if holder is None:
+                continue
+            pristine = (
+                holder.description.startswith("Imported from ")
+                and holder.project_id is None
+                and holder.owner is None
+            )
+            if not pristine:
+                continue
+            roadmap_store.delete(holder.id)
+            report["reclaimed_from_changes"] += 1
+            _audit(None, "roadmap.epic_change_reclaimed", holder.id, epic_key)
+
+        # Merge the twins this pass itself made while title matching was still
+        # exact-only: an import-created project claiming an epic while a hand-made
+        # unlinked project wears the same normalized title is one project written
+        # twice. The HAND-MADE one survives - it is the one carrying human context
+        # (its initiative, its wording) - and the twin must still be provably
+        # untouched plumbing: the import stamp for a description and no initiative
+        # anyone filed it under. Its changes (auto-assigned here, one step down)
+        # move over before it goes, so nothing is orphaned.
+        unlinked_by_title: dict[str, list[dict]] = {}
+        for project in portfolio_store.list_projects():
+            if (
+                project["tracker_id"] is None
+                and not project["is_catch_all"]
+                and not project["catch_all_for_initiative"]
+            ):
+                unlinked_by_title.setdefault(
+                    _normalize_title(project["title"]), []
+                ).append(project)
+        for twin in portfolio_store.list_projects():
+            if (
+                twin["tracker_id"] != config.id
+                or not (twin["description"] or "").startswith("Imported from ")
+                or twin["initiative_id"] is not None
+            ):
+                continue
+            candidates = unlinked_by_title.get(_normalize_title(twin["title"]), [])
+            if len(candidates) != 1:
+                continue
+            survivor = candidates[0]
+            unlinked_by_title[_normalize_title(twin["title"])] = []
+            for change in roadmap_store.list_by_project(twin["id"]):
+                roadmap_store.update(change["id"], project_id=survivor["id"])
+            epic_key = twin["ticket_key"]
+            portfolio_store.unlink_epic(twin["id"])
+            portfolio_store.delete_project(twin["id"])
+            portfolio_store.link_epic(survivor["id"], config.id, epic_key)
+            report["twins_merged"] += 1
+            _audit(
+                None, "portfolio.twin_project_merged", survivor["id"],
+                f"{epic_key} (absorbed {twin['id']})",
+            )
 
         def free(epic_key: str) -> bool:
             """Nobody holds this epic yet, in either store."""
@@ -1879,16 +1958,18 @@ def _sync_epic_projects() -> None:
                     continue
             still_unlinked.append(project)
 
-        # Step 2: exact title match, unique on BOTH sides - two projects sharing a
-        # title, or two epics sharing one, is ambiguity, not a coin toss.
+        # Step 2: NORMALIZED title match (see _normalize_title - a hand-typed project
+        # title and the tracker's epic routinely disagree only in quotes or casing),
+        # unique on BOTH sides: two projects sharing a normalized title, or two epics
+        # sharing one, is ambiguity, not a coin toss.
         epic_titles: dict[str, list[str]] = {}
         for key, epic in epics.items():
-            title = epic.title.strip().casefold()
+            title = _normalize_title(epic.title)
             if title:
                 epic_titles.setdefault(title, []).append(key)
         project_titles: dict[str, list[dict]] = {}
         for project in still_unlinked:
-            project_titles.setdefault(project["title"].strip().casefold(), []).append(project)
+            project_titles.setdefault(_normalize_title(project["title"]), []).append(project)
         for title, candidates in project_titles.items():
             keys = epic_titles.get(title) or []
             if not keys:

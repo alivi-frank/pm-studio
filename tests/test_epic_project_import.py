@@ -167,6 +167,68 @@ class EpicProjectImportTest(unittest.TestCase):
         self.assertEqual(self._projects(), [])
         self.assertEqual(server_module._epic_report["jira"]["held_by_changes"], 1)
 
+    # ---- reclaiming the pre-link import's epic-shaped changes ----
+
+    def _import_artifact(self, key: str) -> str:
+        """A change exactly as the pre-link import created it: stamp description,
+        linked to the epic, filed nowhere, owned by nobody."""
+        item = server_module.roadmap_store.create(
+            "checkout",
+            "The epic's own title",
+            description=f"Imported from Jira {key} by project route 'PROJ'.",
+        )
+        server_module.roadmap_store.link_ticket(item.id, "jira", key)
+        return item.id
+
+    def test_a_pristine_epic_change_is_reclaimed_and_the_epic_imports(self) -> None:
+        change_id = self._import_artifact("PROJ-1")
+        self._run([_ticket("PROJ-1", "Epic", title="The epic")])
+        self.assertIsNone(server_module.roadmap_store.get(change_id))
+        projects = self._projects()
+        self.assertEqual(len(projects), 1)
+        self.assertEqual(projects[0]["ticket_key"], "PROJ-1")
+        report = server_module._epic_report["jira"]
+        self.assertEqual(report["reclaimed_from_changes"], 1)
+        self.assertEqual(report["held_by_changes"], 0)
+
+    def test_a_reclaimed_epic_links_to_its_evidence_project_not_a_twin(self) -> None:
+        """The deployment-in-the-wild shape: the epic was imported as a change AND a
+        human made the project by hand, filing the epic's stories under it. One pass
+        must delete the artifact and link the hand-made project, creating nothing."""
+        self._import_artifact("PROJ-1")
+        project = server_module.portfolio_store.create_project("Hand-made")
+        item = server_module.roadmap_store.create(
+            "checkout", "A story", project_id=project.id
+        )
+        server_module.roadmap_store.link_ticket(item.id, "jira", "PROJ-2")
+        self._run([
+            _ticket("PROJ-1", "Epic", title="The epic"),
+            _ticket("PROJ-2", "Story", parent="PROJ-1", parent_type="Epic"),
+        ])
+        projects = self._projects()
+        self.assertEqual([p["id"] for p in projects], [project.id])
+        self.assertEqual(projects[0]["ticket_key"], "PROJ-1")
+        report = server_module._epic_report["jira"]
+        self.assertEqual(
+            (report["reclaimed_from_changes"], report["projects_linked"], report["projects_created"]),
+            (1, 1, 0),
+        )
+
+    def test_a_touched_epic_change_is_somebodys_work_and_stays(self) -> None:
+        parent = server_module.portfolio_store.create_project("Filed here on purpose")
+        item = server_module.roadmap_store.create(
+            "checkout",
+            "The epic, adopted as a change",
+            description="Imported from Jira PROJ-1 by project route 'PROJ'.",
+            project_id=parent.id,
+        )
+        server_module.roadmap_store.link_ticket(item.id, "jira", "PROJ-1")
+        self._run([_ticket("PROJ-1", "Epic")])
+        self.assertIsNotNone(server_module.roadmap_store.get(item.id))
+        report = server_module._epic_report["jira"]
+        self.assertEqual(report["reclaimed_from_changes"], 0)
+        self.assertEqual(report["held_by_changes"], 1)
+
     # ---- the one-time cleanup: linking what already exists ----
 
     def test_an_existing_project_is_linked_by_its_changes_parent_epic(self) -> None:
@@ -219,6 +281,15 @@ class EpicProjectImportTest(unittest.TestCase):
         self.assertEqual(projects[0]["id"], project.id)
         self.assertEqual(projects[0]["ticket_key"], "PROJ-1")
 
+    def test_title_matching_sees_through_punctuation(self) -> None:
+        """The shape found in the wild: the tracker says 'Vendor "Pay To" Changes',
+        the hand-made project says 'Vendor Pay To Changes'. Same name."""
+        project = server_module.portfolio_store.create_project("Vendor Pay To Changes")
+        self._run([_ticket("PROJ-1", "Epic", title='Vendor "Pay To" Changes')])
+        projects = self._projects()
+        self.assertEqual([p["id"] for p in projects], [project.id])
+        self.assertEqual(projects[0]["ticket_key"], "PROJ-1")
+
     def test_two_epics_sharing_a_title_neither_link_nor_import(self) -> None:
         """One of the contested epics very likely IS the unlinked project, so importing
         them anyway would twin it - they are withheld until a human links, and only
@@ -248,6 +319,52 @@ class EpicProjectImportTest(unittest.TestCase):
         ])
         linked = server_module.portfolio_store.get_project(project.id)
         self.assertEqual(linked.ticket_key, "PROJ-1")
+
+    # ---- merging the twins exact-only title matching created ----
+
+    def _twin(self, key: str, title: str) -> str:
+        """An import-created linked project, exactly as the pass used to make them."""
+        twin = server_module.portfolio_store.create_project(
+            title, description=f"Imported from Jira {key}."
+        )
+        server_module.portfolio_store.link_epic(twin.id, "jira", key)
+        return twin.id
+
+    def test_an_import_twin_is_merged_into_the_hand_made_project(self) -> None:
+        initiative = server_module.portfolio_store.create_initiative("The bet")
+        survivor = server_module.portfolio_store.create_project(
+            "Vendor Pay To Changes", initiative_id=initiative.id
+        )
+        twin_id = self._twin("PROJ-1", 'Vendor "Pay To" Changes')
+        change = server_module.roadmap_store.create(
+            "checkout", "Auto-filed story", project_id=twin_id
+        )
+        self._run([_ticket("PROJ-1", "Epic", title='Vendor "Pay To" Changes')])
+        self.assertIsNone(server_module.portfolio_store.get_project(twin_id))
+        kept = server_module.portfolio_store.get_project(survivor.id)
+        self.assertEqual(kept.ticket_key, "PROJ-1")
+        self.assertEqual(kept.initiative_id, initiative.id)  # human context survives
+        self.assertEqual(
+            server_module.roadmap_store.get(change.id).project_id, survivor.id
+        )
+        self.assertEqual(server_module._epic_report["jira"]["twins_merged"], 1)
+
+    def test_a_twin_someone_filed_under_an_initiative_is_not_plumbing(self) -> None:
+        initiative = server_module.portfolio_store.create_initiative("The bet")
+        server_module.portfolio_store.create_project("Vendor Pay To Changes")
+        twin_id = self._twin("PROJ-1", 'Vendor "Pay To" Changes')
+        server_module.portfolio_store.update_project(twin_id, initiative_id=initiative.id)
+        self._run([_ticket("PROJ-1", "Epic", title='Vendor "Pay To" Changes')])
+        self.assertIsNotNone(server_module.portfolio_store.get_project(twin_id))
+        self.assertEqual(server_module._epic_report["jira"]["twins_merged"], 0)
+
+    def test_a_twin_with_two_lookalikes_merges_into_neither(self) -> None:
+        server_module.portfolio_store.create_project("Vendor Pay To Changes")
+        server_module.portfolio_store.create_project("Vendor PAY-TO Changes")
+        twin_id = self._twin("PROJ-1", 'Vendor "Pay To" Changes')
+        self._run([_ticket("PROJ-1", "Epic", title='Vendor "Pay To" Changes')])
+        self.assertIsNotNone(server_module.portfolio_store.get_project(twin_id))
+        self.assertEqual(server_module._epic_report["jira"]["twins_merged"], 0)
 
     # ---- assignment: changes land in their epic's project ----
 
