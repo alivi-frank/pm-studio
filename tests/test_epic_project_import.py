@@ -409,6 +409,20 @@ class EpicProjectImportTest(unittest.TestCase):
         self.assertEqual(server_module._import_report["jira"]["imported"], 0)
         self.assertEqual(len(self._projects()), 1)
 
+    def test_a_done_epic_does_not_ping_pong_between_the_two_passes(self) -> None:
+        """The failure seen live: a DONE epic is refused as a project (history), so with
+        "Epic" in import_types the change import would re-import it as a change on every
+        sync, for the next sync's reclaim to delete again - 42 phantom changes a cycle.
+        Epic-level tickets are never changes, so two full cycles must leave nothing."""
+        tickets = [_ticket("PROJ-1", "Epic", title="Old epic", state="Done", category="Done")]
+        for _ in range(2):
+            self._run(tickets)
+            server_module._import_routed_tickets()
+        self.assertIsNone(server_module.roadmap_store.item_for_ticket("jira", "PROJ-1"))
+        self.assertEqual(self._projects(), [])
+        self.assertEqual(server_module._import_report["jira"]["imported"], 0)
+        self.assertEqual(server_module._epic_report["jira"]["reclaimed_from_changes"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2131,6 +2131,14 @@ def _import_routed_tickets() -> None:
         for ticket in tracker_store.tickets_of(config.id):
             if ticket.raw_type.casefold() not in types:
                 continue
+            # Epic-level tickets are NEVER changes, whatever import_types says - they
+            # are the epic pass's to represent, as projects. Without this, a done epic
+            # ping-pongs forever on a deployment whose import_types include the epic
+            # rung: the reclaim deletes its epic-shaped change, the epic pass skips it
+            # (done epics are history, not projects), and this pass would then re-import
+            # it as a change for the next sync's reclaim to delete again.
+            if ticket.type == TYPE_EPIC:
+                continue
             route = _match_route(maps, ticket)
             if route is None:
                 for c in ticket.components or ["(no component)"]:
