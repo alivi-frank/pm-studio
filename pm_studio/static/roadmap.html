@@ -1376,6 +1376,26 @@
     return node;
   }
 
+  /* The board is three folds deep - section, project row, card - and each level used to
+     build everything inside it whether or not it was showing. On a real portfolio that
+     is tens of thousands of nodes the user has not asked to see, every one of them
+     costing a select full of products or a create form, and every fold then paying to
+     lay the hidden ones out.
+
+     So a fold's contents are built the first time it is opened, and kept once built.
+     Built once, never rebuilt, is the important half: the folds carry reading state
+     inside them (a card opened, a half-typed create form), and tearing the contents down
+     on close would throw that away. Returns the function to call when the fold opens;
+     calling it again after the first time does nothing. */
+  function buildOnce(build) {
+    let built = false;
+    return () => {
+      if (built) return;
+      built = true;
+      build();
+    };
+  }
+
   function relativeTime(seconds) {
     if (!seconds) return "";
     const diff = Date.now() / 1000 - seconds;
@@ -1439,6 +1459,11 @@
     return wrap;
   }
 
+  /* Re-labels the mounted collapse-all button, so folding one section can update it in
+     place. Rebuilding the whole controls slot for this - which is what a fold used to do
+     - re-derives the sections and the filter counts to change one word. */
+  let collapseControl = null;
+
   /* One button rather than two, because "collapse all" and "expand all" are never both
      useful at once: whichever the board is not already in is the one worth offering.
      It acts on the sections you can currently see - the keys come from currentGroups(),
@@ -1448,13 +1473,23 @@
     // Nested sections included: a sub-product section is one of the things "all" means,
     // and leaving them out would make "expand all" open a parent onto folded children.
     const keys = groupKeys(currentGroups());
-    const allCollapsed = keys.length > 0 && keys.every((k) => isCollapsed(k));
-    const button = el("button", "pmnav-action", allCollapsed ? "Expand all" : "Collapse all");
+    let allCollapsed = keys.length > 0 && keys.every((k) => isCollapsed(k));
+    const button = el("button", "pmnav-action");
     button.type = "button";
-    button.title = allCollapsed
-      ? `Open all ${keys.length} ${groupBy === "initiative" ? "initiatives" : "products"}`
-      : `Fold all ${keys.length} ${groupBy === "initiative" ? "initiatives" : "products"} down to their headings`;
     button.disabled = !keys.length;
+    /* Folding a section changes nothing else in the nav - not the lens, not the view,
+       not the Show counts, which count sections rather than open ones - so this is the
+       only thing a fold has to refresh. The keys are fixed for as long as the slot is
+       mounted: what folds are the sections that are already there. */
+    const relabel = () => {
+      allCollapsed = keys.length > 0 && keys.every((k) => isCollapsed(k));
+      button.textContent = allCollapsed ? "Expand all" : "Collapse all";
+      button.title = allCollapsed
+        ? `Open all ${keys.length} ${groupBy === "initiative" ? "initiatives" : "products"}`
+        : `Fold all ${keys.length} ${groupBy === "initiative" ? "initiatives" : "products"} down to their headings`;
+    };
+    relabel();
+    collapseControl = relabel;
     button.addEventListener("click", () => {
       const hadFocus = document.activeElement === button;
       for (const key of keys) {
@@ -1508,6 +1543,7 @@
 
   function mountControls(slot) {
     slot.textContent = "";
+    collapseControl = null;
     slot.appendChild(collapseAllButton());
     slot.appendChild(el("span", "pmnav-seg-label", "Show"));
     slot.appendChild(stateFilterControl());
@@ -1901,12 +1937,6 @@
     dot.title = STATUS_LABEL[item.status] || item.status;
     main.appendChild(dot);
     main.appendChild(el("span", "card-title", item.title));
-    main.addEventListener("click", () => {
-      const nowOpen = !openCards.has(item.id);
-      if (nowOpen) openCards.add(item.id); else openCards.delete(item.id);
-      card.classList.toggle("open", nowOpen);
-      main.setAttribute("aria-expanded", String(nowOpen));
-    });
     card.appendChild(main);
 
     // The ticket badge is a real link, so it sits outside the toggle button rather than
@@ -1916,11 +1946,25 @@
     if (item.ticket) meta.appendChild(ticketBadge(item.ticket, true));
     card.appendChild(meta);
 
+    /* Built on first open. itemControls is the single most expensive thing the board
+       draws - four selects, one of them an option per product board in the whole
+       taxonomy - and a lane full of closed cards was paying for all of it up front. */
     const body = el("div", "card-body");
-    if (item.description) body.appendChild(el("div", "desc", item.description));
-    if (item.ticket) body.appendChild(ticketBadge(item.ticket, false));
-    body.appendChild(itemControls(item));
+    const fillBody = buildOnce(() => {
+      if (item.description) body.appendChild(el("div", "desc", item.description));
+      if (item.ticket) body.appendChild(ticketBadge(item.ticket, false));
+      body.appendChild(itemControls(item));
+    });
+
+    main.addEventListener("click", () => {
+      const nowOpen = !openCards.has(item.id);
+      if (nowOpen) { openCards.add(item.id); fillBody(); } else openCards.delete(item.id);
+      card.classList.toggle("open", nowOpen);
+      main.setAttribute("aria-expanded", String(nowOpen));
+    });
+
     card.appendChild(body);
+    if (openCards.has(item.id)) fillBody();
 
     return card;
   }
@@ -2096,9 +2140,17 @@
   }
 
   /* Every change a section holds, its sub-products included - what a parent's heading
-     counts, since folded shut it stands for the whole family. */
+     counts, since folded shut it stands for the whole family.
+
+     Memoised onto the group, because this walk has several callers per section on every
+     render (its state, its tally, its parent's nested count) and each one otherwise
+     rebuilds the whole subtree's array. Safe to cache on the object: groups are thrown
+     away and rebuilt whenever the data behind them changes - see invalidateGroups. */
   function groupChanges(group) {
-    return [...group.changes, ...(group.subgroups || []).flatMap(groupChanges)];
+    if (!group._changes) {
+      group._changes = [...group.changes, ...(group.subgroups || []).flatMap(groupChanges)];
+    }
+    return group._changes;
   }
 
   function groupKeys(groups) {
@@ -2135,8 +2187,16 @@
                   much of their history has shipped.
 
      A closed initiative holding open Now/Next work classifies active, not completed -
-     stranded work is exactly what the board must keep in view. */
+     stranded work is exactly what the board must keep in view.
+
+     Memoised for the same reason groupChanges is: the sort, the Show filter, the filter
+     counts and the heading's own icon all ask each section for its state, and the answer
+     cannot change without the groups being rebuilt. */
   function groupState(group) {
+    return group._state || (group._state = computeGroupState(group));
+  }
+
+  function computeGroupState(group) {
     const changes = groupChanges(group);
     const open = changes.filter((c) => c.status !== "done");
     if (open.some((c) => c.bucket === "now" || c.bucket === "next")) return "active";
@@ -2229,6 +2289,17 @@
       buckets.get(key).push(change);
     }
 
+    /* The projects bucketed the same way, in one pass. Asking each initiative to filter
+       the whole project list for its own is the same answer at a cost that squares with
+       the size of the portfolio, and this grouping runs on every render. */
+    const projectsByInitiative = new Map();
+    const looseProjects = [];
+    for (const project of PORTFOLIO.projects) {
+      if (!project.initiative_id) { looseProjects.push(project); continue; }
+      const list = projectsByInitiative.get(project.initiative_id);
+      if (list) list.push(project); else projectsByInitiative.set(project.initiative_id, [project]);
+    }
+
     const groups = PORTFOLIO.initiatives.map((initiative) => {
       const changes = buckets.get(initiative.id) || [];
       const flags = [];
@@ -2238,7 +2309,7 @@
       // board structurally cannot show.
       const products = new Set(changes.map((c) => c.product));
       if (products.size > 1) flags.push([`${products.size} products`, false]);
-      const projects = PORTFOLIO.projects.filter((p) => p.initiative_id === initiative.id);
+      const projects = projectsByInitiative.get(initiative.id) || [];
       return {
         key: `initiative:${initiative.id}`,
         kind: "initiative",
@@ -2260,8 +2331,7 @@
     const unaligned = buckets.get(null) || [];
     // Projects with no initiative belong in the trailing group whether or not anything
     // has been raised against them - an unaligned project is exactly the thing this
-    // section exists to make visible.
-    const looseProjects = PORTFOLIO.projects.filter((p) => !p.initiative_id);
+    // section exists to make visible. (Collected in the pass above.)
     if (unaligned.length || looseProjects.length || !groups.length) {
       groups.push({
         key: "initiative:none",
@@ -2296,8 +2366,27 @@
     return groups;
   }
 
+  /* The sections are a pure function of the work model and the lens, and building them
+     walks every change on the board - so they are built once and reused until the data
+     underneath them moves. renderAll() is that moment: every path that can change the
+     model (a websocket event, an optimistic drag, a refetch) ends there, so clearing the
+     cache at the top of it is the whole invalidation rule.
+
+     What this buys is the chrome: folding one section asks for the sections again to
+     re-label the nav's collapse-all button, and the Show filter asks a second time for
+     its counts. Regrouping the entire board twice on every fold is what made a click on
+     a heading feel slow on a board of any size. */
+  let groupsCache = null;
+
+  function invalidateGroups() {
+    groupsCache = null;
+  }
+
   function currentGroups() {
-    return sortGroupsByState(groupBy === "initiative" ? groupsByInitiative() : groupsByProduct());
+    if (!groupsCache) {
+      groupsCache = sortGroupsByState(groupBy === "initiative" ? groupsByInitiative() : groupsByProduct());
+    }
+    return groupsCache;
   }
 
   /* ---- the project level ----------------------------------------------------------
@@ -2372,8 +2461,9 @@
     const ids = group.projectIds
       ? group.projectIds.filter((id) => PROJECTS_BY_ID[id])
       : PORTFOLIO.projects.filter((p) => byProject.has(p.id)).map((p) => p.id);
+    const listed = new Set(ids);
     for (const id of byProject.keys()) {
-      if (id !== null && !ids.includes(id)) ids.push(id);
+      if (id !== null && !listed.has(id)) { listed.add(id); ids.push(id); }
     }
 
     const row = (project, rowChanges) => {
@@ -2512,13 +2602,21 @@
       lane.appendChild(head);
 
       if (row.addTo) {
-        const form = addForm(row.addTo.product, value, row.addTo.projectId);
         const add = el("button", "add-btn", "+");
         add.type = "button";
         add.title = `Add a change to ${label}`;
-        add.addEventListener("click", () => form.classList.toggle("open"));
+        // Three of these per project row, each a form with its own system picker - built
+        // when somebody actually goes to add something, and kept afterwards so a
+        // half-typed change survives closing the form.
+        let form = null;
+        add.addEventListener("click", () => {
+          if (!form) {
+            form = addForm(row.addTo.product, value, row.addTo.projectId);
+            lane.insertBefore(form, head.nextSibling);
+          }
+          form.classList.toggle("open");
+        });
         head.appendChild(add);
-        lane.appendChild(form);
       }
 
       if (!items.length) lane.appendChild(el("div", "lane-empty", "—"));
@@ -2676,9 +2774,22 @@
     }
     head.appendChild(stats);
 
+    const body = el("div", "project-body");
+    /* Built the first time the row is opened, and kept from then on - so a card the
+       user opened inside it survives folding the row, which is what building it eagerly
+       used to buy. The row's own strip already carries the counts, the meter and the
+       dates, so a folded row needs none of this. */
+    const fillBody = buildOnce(() => {
+      if (!row.roll.total && !row.addTo) {
+        body.appendChild(el("div", "project-empty", "Nothing raised against this project yet."));
+      } else {
+        renderLanes(row, body);
+      }
+    });
+
     head.addEventListener("click", () => {
       const nowOpen = !openProjects.has(row.key);
-      if (nowOpen) openProjects.add(row.key); else openProjects.delete(row.key);
+      if (nowOpen) { openProjects.add(row.key); fillBody(); } else openProjects.delete(row.key);
       node.classList.toggle("open", nowOpen);
       head.setAttribute("aria-expanded", String(nowOpen));
       persistOpenProjects();
@@ -2686,15 +2797,8 @@
     if (draggableProject(row)) wireProjectDrag(node, head, row.project);
     node.appendChild(head);
 
-    const body = el("div", "project-body");
-    // Built even while folded: a project holds a handful of changes, and rebuilding
-    // them on every toggle would drop any card the user had opened inside.
-    if (!row.roll.total && !row.addTo) {
-      body.appendChild(el("div", "project-empty", "Nothing raised against this project yet."));
-    } else {
-      renderLanes(row, body);
-    }
     node.appendChild(body);
+    if (isOpen) fillBody();
     return node;
   }
 
@@ -2789,15 +2893,6 @@
     }
     head.appendChild(tally);
 
-    head.addEventListener("click", () => {
-      const nowCollapsed = section.classList.toggle("collapsed");
-      if (nowCollapsed) expanded.delete(group.key); else expanded.add(group.key);
-      head.setAttribute("aria-expanded", String(!nowCollapsed));
-      persistExpanded();
-      // The nav's collapse-all label is a function of every section's state.
-      const slot = document.getElementById("pm-nav-slot");
-      if (slot) mountControls(slot);
-    });
     section.appendChild(head);
     // Outside group-body on purpose: a folded section shows only its heading, and the
     // description should be readable without unfolding the whole board underneath it.
@@ -2805,53 +2900,74 @@
       section.appendChild(el("div", "group-desc", group.description));
     }
 
+    /* Everything below the heading, built the first time the section is opened. The
+       tally above is what a folded section says about its contents, and it is computed
+       from the data - so a folded section never needs the rows themselves, which are by
+       far the most expensive thing on this page (see buildOnce). */
     const body = el("div", "group-body");
-    if (suggestions.length) {
-      const triage = el("div", "triage");
-      for (const item of suggestions) triage.appendChild(suggestionCard(item));
-      body.appendChild(triage);
-    }
-    if (subgroups.length) {
-      // The Show filter reaches in here too: an active parent does not exempt its
-      // dormant children. What it hides it counts, in place, so the family a heading
-      // promised ("+N open in M sub-products") never just silently shrinks.
-      const shownSubs = subgroups.filter(groupVisible);
-      if (shownSubs.length) {
-        const nested = el("div", "subgroups");
-        for (const sub of shownSubs) nested.appendChild(groupSection(sub, depth + 1));
-        body.appendChild(nested);
+    const fillBody = buildOnce(() => {
+      if (suggestions.length) {
+        const triage = el("div", "triage");
+        for (const item of suggestions) triage.appendChild(suggestionCard(item));
+        body.appendChild(triage);
       }
-      if (shownSubs.length < subgroups.length) {
-        const n = subgroups.length - shownSubs.length;
-        body.appendChild(el("div", "filter-note",
-          `${n} sub-product${n === 1 ? "" : "s"} hidden by the Show filter.`));
+      if (subgroups.length) {
+        // The Show filter reaches in here too: an active parent does not exempt its
+        // dormant children. What it hides it counts, in place, so the family a heading
+        // promised ("+N open in M sub-products") never just silently shrinks.
+        const shownSubs = subgroups.filter(groupVisible);
+        if (shownSubs.length) {
+          const nested = el("div", "subgroups");
+          for (const sub of shownSubs) nested.appendChild(groupSection(sub, depth + 1));
+          body.appendChild(nested);
+        }
+        if (shownSubs.length < subgroups.length) {
+          const n = subgroups.length - shownSubs.length;
+          body.appendChild(el("div", "filter-note",
+            `${n} sub-product${n === 1 ? "" : "s"} hidden by the Show filter.`));
+        }
       }
-    }
-    if (rows.length) {
-      const list = el("div", "projects");
-      for (const row of currentRows) list.appendChild(projectNode(row));
-      if (closedRows.length) {
-        const shown = revealClosed.has(group.key);
-        const toggle = el("button", "closed-toggle");
-        toggle.type = "button";
-        toggle.setAttribute("aria-expanded", String(shown));
-        toggle.appendChild(el("span", "twisty", shown ? "▾" : "▸"));
-        toggle.appendChild(document.createTextNode(
-          `${shown ? "Hide" : "Show"} ${closedRows.length} closed project${closedRows.length === 1 ? "" : "s"}`));
-        toggle.addEventListener("click", () => {
-          if (shown) revealClosed.delete(group.key); else revealClosed.add(group.key);
-          renderAll();
-        });
-        list.appendChild(toggle);
-        if (shown) for (const row of closedRows) list.appendChild(projectNode(row));
+      if (rows.length) {
+        const list = el("div", "projects");
+        for (const row of currentRows) list.appendChild(projectNode(row));
+        if (closedRows.length) {
+          const shown = revealClosed.has(group.key);
+          const toggle = el("button", "closed-toggle");
+          toggle.type = "button";
+          toggle.setAttribute("aria-expanded", String(shown));
+          toggle.appendChild(el("span", "twisty", shown ? "▾" : "▸"));
+          toggle.appendChild(document.createTextNode(
+            `${shown ? "Hide" : "Show"} ${closedRows.length} closed project${closedRows.length === 1 ? "" : "s"}`));
+          toggle.addEventListener("click", () => {
+            if (shown) revealClosed.delete(group.key); else revealClosed.add(group.key);
+            renderAll();
+          });
+          list.appendChild(toggle);
+          if (shown) for (const row of closedRows) list.appendChild(projectNode(row));
+        }
+        body.appendChild(list);
+      } else if (!suggestions.length && !subgroups.length) {
+        // Said only when there is genuinely nothing here. A parent whose work all lives in
+        // its sub-products is not empty, and the sections below say so themselves.
+        body.appendChild(el("div", "project-empty", "No projects or changes here yet."));
       }
-      body.appendChild(list);
-    } else if (!suggestions.length && !subgroups.length) {
-      // Said only when there is genuinely nothing here. A parent whose work all lives in
-      // its sub-products is not empty, and the sections below say so themselves.
-      body.appendChild(el("div", "project-empty", "No projects or changes here yet."));
-    }
+    });
+
+    head.addEventListener("click", () => {
+      const nowCollapsed = !section.classList.contains("collapsed");
+      // Filled while it is still hidden, so opening costs one layout rather than two.
+      if (!nowCollapsed) fillBody();
+      section.classList.toggle("collapsed", nowCollapsed);
+      if (nowCollapsed) expanded.delete(group.key); else expanded.add(group.key);
+      head.setAttribute("aria-expanded", String(!nowCollapsed));
+      persistExpanded();
+      // The nav's collapse-all label is a function of every section's state - and the
+      // only part of the nav a fold can change, so it is the only part redrawn.
+      if (collapseControl) collapseControl();
+    });
+
     section.appendChild(body);
+    if (!isCollapsed(group.key)) fillBody();
     return section;
   }
 
@@ -3107,21 +3223,26 @@
       }
       row.appendChild(track);
 
-      // The same controls the lane view's card opens, in the same place: a row that
-      // can be read but not changed would send you back to the other view to act.
+      /* The same controls the lane view's card opens, in the same place: a row that
+         can be read but not changed would send you back to the other view to act - and
+         built on first open for the same reason the card's are (see buildOnce). The bar
+         itself stays eager: it is what this view is for, and it is cheap. */
       const detail = el("div", "gantt-detail");
       detail.hidden = !openCards.has(item.id);
-      if (item.description) detail.appendChild(el("div", "desc", item.description));
-      const chips = el("div", "card-meta");
-      for (const node of metaChips(item, omit)) chips.appendChild(node);
-      if (item.ticket) chips.appendChild(ticketBadge(item.ticket, false));
-      detail.appendChild(chips);
-      detail.appendChild(itemControls(item));
+      const fillDetail = buildOnce(() => {
+        if (item.description) detail.appendChild(el("div", "desc", item.description));
+        const chips = el("div", "card-meta");
+        for (const node of metaChips(item, omit)) chips.appendChild(node);
+        if (item.ticket) chips.appendChild(ticketBadge(item.ticket, false));
+        detail.appendChild(chips);
+        detail.appendChild(itemControls(item));
+      });
       row.appendChild(detail);
+      if (openCards.has(item.id)) fillDetail();
 
       label.addEventListener("click", () => {
         const nowOpen = !openCards.has(item.id);
-        if (nowOpen) openCards.add(item.id); else openCards.delete(item.id);
+        if (nowOpen) { openCards.add(item.id); fillDetail(); } else openCards.delete(item.id);
         detail.hidden = !nowOpen;
         label.setAttribute("aria-expanded", String(nowOpen));
       });
@@ -3297,26 +3418,29 @@
         head.appendChild(track);
         body.appendChild(head);
 
-        const childRows = drawn.map(({ item, bar }) => {
-          const node = changeRow(item, bar, projectRow.omit);
-          node.hidden = !isOpen;
-          return node;
+        /* The change rows this project would draw, built the first time it is twisted
+           open. This view is flat - every row is a sibling in one body, so they cannot
+           be nested inside the project's own row and hidden with it - which is why a
+           folded project used to build them anyway and hide each one. `head.after`
+           puts them back in exactly that place whenever they are built, however many
+           sections have been appended after it since. */
+        let childRows = [];
+        let note = null;
+        const fillRows = buildOnce(() => {
+          childRows = drawn.map(({ item, bar }) => changeRow(item, bar, projectRow.omit));
+          note = earlier
+            ? el("div", "gantt-empty", `+ ${earlier} shipped before ${shortDate(ax.start)}.`)
+            : !drawn.length
+            ? el("div", "gantt-empty", "Nothing in range.")
+            : null;
+          head.after(...childRows, ...(note ? [note] : []));
         });
-        for (const node of childRows) body.appendChild(node);
-
-        const note = earlier
-          ? el("div", "gantt-empty", `+ ${earlier} shipped before ${shortDate(ax.start)}.`)
-          : !drawn.length
-          ? el("div", "gantt-empty", "Nothing in range.")
-          : null;
-        if (note) {
-          note.hidden = !isOpen;
-          body.appendChild(note);
-        }
+        if (isOpen) fillRows();
 
         label.addEventListener("click", () => {
           const nowOpen = !openProjects.has(projectRow.key);
-          if (nowOpen) openProjects.add(projectRow.key); else openProjects.delete(projectRow.key);
+          if (nowOpen) { openProjects.add(projectRow.key); fillRows(); }
+          else openProjects.delete(projectRow.key);
           for (const node of childRows) node.hidden = !nowOpen;
           if (note) note.hidden = !nowOpen;
           label.firstChild.classList.toggle("closed", !nowOpen);
@@ -3371,6 +3495,8 @@
 
   function renderAll() {
     board.textContent = "";
+    // The one place the data behind the sections can have moved (see currentGroups).
+    invalidateGroups();
     renderUnattributedBar();
     const slot = document.getElementById("pm-nav-slot");
     if (slot) mountControls(slot);
