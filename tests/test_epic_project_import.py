@@ -381,6 +381,23 @@ class EpicProjectImportTest(unittest.TestCase):
         self.assertEqual(server_module.roadmap_store.get(item.id).project_id, project.id)
         self.assertEqual(server_module._epic_report["jira"]["changes_assigned"], 1)
 
+    def test_assignment_climbs_through_the_feature_rung(self) -> None:
+        """ADO nests User Story under Feature under Epic - one hop up from a story is
+        a Feature, and stopping there would leave every ADO story unassigned. The walk
+        must reach the epic at the top of the chain."""
+        tickets = [
+            _ticket("PROJ-1", "Epic", title="The epic"),
+            _ticket("PROJ-5", "Feature", parent="PROJ-1", parent_type="Epic"),
+            _ticket("PROJ-6", "Story", parent="PROJ-5", parent_type="Feature"),
+        ]
+        item = server_module.roadmap_store.create("checkout", "A story")
+        server_module.roadmap_store.link_ticket(item.id, "jira", "PROJ-6")
+        self._run(tickets)
+        server_module._assign_changes_to_epic_projects()
+        project = server_module.portfolio_store.project_for_ticket("jira", "PROJ-1")
+        self.assertIsNotNone(project)
+        self.assertEqual(server_module.roadmap_store.get(item.id).project_id, project.id)
+
     def test_a_change_a_human_filed_elsewhere_is_left_alone(self) -> None:
         chosen = server_module.portfolio_store.create_project("Deliberate home")
         tickets = [

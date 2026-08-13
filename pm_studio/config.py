@@ -31,6 +31,7 @@ import os
 import sys
 import tomllib
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import NoReturn
 
@@ -174,6 +175,13 @@ class TrackerConfig:
     # would be a config that looks like it imports and silently doesn't.
     import_types: tuple[str, ...] = ()
     routes: tuple[TrackerRoute, ...] = ()
+    # Bound on the catalog pull: only tickets CHANGED on/after this date (YYYY-MM-DD)
+    # are synced. For a tracker with years of history where only the recent slice is
+    # planning material - the catalog, the link picker and every import pass then see
+    # just that slice. Linked tickets older than the bound stay resolvable: the sync
+    # fetches any linked-but-missing ticket individually (refresh_missing). Empty = no
+    # bound, the historical behavior.
+    since: str = ""
     # EXCLUSION: components (Jira) / area paths (ADO) whose tickets this deployment
     # declares OUT of every automatic pass - not imported as changes, not imported or
     # linked as projects, not used for assignment. For the slice of a tracker that is
@@ -933,6 +941,16 @@ def _parse_trackers(
             str(t).strip() for t in import_types_raw if str(t).strip()
         )
 
+        since = str(entry.get("since", "")).strip()
+        if since:
+            try:
+                date.fromisoformat(since)
+            except ValueError:
+                _fatal(
+                    f"{config_path} {where} has since = {since!r}; it must be a "
+                    'calendar date as "YYYY-MM-DD"'
+                )
+
         exclude_raw = entry.get("exclude_components", [])
         if isinstance(exclude_raw, str) or not isinstance(exclude_raw, (list, tuple)):
             _fatal(
@@ -1050,6 +1068,7 @@ def _parse_trackers(
                 sync_interval_minutes=interval,
                 import_types=import_types,
                 routes=tuple(routes),
+                since=since,
                 exclude_components=exclude_components,
             )
         )

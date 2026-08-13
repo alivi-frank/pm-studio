@@ -191,9 +191,30 @@ truer one, so a project-wide default never swallows the exceptions declared besi
 A `project` route must name a project the tracker actually syncs; anything else is a
 dead route and refuses to boot.
 
+On **ADO**, an area path is a tree, so a route on an area claims its **whole subtree**:
+`component = "Portal"` covers `Portal\Authorizations\Queue` too, matched on the path
+separator so `Portal-Legacy` is never mistaken for a child. Among matching area routes
+the deepest one wins, and the shallower route keeps the rest of its subtree. Jira
+components are flat labels and always match exactly.
+
 `import_types` and `routes` only work together — declaring exactly one refuses to boot,
 because it would be a config that looks like it imports and silently doesn't. With
 neither, tracker behavior is exactly what it always was.
+
+Two more knobs bound what the sync takes in:
+
+```toml
+since = "2025-01-01"   # only tickets CHANGED on/after this date are synced
+```
+
+`since` bounds the **catalog pull itself** — by last activity, not creation, so an old
+epic still being worked stays current while abandoned history ages out. Linked tickets
+older than the bound remain resolvable (the sync fetches any linked-but-missing ticket
+individually). Task-level tickets are never imported as changes of their own; when a
+parent ticket imports, its tasks ride along as a snapshot list inside the parent's
+description — tasks are how a story gets done, not separate planning material, and a
+board of task-changes buries the plan in execution detail. The tracker keeps the live
+task list; the badge links straight to it.
 
 After each sync, every catalog ticket whose type is in `import_types` and whose
 component matches a route becomes a change on the routed product — `later` bucket,

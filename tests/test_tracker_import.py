@@ -219,6 +219,18 @@ def _ticket(key, raw_type="Story", components=(), state_category="To Do", title=
     )
 
 
+def _ado_ticket(key, raw_type="User Story", area="", parent=None, parent_type=None,
+                state="New", title=None, project="Arizona"):
+    from pm_studio.trackers import canonical_type
+    return Ticket(
+        tracker_id="ado", provider="ado", key=key, type=canonical_type(raw_type),
+        raw_type=raw_type, title=title or f"Item {key}", state=state,
+        url=f"https://dev.azure.com/acme/{key}", synced_at=time.time(),
+        parent_key=parent, parent_type=parent_type, state_category=state,
+        components=[area] if area else [], project=project,
+    )
+
+
 class _StubTrackerStore:
     def __init__(self, tickets):
         self._tickets = tickets
@@ -361,6 +373,159 @@ class ImportPassTest(unittest.TestCase):
             _ticket("PROJ-8", raw_type="Bug", components=["Checkout Web"]),
         ])
         self.assertEqual(len(self.store.list_product("checkout")), 1)
+
+    def test_jira_components_never_prefix_match(self) -> None:
+        """Jira components are flat labels: "Checkout Web Extra" is a DIFFERENT label,
+        not a child of "Checkout Web" - it must land unrouted, not on checkout."""
+        self._run([_ticket("PROJ-1", components=["Checkout Web Extra"])])
+        self.assertEqual(self.store.list_product("checkout"), [])
+        self.assertEqual(server_module._import_report["jira"]["unrouted_total"], 1)
+
+
+class AdoImportShapeTest(unittest.TestCase):
+    """The ADO-specific import shape: area-path prefix routing, and task-level
+    children folded into the parent change's description instead of imported."""
+
+    TRACKER = TrackerConfig(
+        id="ado", provider="ado", label="ADO", base_url="https://dev.azure.com/acme",
+        projects=("Arizona",), token="t", organization="acme",
+        import_types=("Epic", "User Story"),
+        routes=(
+            TrackerRoute(component="Arizona Microservices", product="capadmin"),
+            TrackerRoute(component="Arizona Microservices\\Claims", product="claims"),
+        ),
+    )
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig_roadmap = (
+            roadmap_module.ROADMAP_DIR, roadmap_module.PRODUCTS,
+            roadmap_module.SYSTEMS, roadmap_module.PRODUCT_SYSTEMS,
+        )
+        roadmap_module.ROADMAP_DIR = Path(self._tmp.name)
+        roadmap_module.PRODUCTS = {"capadmin": "CapAdmin", "claims": "Claims"}
+        roadmap_module.SYSTEMS = {}
+        roadmap_module.PRODUCT_SYSTEMS = {}
+        self.store = RoadmapStore()
+        self._orig_server = (
+            server_module.CONFIG, server_module.tracker_store,
+            server_module.roadmap_store, dict(server_module._import_report),
+        )
+        server_module.CONFIG = dataclasses.replace(
+            server_module.CONFIG, trackers=(self.TRACKER,)
+        )
+        server_module.roadmap_store = self.store
+        server_module._import_report.clear()
+
+    def tearDown(self) -> None:
+        (
+            roadmap_module.ROADMAP_DIR, roadmap_module.PRODUCTS,
+            roadmap_module.SYSTEMS, roadmap_module.PRODUCT_SYSTEMS,
+        ) = self._orig_roadmap
+        (
+            server_module.CONFIG, server_module.tracker_store,
+            server_module.roadmap_store, report,
+        ) = self._orig_server
+        server_module._import_report.clear()
+        server_module._import_report.update(report)
+        self._tmp.cleanup()
+
+    def _run(self, tickets):
+        server_module.tracker_store = _StubTrackerStore(tickets)
+        server_module._import_routed_tickets()
+
+    def test_an_area_route_claims_its_whole_subtree(self) -> None:
+        self._run([_ado_ticket("101", area="Arizona Microservices\\Member Management")])
+        self.assertEqual(len(self.store.list_product("capadmin")), 1)
+
+    def test_the_deeper_area_route_wins_and_the_shallow_keeps_the_rest(self) -> None:
+        self._run([
+            _ado_ticket("201", area="Arizona Microservices\\Claims\\Adjudication"),
+            _ado_ticket("202", area="Arizona Microservices\\Vendor Management"),
+        ])
+        self.assertEqual(
+            [i["ticket_key"] for i in self.store.list_product("claims")], ["201"]
+        )
+        self.assertEqual(
+            [i["ticket_key"] for i in self.store.list_product("capadmin")], ["202"]
+        )
+
+    def test_a_lookalike_sibling_is_not_a_child(self) -> None:
+        """Prefix matching is by path SEGMENT: "Arizona Microservices-Legacy" shares
+        the characters but not the tree, so it must not route."""
+        self._run([_ado_ticket("301", area="Arizona Microservices-Legacy")])
+        self.assertEqual(self.store.list_all(), {"capadmin": [], "claims": []})
+        self.assertEqual(server_module._import_report["ado"]["unrouted_total"], 1)
+
+    def test_tasks_fold_into_the_story_not_the_board(self) -> None:
+        story = _ado_ticket("400", area="Arizona Microservices", title="Ship the thing")
+        tasks = [
+            _ado_ticket("401", raw_type="Task", parent="400", parent_type="User Story",
+                        state="Done", title="Write the migration"),
+            _ado_ticket("402", raw_type="Task", parent="400", parent_type="User Story",
+                        state="New", title="Update the docs"),
+        ]
+        self._run([story, *tasks])
+        items = self.store.list_product("capadmin")
+        # ONE change: the story. Its tasks are inside it, not beside it.
+        self.assertEqual(len(items), 1)
+        description = items[0]["description"]
+        self.assertIn("- [Done] Write the migration (401)", description)
+        self.assertIn("- [New] Update the docs (402)", description)
+        for key in ("401", "402"):
+            self.assertIsNone(self.store.item_for_ticket("ado", key))
+
+
+class SinceBoundTest(unittest.TestCase):
+    """`since` must reach the actual queries - a bound that parses but never lands in
+    the JQL/WIQL would silently keep pulling the whole history."""
+
+    def test_jira_jql_carries_the_window(self) -> None:
+        from pm_studio.trackers import JiraClient
+        config = TrackerConfig(
+            id="jira", provider="jira", label="J", base_url="https://x",
+            projects=("PROJ",), token="t", since="2025-01-01",
+        )
+        self.assertIn('updated >= "2025-01-01"', JiraClient(config)._jql())
+        config = dataclasses.replace(config, since="")
+        self.assertNotIn("updated >=", JiraClient(config)._jql())
+
+    def test_ado_wiql_carries_the_window(self) -> None:
+        from pm_studio import trackers as trackers_module
+        from pm_studio.trackers import AdoClient
+        config = TrackerConfig(
+            id="ado", provider="ado", label="A", base_url="https://dev.azure.com/acme",
+            projects=("Arizona",), token="t", organization="acme", since="2025-01-01",
+        )
+        captured = {}
+        def fake_request(url, *, headers, method="GET", body=None, timeout=0):
+            captured["body"] = body
+            return {"workItems": []}
+        original = trackers_module._request
+        trackers_module._request = fake_request
+        try:
+            AdoClient(config)._query_ids("Arizona")
+        finally:
+            trackers_module._request = original
+        self.assertIn("[System.ChangedDate] >= '2025-01-01'", captured["body"]["query"])
+
+    def test_a_garbage_since_refuses_to_boot(self) -> None:
+        import textwrap as _tw
+        import tempfile as _tf
+        from pm_studio.config import load_config
+        with _tf.TemporaryDirectory() as tmp:
+            local = Path(tmp) / "pm_studio_local"
+            local.mkdir()
+            (local / "config.toml").write_text(_tw.dedent("""\
+                [[trackers]]
+                provider = "jira"
+                base_url = "https://x"
+                projects = ["PROJ"]
+                token = "t"
+                since = "last year"
+            """))
+            with self.assertRaises(SystemExit):
+                load_config(Path(tmp))
 
 
 if __name__ == "__main__":

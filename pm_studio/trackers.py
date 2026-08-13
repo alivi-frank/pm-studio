@@ -318,7 +318,11 @@ class JiraClient:
 
     def _jql(self) -> str:
         projects = ", ".join(f'"{p}"' for p in self.config.projects)
-        return f"project in ({projects}) ORDER BY updated DESC"
+        # `since` bounds the pull by last activity, not creation: an old ticket still
+        # being worked is current planning material, a recently-created-then-abandoned
+        # one ages out on its own. Config validated the date shape at load.
+        window = f' AND updated >= "{self.config.since}"' if self.config.since else ""
+        return f"project in ({projects}){window} ORDER BY updated DESC"
 
     def browse_url(self, key: str) -> str:
         return f"{self.config.base_url}/browse/{key}"
@@ -542,9 +546,17 @@ class AdoClient:
         # Escaping: a project name with an apostrophe would otherwise break the WIQL
         # string literal (WIQL doubles single quotes, like SQL).
         safe_project = project.replace("'", "''")
+        # Same activity bound as JiraClient._jql; the date shape was validated at
+        # config load, so it can be spliced into the WIQL literal safely.
+        window = (
+            f"AND [System.ChangedDate] >= '{self.config.since}' "
+            if self.config.since
+            else ""
+        )
         query = (
             "SELECT [System.Id] FROM WorkItems "
             f"WHERE [System.TeamProject] = '{safe_project}' "
+            f"{window}"
             "ORDER BY [System.ChangedDate] DESC"
         )
         payload = _request(url, headers=self._headers(), method="POST", body={"query": query})

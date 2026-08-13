@@ -63,6 +63,8 @@ from .roadmap import (
 from .sessions import DEFAULT_SESSION_ID, SessionManager, SessionRuntime
 from .trackers import (
     TYPE_EPIC,
+    TYPE_SUBTASK,
+    TYPE_TASK,
     Ticket,
     TrackerError,
     TrackerStore,
@@ -1800,7 +1802,11 @@ def _excluded_keys(config, by_key: dict[str, Ticket]) -> set[str]:
     wanted = {c.casefold() for c in config.exclude_components}
     excluded = {
         key for key, ticket in by_key.items()
-        if any(c.casefold() in wanted for c in ticket.components)
+        if any(
+            _component_hit(w, c.casefold(), config.provider)
+            for c in ticket.components
+            for w in wanted
+        )
     }
     grew = True
     while grew:
@@ -1814,14 +1820,34 @@ def _excluded_keys(config, by_key: dict[str, Ticket]) -> set[str]:
     return excluded
 
 
-def _epic_parent_key(config, ticket: Ticket) -> str | None:
-    """The normalized key of a ticket's parent, when that parent is epic-level - the
-    hierarchy fact both epic passes turn on. None for a top-level ticket, and for a
-    parent whose type is not the epic rung (a subtask's parent story says nothing about
-    which project the change belongs to)."""
-    if not ticket.parent_key or canonical_type(ticket.parent_type) != TYPE_EPIC:
-        return None
-    return normalize_key(config.id, ticket.parent_key)
+def _epic_ancestor_key(
+    config, ticket: Ticket, by_key: dict[str, Ticket]
+) -> str | None:
+    """The normalized key of the epic ABOVE a ticket, however many rungs up - the
+    hierarchy fact both epic passes turn on.
+
+    One hop is not enough: ADO nests User Story under Feature under Epic, so a story's
+    parent is a Feature and the epic is its grandparent. The walk climbs the catalog
+    until it reaches epic level, cycle-guarded because parent links are tracker data,
+    not something this code may assume well-formed. For a parent OUTSIDE the synced
+    catalog the child's own parent_type is all we know: epic-level means that key is
+    the answer, anything else means the chain cannot be followed and there is no epic
+    to name - None, the honest answer.
+    """
+    seen: set[str] = set()
+    current = ticket
+    while current.parent_key:
+        parent_key = normalize_key(config.id, current.parent_key)
+        if parent_key in seen:
+            return None
+        seen.add(parent_key)
+        parent = by_key.get(parent_key)
+        if parent is None:
+            return parent_key if canonical_type(current.parent_type) == TYPE_EPIC else None
+        if parent.type == TYPE_EPIC:
+            return parent_key
+        current = parent
+    return None
 
 
 def _sync_epic_projects() -> None:
@@ -1961,7 +1987,7 @@ def _sync_epic_projects() -> None:
                 ticket = by_key.get(normalize_key(config.id, change["ticket_key"]))
                 if ticket is None:
                     continue
-                parent = _epic_parent_key(config, ticket)
+                parent = _epic_ancestor_key(config, ticket, by_key)
                 if parent and parent not in excluded and change.get("project_id"):
                     evidence.setdefault(change["project_id"], set()).add(parent)
 
@@ -2086,7 +2112,7 @@ def _assign_changes_to_epic_projects() -> None:
                 ticket = by_key.get(normalize_key(config.id, change["ticket_key"]))
                 if ticket is None:
                     continue
-                parent = _epic_parent_key(config, ticket)
+                parent = _epic_ancestor_key(config, ticket, by_key)
                 if parent is None or parent in excluded:
                     continue
                 project = portfolio_store.project_for_ticket(config.id, parent)
@@ -2108,8 +2134,8 @@ def _imported_status(ticket) -> str:
     return "pending"
 
 
-def _route_maps(config) -> tuple[dict, dict, dict]:
-    """The three lookup tables one tracker's routes compile to, built once per pass.
+def _route_maps(config) -> tuple[str, dict, dict, dict]:
+    """The lookup tables one tracker's routes compile to, built once per pass.
     Shared by the change import and the epic import so "routed" means one thing."""
     by_proj_comp = {
         (r.project.casefold(), r.component.casefold()): r
@@ -2121,21 +2147,45 @@ def _route_maps(config) -> tuple[dict, dict, dict]:
     by_project = {
         r.project.casefold(): r for r in config.routes if r.project and not r.component
     }
-    return by_proj_comp, by_component, by_project
+    return config.provider, by_proj_comp, by_component, by_project
 
 
-def _match_route(maps: tuple[dict, dict, dict], ticket):
-    """Most-specific match wins, tried in this order: component within a project,
-    component anywhere, whole project. A project-wide default must not swallow the
-    exceptions declared beside it. None when nothing routes the ticket."""
-    by_proj_comp, by_component, by_project = maps
+def _component_hit(route_comp: str, ticket_comp: str, provider: str) -> bool:
+    """Whether a route's component claims a ticket's component (both casefolded).
+
+    Jira components are flat labels, so equality is the only sane match. An ADO area
+    path is a TREE node, so a route on a node claims its whole subtree - matched on
+    the path separator, so a route on "portal" never accidentally claims
+    "portal-legacy"."""
+    if ticket_comp == route_comp:
+        return True
+    return provider == "ado" and ticket_comp.startswith(route_comp + "\\")
+
+
+def _match_route(maps: tuple[str, dict, dict, dict], ticket):
+    """Most-specific match wins, in two dimensions. Across tiers, the order it always
+    was: component within a project, component anywhere, whole project - a project-wide
+    default must not swallow the exceptions declared beside it. WITHIN a tier, the
+    longest matching area path wins, so on ADO a route for `Portal\\Authorizations`
+    beats one for `Portal` on the tickets they both claim, and the shallow route keeps
+    the rest of the subtree. None when nothing routes the ticket."""
+    provider, by_proj_comp, by_component, by_project = maps
     proj = (ticket.project or "").casefold()
     comps = [c.casefold() for c in ticket.components]
-    return (
-        next((by_proj_comp[(proj, c)] for c in comps if (proj, c) in by_proj_comp), None)
-        or next((by_component[c] for c in comps if c in by_component), None)
-        or by_project.get(proj)
-    )
+    for tier in (
+        {rc: route for (rp, rc), route in by_proj_comp.items() if rp == proj},
+        by_component,
+    ):
+        best = None
+        best_len = -1
+        for route_comp, route in tier.items():
+            if len(route_comp) > best_len and any(
+                _component_hit(route_comp, c, provider) for c in comps
+            ):
+                best, best_len = route, len(route_comp)
+        if best is not None:
+            return best
+    return by_project.get(proj)
 
 
 def _import_routed_tickets() -> None:
@@ -2167,6 +2217,17 @@ def _import_routed_tickets() -> None:
         excluded = _excluded_keys(
             config, {normalize_key(config.id, t.key): t for t in tickets}
         )
+        # Task-level children, indexed by parent. Tasks are HOW a story gets done, not
+        # separate planning material - importing each one as its own change buries the
+        # board in execution detail. They ride along as a snapshot inside the parent's
+        # description instead (see below), so the story imports as ONE change that
+        # still says what it is made of.
+        tasks_by_parent: dict[str, list[Ticket]] = {}
+        for t in tickets:
+            if t.parent_key and t.type in (TYPE_TASK, TYPE_SUBTASK):
+                tasks_by_parent.setdefault(
+                    normalize_key(config.id, t.parent_key), []
+                ).append(t)
         imported = 0
         excluded_count = 0
         unrouted: dict[str, int] = {}
@@ -2198,10 +2259,27 @@ def _import_routed_tickets() -> None:
                     f"component route {route.component!r}" if route.component
                     else f"project route {route.project!r}"
                 )
+                description = f"Imported from {config.label} {ticket.key} by {matched}."
+                children = sorted(
+                    tasks_by_parent.get(normalize_key(config.id, ticket.key), ()),
+                    key=lambda t: t.key,
+                )
+                if children:
+                    shown = children[:30]
+                    lines = "\n".join(
+                        f"- [{t.state or '?'}] {t.title or t.key} ({t.key})"
+                        for t in shown
+                    )
+                    if len(children) > len(shown):
+                        lines += f"\n- …and {len(children) - len(shown)} more"
+                    description += (
+                        f"\n\nTasks under this ticket (snapshot at import - "
+                        f"{config.label} has the live list):\n{lines}"
+                    )
                 item = roadmap_store.create(
                     product=route.product,
                     title=ticket.title or ticket.key,
-                    description=f"Imported from {config.label} {ticket.key} by {matched}.",
+                    description=description,
                     bucket="later",
                     status=_imported_status(ticket),
                     system=route.system or None,
