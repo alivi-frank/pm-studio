@@ -174,6 +174,15 @@ class TrackerConfig:
     # would be a config that looks like it imports and silently doesn't.
     import_types: tuple[str, ...] = ()
     routes: tuple[TrackerRoute, ...] = ()
+    # EXCLUSION: components (Jira) / area paths (ADO) whose tickets this deployment
+    # declares OUT of every automatic pass - not imported as changes, not imported or
+    # linked as projects, not used for assignment. For the slice of a tracker that is
+    # tracked authoritatively somewhere else (the classic case: the same work mirrored
+    # in a second tracker). A ticket is excluded when one of its components matches,
+    # or when anything up its parent chain is excluded - children routinely carry no
+    # components of their own. Manual linking stays possible: exclusion governs what
+    # the sync does on its own, never what a human does on purpose.
+    exclude_components: tuple[str, ...] = ()
 
     @property
     def imports(self) -> bool:
@@ -924,6 +933,17 @@ def _parse_trackers(
             str(t).strip() for t in import_types_raw if str(t).strip()
         )
 
+        exclude_raw = entry.get("exclude_components", [])
+        if isinstance(exclude_raw, str) or not isinstance(exclude_raw, (list, tuple)):
+            _fatal(
+                f"{config_path} {where} has `exclude_components` as a "
+                f"{type(exclude_raw).__name__}; it must be an array of component/area "
+                'names, e.g. exclude_components = ["CapAdmin"]'
+            )
+        exclude_components = tuple(
+            str(c).strip() for c in exclude_raw if str(c).strip()
+        )
+
         routes_raw = entry.get("routes", [])
         if not isinstance(routes_raw, list):
             _fatal(
@@ -1006,6 +1026,16 @@ def _parse_trackers(
                 "silently would not"
             )
 
+        excluded_set = {c.casefold() for c in exclude_components}
+        for route in routes:
+            if route.component and route.component.casefold() in excluded_set:
+                # Routed AND excluded is a contradiction, not a preference - one of the
+                # two lines is a leftover, and which one wins should never be implicit.
+                _fatal(
+                    f"{config_path} {where} both routes and excludes component "
+                    f"{route.component!r}; delete one of the two declarations"
+                )
+
         trackers.append(
             TrackerConfig(
                 id=tracker_id,
@@ -1020,6 +1050,7 @@ def _parse_trackers(
                 sync_interval_minutes=interval,
                 import_types=import_types,
                 routes=tuple(routes),
+                exclude_components=exclude_components,
             )
         )
     return tuple(trackers)

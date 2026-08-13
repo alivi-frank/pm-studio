@@ -395,6 +395,70 @@ class EpicProjectImportTest(unittest.TestCase):
         server_module._assign_changes_to_epic_projects()
         self.assertEqual(server_module.roadmap_store.get(item.id).project_id, chosen.id)
 
+    # ---- exclusion: the slice of the tracker that lives elsewhere ----
+
+    def _exclude(self, *components: str) -> None:
+        tracker = dataclasses.replace(self.TRACKER, exclude_components=components)
+        server_module.CONFIG = dataclasses.replace(
+            server_module.CONFIG, trackers=(tracker,)
+        )
+
+    def test_an_excluded_epic_is_invisible_to_the_epic_pass(self) -> None:
+        """Neither created nor title-linked, however well the names match - the
+        matching project stays honestly unlinked, waiting for the tracker that
+        actually owns this work."""
+        self._exclude("CapAdmin")
+        server_module.portfolio_store.create_project("Claims revamp")
+        epic = _ticket("PROJ-1", "Epic", title="Claims revamp")
+        epic.components = ["CapAdmin"]
+        self._run([epic])
+        projects = self._projects()
+        self.assertEqual(len(projects), 1)
+        self.assertIsNone(projects[0]["ticket_key"])
+        report = server_module._epic_report["jira"]
+        self.assertEqual(report["excluded_epics"], 1)
+        self.assertEqual((report["projects_created"], report["projects_linked"]), (0, 0))
+
+    def test_exclusion_covers_the_whole_parent_chain(self) -> None:
+        """Only the epic carries the component; the story under it and the task under
+        the story carry none - all three stay out of the change import, and none of
+        them count as unrouted (excluded means "never", not "route this someday")."""
+        tracker = dataclasses.replace(
+            self.TRACKER,
+            exclude_components=("CapAdmin",),
+            import_types=("Epic", "Story", "Task"),
+        )
+        server_module.CONFIG = dataclasses.replace(
+            server_module.CONFIG, trackers=(tracker,)
+        )
+        epic = _ticket("PROJ-1", "Epic", title="The epic")
+        epic.components = ["CapAdmin"]
+        story = _ticket("PROJ-2", "Story", parent="PROJ-1", parent_type="Epic")
+        task = _ticket("PROJ-3", "Task", parent="PROJ-2", parent_type="Story")
+        server_module.tracker_store = _StubTrackerStore([epic, story, task])
+        server_module._sync_epic_projects()
+        server_module._import_routed_tickets()
+        self.assertEqual(self._projects(), [])
+        for key in ("PROJ-1", "PROJ-2", "PROJ-3"):
+            self.assertIsNone(server_module.roadmap_store.item_for_ticket("jira", key))
+        report = server_module._import_report["jira"]
+        self.assertEqual(report["imported"], 0)
+        self.assertEqual(report["excluded"], 3)
+        self.assertEqual(report["unrouted_total"], 0)
+
+    def test_evidence_pointing_at_an_excluded_epic_does_not_link(self) -> None:
+        self._exclude("CapAdmin")
+        project = server_module.portfolio_store.create_project("P")
+        item = server_module.roadmap_store.create("checkout", "C", project_id=project.id)
+        server_module.roadmap_store.link_ticket(item.id, "jira", "PROJ-2")
+        epic = _ticket("PROJ-1", "Epic", title="The epic")
+        epic.components = ["CapAdmin"]
+        self._run([
+            epic,
+            _ticket("PROJ-2", "Story", parent="PROJ-1", parent_type="Epic"),
+        ])
+        self.assertIsNone(self._projects()[0]["ticket_key"])
+
     # ---- the change import stays on its side of the line ----
 
     def test_the_change_import_never_consumes_a_project_held_epic(self) -> None:

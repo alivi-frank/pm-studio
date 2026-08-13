@@ -1786,6 +1786,34 @@ def _normalize_title(title: str) -> str:
     return _TITLE_NORM.sub(" ", (title or "").casefold()).strip()
 
 
+def _excluded_keys(config, by_key: dict[str, Ticket]) -> set[str]:
+    """Normalized keys of every ticket the deployment declared OUT of the automatic
+    passes (see TrackerConfig.exclude_components): any ticket carrying an excluded
+    component, plus everything below one in the parent chain - children routinely
+    carry no components of their own, and exclusion is about who owns the tree.
+
+    Run to a fixpoint rather than one hop, so a task under a story under an excluded
+    epic is covered however deep the tracker nests.
+    """
+    if not config.exclude_components:
+        return set()
+    wanted = {c.casefold() for c in config.exclude_components}
+    excluded = {
+        key for key, ticket in by_key.items()
+        if any(c.casefold() in wanted for c in ticket.components)
+    }
+    grew = True
+    while grew:
+        grew = False
+        for key, ticket in by_key.items():
+            if key in excluded or not ticket.parent_key:
+                continue
+            if normalize_key(config.id, ticket.parent_key) in excluded:
+                excluded.add(key)
+                grew = True
+    return excluded
+
+
 def _epic_parent_key(config, ticket: Ticket) -> str | None:
     """The normalized key of a ticket's parent, when that parent is epic-level - the
     hierarchy fact both epic passes turn on. None for a top-level ticket, and for a
@@ -1845,7 +1873,15 @@ def _sync_epic_projects() -> None:
         _epic_report[config.id] = report
         tickets = tracker_store.tickets_of(config.id)
         by_key = {normalize_key(config.id, t.key): t for t in tickets}
-        epics = {k: t for k, t in by_key.items() if t.type == TYPE_EPIC}
+        # Excluded epics are invisible to this whole pass: never created, never
+        # evidence- or title-linked, never reclaimed. The slice belongs elsewhere.
+        excluded = _excluded_keys(config, by_key)
+        epics = {
+            k: t for k, t in by_key.items() if t.type == TYPE_EPIC and k not in excluded
+        }
+        report["excluded_epics"] = sum(
+            1 for k, t in by_key.items() if t.type == TYPE_EPIC and k in excluded
+        )
 
         # Reclaim first, so a freed epic flows through the very steps below in the
         # same pass instead of blocking its project for one more sync (see docstring).
@@ -1926,7 +1962,7 @@ def _sync_epic_projects() -> None:
                 if ticket is None:
                     continue
                 parent = _epic_parent_key(config, ticket)
-                if parent and change.get("project_id"):
+                if parent and parent not in excluded and change.get("project_id"):
                     evidence.setdefault(change["project_id"], set()).add(parent)
 
         # Epics tangled in an ambiguity are withheld from the creation step below: one
@@ -2038,6 +2074,7 @@ def _assign_changes_to_epic_projects() -> None:
         by_key = {
             normalize_key(config.id, t.key): t for t in tracker_store.tickets_of(config.id)
         }
+        excluded = _excluded_keys(config, by_key)
         for items in roadmap_store.list_all().values():
             for change in items:
                 if (
@@ -2050,7 +2087,7 @@ def _assign_changes_to_epic_projects() -> None:
                 if ticket is None:
                     continue
                 parent = _epic_parent_key(config, ticket)
-                if parent is None:
+                if parent is None or parent in excluded:
                     continue
                 project = portfolio_store.project_for_ticket(config.id, parent)
                 if project is None:
@@ -2126,10 +2163,20 @@ def _import_routed_tickets() -> None:
         }
         types = {t.casefold() for t in config.import_types}
         maps = _route_maps(config)
+        tickets = tracker_store.tickets_of(config.id)
+        excluded = _excluded_keys(
+            config, {normalize_key(config.id, t.key): t for t in tickets}
+        )
         imported = 0
+        excluded_count = 0
         unrouted: dict[str, int] = {}
-        for ticket in tracker_store.tickets_of(config.id):
+        for ticket in tickets:
             if ticket.raw_type.casefold() not in types:
+                continue
+            # Declared out of the automatic passes - counted, not unrouted: unrouted
+            # means "route this someday", excluded means "never, it lives elsewhere".
+            if normalize_key(config.id, ticket.key) in excluded:
+                excluded_count += 1
                 continue
             # Epic-level tickets are NEVER changes, whatever import_types says - they
             # are the epic pass's to represent, as projects. Without this, a done epic
@@ -2173,6 +2220,7 @@ def _import_routed_tickets() -> None:
             _audit(None, "roadmap.item_imported", f"{route.product}/{item.id}", ticket.key)
         _import_report[config.id] = {
             "imported": imported,
+            "excluded": excluded_count,
             "unrouted": {c: n for c, n in sorted(unrouted.items(), key=lambda kv: -kv[1])},
             "unrouted_total": sum(unrouted.values()),
         }

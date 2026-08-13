@@ -115,6 +115,22 @@ class RouteConfigTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self._write(self.BASE + 'import_types = ["Epic"]\n')
 
+    def test_exclude_components_parse(self) -> None:
+        cfg = self._write(self.BASE + 'exclude_components = ["CapAdmin", " Legacy "]\n')
+        self.assertEqual(cfg.trackers[0].exclude_components, ("CapAdmin", "Legacy"))
+
+    def test_a_component_both_routed_and_excluded_is_fatal(self) -> None:
+        """A contradiction, not a preference - one of the two lines is a leftover."""
+        with self.assertRaises(SystemExit):
+            self._write(self.BASE + """\
+                import_types = ["Epic"]
+                exclude_components = ["checkout web"]
+
+                [[trackers.routes]]
+                component = "Checkout Web"
+                product = "checkout"
+            """)
+
     def test_project_route_parses(self) -> None:
         """The project-IS-the-product shape: every ticket in it routes, component or not."""
         cfg = self._write(self.BASE + """\

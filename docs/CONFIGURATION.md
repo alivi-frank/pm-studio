@@ -207,6 +207,23 @@ config line, not an investigation). No catch-all product is invented. A route wi
 a `system` imports unattributed — into the existing unattributed report — because an
 imported change you can see beats a refused one you can't.
 
+When a slice of a tracker is tracked authoritatively **somewhere else** (the classic
+case: the same work mirrored in a second tracker), declare it out entirely:
+
+```toml
+exclude_components = ["CapAdmin"]   # components / area paths owned elsewhere
+```
+
+Excluded tickets are invisible to every automatic pass — never imported as changes,
+never imported or linked as projects, never used to assign a change to a project — and
+the exclusion covers the **whole parent chain**, so a story or task under an excluded
+epic is out too, even though children rarely carry components of their own. Excluded
+is not unrouted: unrouted means "route this someday" and is reported as debt, excluded
+means "never, it lives elsewhere" and is only counted. A component that is both routed
+and excluded refuses to boot — one of the two lines is a leftover. Manual linking
+stays possible: exclusion governs what the sync does on its own, never what a human
+does on purpose.
+
 ## Hierarchical products
 
 A product declared with a `parent` is a **sub-product** of it:
