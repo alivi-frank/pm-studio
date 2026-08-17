@@ -61,14 +61,7 @@ from {gitflow_path}:
 The task the development agent was given:
 {description}
 
-The work to judge is everything between commit {head_before} and commit {head_after} - \
-inspect it with `git log {head_before}..{head_after}` and \
-`git diff {head_before}..{head_after}`. One caveat: the last commit in that range may be \
-an automatic bookkeeping snapshot made by the PM Studio server itself (its message starts \
-with "Dev task"). That snapshot is not the development agent's commit - never count its \
-existence or its message as a violation - but work the agent left uncommitted lands inside \
-it, so if the rules require the agent to commit its own work in a particular way, work \
-found only in the snapshot can still evidence a violation of THAT rule.
+{evidence}
 
 Reply with ONLY a JSON object, no prose before or after it, in exactly this shape:
 {{"verdict": "pass" | "violation" | "inconclusive",
@@ -85,6 +78,41 @@ are out of your reach: skip them rather than guessing, and mention the skip in t
 summary."""
 
 
+# The three evidence shapes a task can leave behind. ROOT_EVIDENCE is the deployment
+# repo, where the registry's own bookkeeping snapshot needs explaining; NESTED_EVIDENCE
+# is a system's own repository (a nested clone inside the checkout), where every commit
+# in the range is the agent's; UNCOMMITTED_EVIDENCE is a nested repository whose HEAD
+# never moved but whose working tree the agent dirtied - the deployment repo's snapshot
+# cannot capture work inside a nested repo, so uncommitted work there would otherwise
+# be invisible, and "commit your own work" is exactly the kind of rule it breaks.
+ROOT_EVIDENCE_TEMPLATE = """\
+The work to judge is everything between commit {head_before} and commit {head_after} - \
+inspect it with `git log {head_before}..{head_after}` and \
+`git diff {head_before}..{head_after}`. One caveat: the last commit in that range may be \
+an automatic bookkeeping snapshot made by the PM Studio server itself (its message starts \
+with "Dev task"). That snapshot is not the development agent's commit - never count its \
+existence or its message as a violation - but work the agent left uncommitted lands inside \
+it, so if the rules require the agent to commit its own work in a particular way, work \
+found only in the snapshot can still evidence a violation of THAT rule."""
+
+NESTED_EVIDENCE_TEMPLATE = """\
+Your working directory is the {system_label} system's OWN repository (checked out at \
+`{repo_rel}` inside the deployment checkout - you are inside it, use plain git commands). \
+The work to judge is everything between commit {head_before} and commit {head_after} - \
+inspect it with `git log {head_before}..{head_after}` and \
+`git diff {head_before}..{head_after}`, and check branches with `git branch --contains` \
+where the rules make branching claims. Every commit in that range is the development \
+agent's own - there are no bookkeeping commits here, so nothing in the range is exempt."""
+
+UNCOMMITTED_EVIDENCE_TEMPLATE = """\
+Your working directory is the {system_label} system's OWN repository (checked out at \
+`{repo_rel}` inside the deployment checkout). HEAD did not move during the task: the \
+development agent left its work UNCOMMITTED. Inspect it with `git status` and `git diff` \
+(plus `git diff --stat`). Judge that state against the rules - if they require the agent \
+to commit its own work, branch first, or leave a clean tree, uncommitted work is itself \
+the evidence."""
+
+
 def inconclusive(summary: str, model: str = "", usage: dict | None = None) -> dict:
     return {
         "verdict": VERDICT_INCONCLUSIVE,
@@ -92,6 +120,39 @@ def inconclusive(summary: str, model: str = "", usage: dict | None = None) -> di
         "summary": summary,
         "model": model,
         "agent_usage": usage or {},
+    }
+
+
+def merge_verdicts(verdicts: list[tuple[str, dict]]) -> dict:
+    """One verdict for a task whose work spans several repositories - (repo_rel,
+    verdict) pairs, each from its own judge run - folded worst-wins: any violation
+    makes the task a violation, else any inconclusive keeps it unverified, else pass.
+    Evidence and summaries keep their repository prefix so a violation still says
+    where to look, and the measured spend of every run is summed - each was a real
+    agent call."""
+    if len(verdicts) == 1:
+        return verdicts[0][1]
+    order = {VERDICT_VIOLATION: 0, VERDICT_INCONCLUSIVE: 1, VERDICT_PASS: 2}
+    worst = min((v["verdict"] for _, v in verdicts), key=order.__getitem__)
+    violations = [
+        {**violation, "evidence": f"[{rel}] {violation.get('evidence', '')}".strip()}
+        for rel, v in verdicts
+        for violation in v.get("violations", [])
+    ]
+    summary = " ".join(
+        f"{rel}: {v.get('summary', '')}".strip() for rel, v in verdicts
+    )
+    usage: dict = {}
+    for _, v in verdicts:
+        for key, value in (v.get("agent_usage") or {}).items():
+            if isinstance(value, (int, float)):
+                usage[key] = usage.get(key, 0) + value
+    return {
+        "verdict": worst,
+        "violations": violations,
+        "summary": summary,
+        "model": verdicts[0][1].get("model", ""),
+        "agent_usage": usage,
     }
 
 
@@ -158,19 +219,42 @@ def run_judge(
     head_before: str,
     head_after: str,
     fallback_model: str,
+    repo_rel: str = "",
+    uncommitted: bool = False,
 ) -> dict:
-    """One judge turn over a finished dev task's commit range. Always returns a verdict
+    """One judge turn over a finished dev task's evidence. Always returns a verdict
     dict ({verdict, violations, summary, model, agent_usage}); every failure mode maps
-    to "inconclusive" with the reason in the summary."""
+    to "inconclusive" with the reason in the summary.
+
+    `repo_root` is the repository the judge runs INSIDE - the deployment checkout by
+    default, or a system's own nested repository when `repo_rel` names one (the caller
+    passes `repo_root` already pointing there; `repo_rel` is how the prompt and the
+    merged verdict name it). `uncommitted` switches the evidence from a commit range to
+    the dirty working tree the agent left behind - only meaningful for nested repos,
+    where the registry's snapshot cannot sweep the work into a commit."""
     model = judge_model(fallback_model)
+    if uncommitted:
+        evidence = UNCOMMITTED_EVIDENCE_TEMPLATE.format(
+            system_label=system_label, repo_rel=repo_rel
+        )
+    elif repo_rel:
+        evidence = NESTED_EVIDENCE_TEMPLATE.format(
+            system_label=system_label,
+            repo_rel=repo_rel,
+            head_before=head_before,
+            head_after=head_after,
+        )
+    else:
+        evidence = ROOT_EVIDENCE_TEMPLATE.format(
+            head_before=head_before, head_after=head_after
+        )
     prompt = JUDGE_PROMPT_TEMPLATE.format(
         system_id=system_id,
         system_label=system_label,
         gitflow_path=gitflow_path,
         rules=rules,
         description=description,
-        head_before=head_before,
-        head_after=head_after,
+        evidence=evidence,
     )
     try:
         proc = subprocess.run(

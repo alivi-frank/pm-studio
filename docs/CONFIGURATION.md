@@ -407,7 +407,11 @@ things then happen on every dev task dispatched for the system:
   agent's own claims — rules `pass` / `violation` / `inconclusive` against the file.
   The verdict lands on the task record (and its card), and the PM's auto-continue turn
   is told about violations with instructions to dispatch a remediation task. A judge
-  that fails is a visible `inconclusive`, never a silent pass.
+  that fails is a visible `inconclusive`, never a silent pass. When the system's `path`
+  is (or directly contains) its **own git repository** — a nested clone inside the
+  checkout — the judge runs *inside* that repository, judging the commits the agent
+  made there, or the dirty tree it left uncommitted; work spanning several of the
+  system's repos gets one verdict per repo, folded worst-wins.
 
 Once `[systems]` is declared, every dev-task dispatch must name the one system whose
 code it changes (`"system"` in the POST /tasks payload) — that attribution is what

@@ -445,7 +445,9 @@ class TaskRegistry:
 - Task records are JSON files at `<workspace_dir>/tasks/<id>.json`:
   `{id: 8hex, kind: "dev"|"merge_resolution", description, system, status:
   "running"|"done"|"error", started_at, finished_at, result, head_before, head_after,
-  judge?}`.
+  system_repos_before?, system_repos_after?, judge?}` — the `system_repos_*` maps
+  (`{rel: {head, dirty}}`) exist only for systems with their own nested repositories
+  (see `_system_repo_dirs`).
 - `validate_dispatch_system(system)` (module-level, called by the dispatch endpoint) —
   once `[systems]` is declared every dev task must name a declared system (400 naming
   the valid ids otherwise; with no `[systems]`, naming one is refused and omitting it
@@ -469,19 +471,37 @@ class TaskRegistry:
   `result = data["result"]`; `is_error = data.get("is_error") or returncode != 0`.
   Handle timeout / CLI-not-found / empty output / non-JSON output as error results with
   the literal evidence (stderr excerpt), never a guess.
-- `_judge(...)` — nothing to judge (no system, no `gitflow`, HEAD never moved) means no
-  `judge` key at all; rules declared but no usable commit range is a visible
-  `inconclusive`, never a silent skip. Otherwise delegates to `judge.run_judge`: an
-  independent read-only agent (`--allowedTools` limited to Read/Grep/Glob and git
-  inspection subcommands, **no** bypassPermissions) that inspects
-  `head_before..head_after` against the rules file — composed entirely server-side, the
-  dev agent's own claims never shown — and returns
+- `_judge(...)` — nothing to judge (no system, no `gitflow`, nothing observably
+  changed) means no `judge` key at all; rules declared but no usable evidence is a
+  visible `inconclusive`, never a silent skip. Otherwise delegates to
+  `judge.run_judge`: an independent read-only agent (`--allowedTools` limited to
+  Read/Grep/Glob and git inspection subcommands, **no** bypassPermissions) that
+  inspects the task's evidence against the rules file — composed entirely server-side,
+  the dev agent's own claims never shown — and returns
   `{verdict: "pass"|"violation"|"inconclusive", violations: [{rule, evidence}], summary,
   model, agent_usage}`. Every judge failure (timeout, bad output shape, uncited
   violation) maps to `inconclusive` with the reason: fail loud, never fail open. Runs on
   the Opus tier when the deployment declares one, else the registry's model
   (`judge.judge_model`) - a wrong verdict is expensive in both directions, so the
   verdict gets the strongest model available.
+- **Nested repositories.** `_system_repo_dirs(system)` finds the system's OWN repos
+  inside the checkout: its `path` when that is itself a git repo, else the path's
+  immediate children that are (a bounded, predictable rule — never a deep scan). When
+  the system has them, THEY are where the rules apply: each repo the task touched gets
+  its own judge run **inside that repo** (`cwd` = the nested repo, so the read-only git
+  allowlist works unchanged) — a commit range when its HEAD moved, the dirty working
+  tree when the agent left work uncommitted (the deployment snapshot cannot sweep
+  nested work into a commit, so that state would otherwise be invisible; the record's
+  `dirty` flags exist for exactly this). Multiple verdicts fold worst-wins via
+  `judge.merge_verdicts` (evidence prefixed `[rel]`, spends summed). The deployment
+  repo is deliberately NOT judged alongside — its only change is the registry's
+  gitlink-bump snapshot, and judging bookkeeping against a system's branching rules
+  manufactures false violations — but stays the evidence when no nested repo was
+  touched. The nested evidence prompt drops the snapshot-commit caveat (no snapshots
+  exist there; keeping it would hand the agent an exemption to hide behind). A session
+  worktree materializes gitlinks as empty directories, so discovery returns nothing
+  there and judging falls back to the root range — nested-repo systems are effectively
+  a default-session (primary checkout) affair.
 - `run_conflict_resolution(description)` — same `_execute`, but **synchronous**, id
   prefixed `merge-`, `kind="merge_resolution"`, and **no snapshot commit** (the merge
   flow verifies and commits or aborts explicitly).

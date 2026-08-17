@@ -127,15 +127,58 @@ class TaskRegistry:
         tasks.sort(key=lambda t: t["started_at"], reverse=True)
         return tasks
 
-    def _git_head(self) -> str:
-        """Current HEAD sha of this registry's worktree, or "" when git can't say
-        (no repo, no commits yet). Callers must hold git_lock - the sha is only
-        meaningful relative to the commits happening around it."""
+    def _git_head(self, repo: Path | None = None) -> str:
+        """Current HEAD sha of the given repo (this registry's worktree by default),
+        or "" when git can't say (no repo, no commits yet). Callers must hold
+        git_lock - the sha is only meaningful relative to the commits happening
+        around it."""
         proc = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            cwd=str(self.repo_root), capture_output=True, text=True,
+            cwd=str(repo or self.repo_root), capture_output=True, text=True,
         )
         return proc.stdout.strip() if proc.returncode == 0 else ""
+
+    def _system_repo_dirs(self, system: str) -> list[str]:
+        """Repo-root-relative paths of the system's OWN git repositories inside this
+        checkout: the system's `path` when it is itself a git repo, else its immediate
+        children that are (the registry convention - one system folder holding e.g.
+        `backend/` and `frontend/` clones). Deliberately shallow: a bounded, documented
+        rule the operator can predict beats a recursive scan that might adopt a
+        node_modules-vendored repo three levels down. Empty when the system declares no
+        path, the path is missing (a session worktree materializes gitlinks as empty
+        directories), or nothing under it is a repo - all of which fall back to judging
+        the deployment repo, the pre-nested behavior."""
+        spec = roadmap.SYSTEMS.get(system) if system else None
+        if spec is None or not spec.path:
+            return []
+        base = self.repo_root / spec.path
+        if not base.is_dir():
+            return []
+        if (base / ".git").exists():
+            return [spec.path]
+        return sorted(
+            f"{spec.path}/{child.name}"
+            for child in base.iterdir()
+            if child.is_dir() and (child / ".git").exists()
+        )
+
+    def _repo_states(self, rels: list[str]) -> dict[str, dict]:
+        """{rel: {"head": sha, "dirty": bool}} for each nested repo, read under the
+        caller's git_lock. `dirty` (uncommitted or untracked files) is recorded because
+        the deployment repo's snapshot cannot sweep work inside a nested repo into a
+        commit - a task that only dirtied a nested tree would otherwise be invisible."""
+        states: dict[str, dict] = {}
+        for rel in rels:
+            repo = self.repo_root / rel
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=str(repo), capture_output=True, text=True,
+            )
+            states[rel] = {
+                "head": self._git_head(repo),
+                "dirty": status.returncode == 0 and bool(status.stdout.strip()),
+            }
+        return states
 
     def start_task(self, description: str, system: str = "") -> dict:
         """Kicks off a dev-agent turn in the background and returns immediately.
@@ -146,8 +189,10 @@ class TaskRegistry:
         (head_before..head_after) - the evidence the compliance judge inspects.
         Snapshots from PM turns before or after the task never leak into that range."""
         task_id = uuid.uuid4().hex[:8]
+        nested_rels = self._system_repo_dirs(system)
         with self.git_lock:
             head_before = self._git_head()
+            nested_before = self._repo_states(nested_rels)
         started_at = time.time()
         task = {
             "id": task_id,
@@ -160,10 +205,12 @@ class TaskRegistry:
             "result": None,
             "head_before": head_before,
         }
+        if nested_before:
+            task["system_repos_before"] = nested_before
         self._write_task(task)
         threading.Thread(
             target=self._run_and_record,
-            args=(task_id, description, started_at, system, head_before),
+            args=(task_id, description, started_at, system, head_before, nested_before),
             daemon=True,
         ).start()
         return task
@@ -198,12 +245,17 @@ class TaskRegistry:
     def _run_and_record(
         self, task_id: str, description: str, started_at: float,
         system: str = "", head_before: str = "",
+        nested_before: dict[str, dict] | None = None,
     ) -> None:
+        nested_before = nested_before or {}
         is_error, result_text, usage = self._execute(description, system)
         status_label = "error" if is_error else "done"
         with self.git_lock:
             gitsnapshot.snapshot(f"Dev task {task_id} ({status_label}): {description[:72]}", self.repo_root)
             head_after = self._git_head()
+            # Re-list rather than reuse nested_before's keys: a repo the agent cloned
+            # into the system's folder during the task is evidence too.
+            nested_after = self._repo_states(self._system_repo_dirs(system))
         final = {
             "id": task_id,
             "kind": "dev",
@@ -218,28 +270,88 @@ class TaskRegistry:
             "head_before": head_before,
             "head_after": head_after,
         }
+        if nested_before or nested_after:
+            final["system_repos_before"] = nested_before
+            final["system_repos_after"] = nested_after
         # The judge runs BEFORE the final write: writing "done" is what notifies
         # subscribers, and the completion notification (which re-engages the PM) must
         # already carry the verdict - a PM told "done" without it would build on
         # unjudged work. The card shows "running" a little longer; that's the honest
         # state, since the task isn't settled until it's judged.
-        verdict = self._judge(system, description, head_before, head_after)
+        verdict = self._judge(
+            system, description, head_before, head_after, nested_before, nested_after
+        )
         if verdict is not None:
             final["judge"] = verdict
         self._write_task(final)
 
     def _judge(
-        self, system: str, description: str, head_before: str, head_after: str
+        self, system: str, description: str, head_before: str, head_after: str,
+        nested_before: dict[str, dict] | None = None,
+        nested_after: dict[str, dict] | None = None,
     ) -> dict | None:
         """The compliance verdict for a finished dev task, or None when there is
         nothing to judge: no system named, the system declares no gitflow rules, or
-        HEAD never moved (the task changed nothing observable - errored tasks that DID
-        move HEAD are still judged, because their changes landed). An unknown range
-        (rev-parse failed) with rules declared is inconclusive, not skipped - rules the
-        studio cannot verify should be visible, not silently waved through."""
+        nothing observable changed anywhere (errored tasks that DID land changes are
+        still judged). Unverifiable-but-changed states are inconclusive, not skipped -
+        rules the studio cannot verify should be visible, never silently waved through.
+
+        When the system has its own nested repositories (see _system_repo_dirs), THEY
+        are where the rules live, so each one the task touched gets its own judge run
+        inside that repo - a committed range when HEAD moved, the dirty tree when the
+        agent left work uncommitted - and the verdicts fold worst-wins. The deployment
+        repo is deliberately NOT judged alongside them: its only change is the
+        registry's own gitlink-bump snapshot, and judging bookkeeping against a
+        system's branching rules manufactures false violations. The deployment-repo
+        range remains the evidence only when no nested repo was touched - the
+        pre-nested behavior, and still right for systems whose source lives in this
+        checkout directly."""
         spec = roadmap.SYSTEMS.get(system) if system else None
         if spec is None or not spec.gitflow:
             return None
+        try:
+            rules = (self.repo_root / spec.gitflow).read_text()
+        except OSError as exc:
+            return judge.inconclusive(f"Rules file {spec.gitflow} unreadable: {exc}")
+
+        def judged(rel: str, b_head: str, a_head: str, uncommitted: bool) -> tuple[str, dict]:
+            return rel, judge.run_judge(
+                repo_root=self.repo_root / rel if rel else self.repo_root,
+                system_id=system,
+                system_label=spec.label,
+                gitflow_path=spec.gitflow,
+                rules=rules,
+                description=description,
+                head_before=b_head,
+                head_after=a_head,
+                fallback_model=self.model,
+                repo_rel=rel,
+                uncommitted=uncommitted,
+            )
+
+        verdicts: list[tuple[str, dict]] = []
+        nested_before, nested_after = nested_before or {}, nested_after or {}
+        for rel in sorted(set(nested_before) | set(nested_after)):
+            before = nested_before.get(rel, {})
+            after = nested_after.get(rel, {})
+            b_head, a_head = before.get("head", ""), after.get("head", "")
+            if rel not in nested_after:
+                verdicts.append((rel, judge.inconclusive(
+                    f"The repository at {rel} was present when the task started and "
+                    "gone when it finished - nothing left to verify the rules against."
+                )))
+            elif b_head and a_head and b_head != a_head:
+                verdicts.append(judged(rel, b_head, a_head, uncommitted=False))
+            elif not b_head and a_head and rel not in nested_before:
+                verdicts.append((rel, judge.inconclusive(
+                    f"The repository at {rel} appeared during the task, so there is no "
+                    "before-state to bound what the agent did in it."
+                )))
+            elif b_head == a_head and after.get("dirty") and not before.get("dirty"):
+                verdicts.append(judged(rel, b_head, a_head, uncommitted=True))
+        if verdicts:
+            return judge.merge_verdicts(verdicts)
+
         if not head_before or not head_after:
             return judge.inconclusive(
                 "No commit range recorded (git rev-parse failed around the task), so "
@@ -247,21 +359,7 @@ class TaskRegistry:
             )
         if head_before == head_after:
             return None
-        try:
-            rules = (self.repo_root / spec.gitflow).read_text()
-        except OSError as exc:
-            return judge.inconclusive(f"Rules file {spec.gitflow} unreadable: {exc}")
-        return judge.run_judge(
-            repo_root=self.repo_root,
-            system_id=system,
-            system_label=spec.label,
-            gitflow_path=spec.gitflow,
-            rules=rules,
-            description=description,
-            head_before=head_before,
-            head_after=head_after,
-            fallback_model=self.model,
-        )
+        return judged("", head_before, head_after, uncommitted=False)[1]
 
     def _execute(self, description: str, system: str = "") -> tuple[bool, str, dict]:
         """Runs a single headless dev-agent turn in this registry's workspace.

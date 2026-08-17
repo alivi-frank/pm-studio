@@ -141,11 +141,13 @@ def _init_repo(repo: Path, initial_commit: bool = True) -> None:
 class _FakeClaude:
     """Intercepts the `claude` subprocess (dev agent) while every real git call made
     by the registry and gitsnapshot still runs - the shape a registry test needs.
-    Optionally mutates the repo, the way a real dev turn would."""
+    Optionally mutates the repo (`touch`) or runs an arbitrary effect, the way a real
+    dev turn would. Construct BEFORE entering mock.patch so _real_run is the real one."""
 
-    def __init__(self, repo: Path, touch: str | None = None):
+    def __init__(self, repo: Path, touch: str | None = None, effect=None):
         self.repo = repo
         self.touch = touch
+        self.effect = effect
         self.prompts: list[str] = []
         self._real_run = subprocess.run
 
@@ -154,6 +156,8 @@ class _FakeClaude:
             self.prompts.append(cmd[list(cmd).index("-p") + 1])
             if self.touch:
                 (self.repo / self.touch).write_text("changed\n")
+            if self.effect:
+                self.effect()
             return types.SimpleNamespace(
                 returncode=0,
                 stdout=json.dumps({"result": "dev done", "is_error": False}),
@@ -336,6 +340,247 @@ class JudgeWiringTest(unittest.TestCase):
             task = self.registry.run_conflict_resolution("fix the merge")
         self.assertNotIn("judge", task)
         self.assertNotIn("NON-NEGOTIABLE", fake.prompts[0])
+
+
+class NestedRepoJudgeTest(unittest.TestCase):
+    """Systems whose code lives in their OWN repositories inside the checkout (nested
+    clones, tracked as gitlinks): the rules apply where the work happens, so the judge
+    must run inside those repos - a commit range when the agent committed, the dirty
+    tree when it didn't (the deployment snapshot can't sweep nested work into a
+    commit, so uncommitted nested work would otherwise be invisible)."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self._tmp.name)
+        _init_repo(self.repo)
+        (self.repo / "GITFLOW.md").write_text("rules")
+        _git(self.repo, "add", "GITFLOW.md")
+        _git(self.repo, "commit", "-q", "-m", "rules")
+        # The registry convention: one system folder holding sibling clones.
+        self.backend = self.repo / "src" / "epic" / "backend"
+        self.frontend = self.repo / "src" / "epic" / "frontend"
+        for child in (self.backend, self.frontend):
+            child.mkdir(parents=True)
+            _init_repo(child)
+        # Commit the gitlink entries at seed (as the real deployment has them) - an
+        # untracked child would be swept into the first task's snapshot, moving root
+        # HEAD and making an idle task look like root work.
+        _git(self.repo, "add", "-A")
+        _git(self.repo, "commit", "-q", "-m", "children")
+
+        local = self.repo / "pm_studio_local"
+        local.mkdir()
+        (local / "config.toml").write_text("")
+        self._orig_config = tasks_module.CONFIG
+        tasks_module.CONFIG = load_config(self.repo)
+
+        self._orig_systems = roadmap_module.SYSTEMS
+        roadmap_module.SYSTEMS = {
+            "epic": SystemSpec(label="EpicRide", path="src/epic", gitflow="GITFLOW.md")
+        }
+        self.registry = TaskRegistry(
+            "sess", self.repo / "ws", self.repo, threading.Lock()
+        )
+        self.judge_calls: list[dict] = []
+        self.responses: dict[str, dict] = {}
+        self._orig_run_judge = judge_module.run_judge
+
+        def fake_run_judge(**kwargs):
+            self.judge_calls.append(kwargs)
+            return self.responses.get(kwargs.get("repo_rel"), {
+                "verdict": "pass", "violations": [], "summary": "ok",
+                "model": "m", "agent_usage": {"cost_usd": 1.0},
+            })
+
+        judge_module.run_judge = fake_run_judge
+
+    def tearDown(self) -> None:
+        judge_module.run_judge = self._orig_run_judge
+        tasks_module.CONFIG = self._orig_config
+        roadmap_module.SYSTEMS = self._orig_systems
+        self._tmp.cleanup()
+
+    def _run(self, effect=None):
+        rels = self.registry._system_repo_dirs("epic")
+        with self.registry.git_lock:
+            head_before = self.registry._git_head()
+            nested_before = self.registry._repo_states(rels)
+        fake = _FakeClaude(self.repo, effect=effect)
+        with mock.patch("subprocess.run", fake):
+            self.registry._run_and_record(
+                "t1", "Do the work", 1.0, "epic", head_before, nested_before
+            )
+        return self.registry.get_task("t1")
+
+    def _commit_in(self, child: Path, name: str) -> None:
+        (child / name).write_text("changed\n")
+        _git(child, "add", "-A")
+        _git(child, "commit", "-q", "-m", f"feat: {name}")
+
+    def test_discovery_finds_the_sibling_clones(self) -> None:
+        self.assertEqual(
+            self.registry._system_repo_dirs("epic"),
+            ["src/epic/backend", "src/epic/frontend"],
+        )
+
+    def test_discovery_of_a_path_that_is_itself_a_repo(self) -> None:
+        roadmap_module.SYSTEMS = {
+            "epic": SystemSpec(label="E", path="src/epic/backend", gitflow="GITFLOW.md")
+        }
+        self.assertEqual(self.registry._system_repo_dirs("epic"), ["src/epic/backend"])
+
+    def test_discovery_is_empty_without_a_path_or_repos(self) -> None:
+        roadmap_module.SYSTEMS = {"epic": SystemSpec(label="E", gitflow="GITFLOW.md")}
+        self.assertEqual(self.registry._system_repo_dirs("epic"), [])
+
+    def test_a_commit_in_a_child_repo_is_judged_inside_that_repo(self) -> None:
+        task = self._run(effect=lambda: self._commit_in(self.backend, "svc.ts"))
+        (call,) = self.judge_calls
+        self.assertEqual(call["repo_root"], self.backend)
+        self.assertEqual(call["repo_rel"], "src/epic/backend")
+        self.assertFalse(call["uncommitted"])
+        before = task["system_repos_before"]["src/epic/backend"]
+        after = task["system_repos_after"]["src/epic/backend"]
+        self.assertEqual(call["head_before"], before["head"])
+        self.assertEqual(call["head_after"], after["head"])
+        self.assertNotEqual(before["head"], after["head"])
+        self.assertEqual(task["judge"]["verdict"], "pass")
+
+    def test_the_deployment_repo_is_not_judged_alongside_a_child(self) -> None:
+        """The root's only change is the registry's own gitlink-bump snapshot -
+        judging bookkeeping against the system's branching rules would manufacture
+        false violations."""
+        self._run(effect=lambda: self._commit_in(self.backend, "svc.ts"))
+        self.assertEqual(len(self.judge_calls), 1)
+        self.assertEqual(self.judge_calls[0]["repo_rel"], "src/epic/backend")
+
+    def test_uncommitted_child_work_is_judged_as_a_dirty_tree(self) -> None:
+        """The deployment snapshot cannot commit work inside a nested repo, so an
+        agent that edits without committing would otherwise leave NO trace - and
+        'commit your own work' is exactly the kind of rule it just broke."""
+        task = self._run(
+            effect=lambda: (self.backend / "svc.ts").write_text("uncommitted\n")
+        )
+        (call,) = self.judge_calls
+        self.assertEqual(call["repo_rel"], "src/epic/backend")
+        self.assertTrue(call["uncommitted"])
+        self.assertEqual(call["head_before"], call["head_after"])
+        self.assertIn("judge", task)
+
+    def test_work_in_both_children_folds_worst_wins(self) -> None:
+        self.responses["src/epic/frontend"] = {
+            "verdict": "violation",
+            "violations": [{"rule": "no main commits", "evidence": "abc on main"}],
+            "summary": "committed to main", "model": "m", "agent_usage": {"cost_usd": 2.0},
+        }
+        task = self._run(effect=lambda: (
+            self._commit_in(self.backend, "svc.ts"),
+            self._commit_in(self.frontend, "app.ts"),
+        ))
+        self.assertEqual(len(self.judge_calls), 2)
+        verdict = task["judge"]
+        self.assertEqual(verdict["verdict"], "violation")
+        self.assertEqual(
+            verdict["violations"][0]["evidence"], "[src/epic/frontend] abc on main"
+        )
+        # Both runs were real agent calls; the merged verdict carries both spends.
+        self.assertEqual(verdict["agent_usage"]["cost_usd"], 3.0)
+
+    def test_untouched_children_fall_back_to_the_deployment_repo(self) -> None:
+        """A system with nested repos can still have work land at the root (docs,
+        config); with no child touched, the root range stays the evidence."""
+        task = self._run(effect=lambda: (self.repo / "notes.md").write_text("n\n"))
+        (call,) = self.judge_calls
+        self.assertEqual(call["repo_rel"], "")
+        self.assertEqual(call["repo_root"], self.repo)
+        self.assertEqual(call["head_before"], task["head_before"])
+        self.assertEqual(call["head_after"], task["head_after"])
+
+    def test_nothing_changed_anywhere_is_not_judged(self) -> None:
+        task = self._run(effect=None)
+        self.assertNotIn("judge", task)
+        self.assertEqual(self.judge_calls, [])
+
+
+class MergeVerdictsTest(unittest.TestCase):
+    def _v(self, verdict: str, cost: float = 1.0) -> dict:
+        return {
+            "verdict": verdict,
+            "violations": [{"rule": "r", "evidence": "e"}] if verdict == "violation" else [],
+            "summary": f"{verdict} summary",
+            "model": "m",
+            "agent_usage": {"cost_usd": cost, "input_tokens": 10},
+        }
+
+    def test_single_verdict_passes_through_unchanged(self) -> None:
+        verdict = self._v("pass")
+        self.assertIs(judge_module.merge_verdicts([("a", verdict)]), verdict)
+
+    def test_any_violation_wins(self) -> None:
+        merged = judge_module.merge_verdicts(
+            [("a", self._v("pass")), ("b", self._v("violation")), ("c", self._v("inconclusive"))]
+        )
+        self.assertEqual(merged["verdict"], "violation")
+        self.assertEqual(merged["violations"], [{"rule": "r", "evidence": "[b] e"}])
+
+    def test_inconclusive_beats_pass(self) -> None:
+        merged = judge_module.merge_verdicts(
+            [("a", self._v("pass")), ("b", self._v("inconclusive"))]
+        )
+        self.assertEqual(merged["verdict"], "inconclusive")
+
+    def test_summaries_are_prefixed_and_spend_is_summed(self) -> None:
+        merged = judge_module.merge_verdicts(
+            [("a", self._v("pass", 1.5)), ("b", self._v("pass", 2.5))]
+        )
+        self.assertIn("a: pass summary", merged["summary"])
+        self.assertIn("b: pass summary", merged["summary"])
+        self.assertEqual(merged["agent_usage"]["cost_usd"], 4.0)
+        self.assertEqual(merged["agent_usage"]["input_tokens"], 20)
+
+
+class EvidenceBlockTest(unittest.TestCase):
+    """The prompt the judge actually receives, per evidence shape."""
+
+    def _prompt_for(self, **kwargs) -> str:
+        captured = {}
+
+        def fake_run(cmd, **_):
+            captured["prompt"] = cmd[list(cmd).index("-p") + 1]
+            result = json.dumps({"verdict": "pass", "violations": [], "summary": "ok"})
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"result": result, "is_error": False}),
+                stderr="",
+            )
+
+        with mock.patch.object(judge_module.subprocess, "run", fake_run):
+            judge_module.run_judge(
+                repo_root=Path("/tmp"), system_id="epic", system_label="EpicRide",
+                gitflow_path="GITFLOW.md", rules="rules", description="task",
+                head_before="aaa", head_after="bbb", fallback_model="m", **kwargs,
+            )
+        return captured["prompt"]
+
+    def test_root_evidence_carries_the_snapshot_caveat(self) -> None:
+        prompt = self._prompt_for()
+        self.assertIn("Dev task", prompt)  # the bookkeeping-snapshot caveat
+        self.assertIn("aaa..bbb", prompt)
+
+    def test_nested_evidence_names_the_repo_and_drops_the_caveat(self) -> None:
+        prompt = self._prompt_for(repo_rel="src/epic/backend")
+        self.assertIn("src/epic/backend", prompt)
+        self.assertIn("OWN repository", prompt)
+        self.assertIn("aaa..bbb", prompt)
+        # No snapshot commits exist inside a nested repo - the caveat would hand the
+        # agent an exemption it could hide behind.
+        self.assertNotIn("Dev task", prompt)
+
+    def test_uncommitted_evidence_points_at_the_dirty_tree(self) -> None:
+        prompt = self._prompt_for(repo_rel="src/epic/backend", uncommitted=True)
+        self.assertIn("UNCOMMITTED", prompt)
+        self.assertIn("git status", prompt)
+        self.assertNotIn("aaa..bbb", prompt)
 
 
 class JudgeParsingTest(unittest.TestCase):
