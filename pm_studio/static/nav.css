@@ -283,6 +283,32 @@
 
 #pm-nav .pmnav-action:disabled { opacity: 0.45; cursor: default; }
 
+/* The slot's third control shape: an open-text filter. An input, which the defensive
+   reset above does not cover - so this rule carries its own full reset the same way
+   that block does, and a host page's bare `input` styling cannot reshape it. Sized to
+   sit level with the segmented switches beside it. */
+#pm-nav .pmnav-search {
+  box-sizing: border-box;
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 12em;
+  padding: 3px 10px;
+  border: 1px solid var(--pmnav-border);
+  border-radius: 7px;
+  font: inherit;
+  font-size: 0.98em;
+  color: var(--pmnav-ink);
+  background: var(--pmnav-surface);
+}
+
+#pm-nav .pmnav-search::placeholder { color: var(--pmnav-ink-muted); }
+
+#pm-nav .pmnav-search:focus {
+  outline: none;
+  border-color: var(--pmnav-accent);
+}
+
 /* Between the three work-model tabs in the bar. Decorative: the tabs are the
    navigation, this is only the relationship between them. */
 #pm-nav .pmnav-arrow {

@@ -1374,7 +1374,20 @@
     localStorage.setItem("roadmapVisibleStates", JSON.stringify([...visibleStates]));
   }
 
-  const isCollapsed = (key) => !expanded.has(key);
+  /* The open-text filter, typed straight into the nav. Deliberately NOT persisted,
+     unlike the three view axes around it: a search is a question being asked right
+     now, and a board that comes back tomorrow still filtered to last week's word
+     looks broken. Matching is by title, case-insensitively, at every level of the
+     model at once - see changeMatchesSearch. */
+  let searchQuery = "";
+  const searchTerm = () => searchQuery.trim().toLowerCase();
+  const searchActive = () => searchTerm().length > 0;
+  const matchesSearch = (text) => !!text && text.toLowerCase().includes(searchTerm());
+
+  /* While a search is on, everything it kept renders unfolded - a filter whose matches
+     stay hidden inside collapsed sections answers "where is it" with more clicks. The
+     user's own fold state is untouched underneath, so clearing the search restores it. */
+  const isCollapsed = (key) => (searchActive() ? false : !expanded.has(key));
 
   function persistExpanded() {
     localStorage.setItem("roadmapExpandedGroups", JSON.stringify([...expanded]));
@@ -1556,9 +1569,44 @@
     return wrap;
   }
 
+  /* The type-ahead search: every keystroke re-filters the board, the same full
+     re-render a fold or a websocket event already costs. renderAll() rebuilds the nav
+     slot - destroying the very input being typed in - so after each render the focus
+     and caret are put back into the rebuilt one, the same courtesy collapseAllButton
+     pays its keyboard user. */
+  function searchControl() {
+    const input = el("input", "pmnav-search");
+    input.type = "search";
+    input.placeholder = "Search titles…";
+    input.setAttribute("aria-label", "Filter the board by title");
+    input.value = searchQuery;
+    const apply = () => {
+      searchQuery = input.value;
+      const caret = input.selectionStart;
+      renderAll();
+      const next = document.querySelector("#pm-nav-slot .pmnav-search");
+      if (next) {
+        next.focus();
+        if (caret != null && next.setSelectionRange) next.setSelectionRange(caret, caret);
+      }
+    };
+    input.addEventListener("input", apply);
+    input.addEventListener("keydown", (event) => {
+      // Escape empties the box (some browsers do this natively for type=search, most
+      // don't) - and stops there, so it can't also close whatever else listens for it.
+      if (event.key === "Escape" && input.value) {
+        event.stopPropagation();
+        input.value = "";
+        apply();
+      }
+    });
+    return input;
+  }
+
   function mountControls(slot) {
     slot.textContent = "";
     collapseControl = null;
+    slot.appendChild(searchControl());
     slot.appendChild(collapseAllButton());
     slot.appendChild(el("span", "pmnav-seg-label", "Show"));
     slot.appendChild(stateFilterControl());
@@ -1751,8 +1799,10 @@
   // Rebuilt whenever the work model changes, rather than per card - a full board render
   // asks for a change's project once per chip, and there is one chip per card.
   let PROJECTS_BY_ID = {};
+  let INITIATIVES_BY_ID = {};
   function indexProjects() {
     PROJECTS_BY_ID = Object.fromEntries(PORTFOLIO.projects.map((p) => [p.id, p]));
+    INITIATIVES_BY_ID = Object.fromEntries(PORTFOLIO.initiatives.map((i) => [i.id, i]));
   }
 
   /* The session-activity readout for a project: {last_at, recent_sessions}, or null.
@@ -2130,6 +2180,26 @@
     return Object.values(itemsByProduct).flat();
   }
 
+  /* Whether the search keeps this change on the board. A change matches through ANY
+     title on its path - its own, its project's, its initiative's, its product's full
+     path - so a query naming a container keeps that container's contents: typing
+     "billing" shows the Billing board's cards rather than emptying the section whose
+     heading just matched. Applied at grouping time (both lenses filter their source
+     through searchFilter), which keeps every count, state and tally downstream honest
+     about what is actually drawn. */
+  function changeMatchesSearch(change) {
+    if (matchesSearch(change.title)) return true;
+    if (matchesSearch(productPathLabel(change.product))) return true;
+    const project = PROJECTS_BY_ID[change.project_id];
+    if (project && matchesSearch(project.title)) return true;
+    const initiative = project && project.initiative_id ? INITIATIVES_BY_ID[project.initiative_id] : null;
+    return !!initiative && matchesSearch(initiative.title);
+  }
+
+  function searchFilter(changes) {
+    return searchActive() ? changes.filter(changeMatchesSearch) : changes;
+  }
+
   /* A group is { key, title, flags, changes, omit, product, projectIds, subgroups }.
 
      `product` is the one product board this section is about, or null when it spans
@@ -2158,7 +2228,7 @@
         // the states worth a glance, steady-state ga is not. Owner and team ride the
         // heading's tooltip (see the head renderers) rather than being chrome.
         flags: meta && meta.stage !== "ga" ? [[meta.stage, false]] : [],
-        changes: itemsByProduct[product] ?? [],
+        changes: searchFilter(itemsByProduct[product] ?? []),
         omit: { product: true },
         product,
         // A product board doesn't own projects, so an empty project has no business
@@ -2258,8 +2328,25 @@
      be reachable, and hiding an active parent must not orphan the inactive
      sub-products inside it. */
   function groupVisible(group) {
+    if (!groupSearchVisible(group)) return false;
     if (visibleStates.has(groupState(group))) return true;
     return (group.subgroups || []).some(groupVisible);
+  }
+
+  /* Whether the search leaves this section anything to say: its own title, a change
+     that survived the filter (`changes` is pre-filtered at grouping time), a declared
+     project whose title matches (empty of changes, it is still a findable artifact),
+     or a descendant with any of those - the same pass-through rule the state filter
+     keeps, so a matching sub-product is never orphaned by its parent. */
+  function groupSearchVisible(group) {
+    if (!searchActive()) return true;
+    if (matchesSearch(group.title)) return true;
+    if (groupChanges(group).length) return true;
+    if ((group.projectIds || []).some((id) => {
+      const project = PROJECTS_BY_ID[id];
+      return project && matchesSearch(project.title);
+    })) return true;
+    return (group.subgroups || []).some(groupSearchVisible);
   }
 
   /* Counts by state, one walk for both consumers: the filter buttons count every
@@ -2293,7 +2380,8 @@
     const kind = groupBy === "initiative" ? "initiative" : "product";
     const total = STATE_VALUES.reduce((n, s) => n + counts[s], 0);
     return el("div", className,
-      `${parts.join(", ")} ${total === 1 ? kind : kind + "s"} hidden — use the Show filter in the nav.`);
+      `${parts.join(", ")} ${total === 1 ? kind : kind + "s"} hidden — ` +
+      (searchActive() ? "by the search or the Show filter in the nav." : "use the Show filter in the nav."));
   }
 
   /* The sections as a flat sequence with depth, for the timeline - it draws rows on one
@@ -2324,7 +2412,7 @@
     };
 
     const buckets = new Map();
-    for (const change of allChanges()) {
+    for (const change of searchFilter(allChanges())) {
       const key = initiativeOf(change);
       if (!buckets.has(key)) buckets.set(key, []);
       buckets.get(key).push(change);
@@ -2545,8 +2633,14 @@
       };
     };
 
-    const rows = ids.map((id) => row(PROJECTS_BY_ID[id], byProject.get(id) || []));
+    let rows = ids.map((id) => row(PROJECTS_BY_ID[id], byProject.get(id) || []));
     if (byProject.has(null)) rows.push(row(null, byProject.get(null)));
+    /* Under a search, a declared project holding nothing that matched is noise unless
+       its own title is what matched - the changes are already filtered upstream, so an
+       empty row here has nothing to say about the query. */
+    if (searchActive()) {
+      rows = rows.filter((r) => r.changes.length || (r.project && matchesSearch(r.project.title)));
+    }
     /* The same active / inactive / completed order the sections themselves keep, one
        level down: a row is active when it holds open Now/Next work, completed when it
        is history (see isHistoryRow), parked otherwise - and within one state a closed
@@ -2786,7 +2880,9 @@
   /* One project row: the strategic line, with the whole Now / Next / Later board for
      that project folded inside it. */
   function projectNode(row) {
-    const isOpen = openProjects.has(row.key);
+    // Open while a search is on, like the sections (see isCollapsed): the cards are
+    // what matched, and a filter that only shows you closed rows hides its own answer.
+    const isOpen = searchActive() || openProjects.has(row.key);
     const node = el("article", "project" + (isOpen ? " open" : ""));
 
     const head = el("button", "project-head");
@@ -2992,7 +3088,7 @@
         if (shownSubs.length < subgroups.length) {
           const n = subgroups.length - shownSubs.length;
           body.appendChild(el("div", "filter-note",
-            `${n} sub-product${n === 1 ? "" : "s"} hidden by the Show filter.`));
+            `${n} sub-product${n === 1 ? "" : "s"} hidden by the ${searchActive() ? "search or the " : ""}Show filter.`));
         }
       }
       if (rows.length) {
@@ -3041,11 +3137,23 @@
 
   function renderBoard() {
     const groups = currentGroups();
+    let drewAny = false;
     for (const group of groups) {
-      if (groupVisible(group)) board.appendChild(groupSection(group, 0));
+      if (groupVisible(group)) { board.appendChild(groupSection(group, 0)); drewAny = true; }
+    }
+    // A search that matched nothing says so in words, in place of the hidden-note's
+    // per-state tallies - "which filter took my board" has one answer here.
+    if (!drewAny && searchActive()) {
+      board.appendChild(searchEmptyNote());
+      return;
     }
     const note = hiddenNote(groups, "filter-note");
     if (note) board.appendChild(note);
+  }
+
+  function searchEmptyNote() {
+    return el("p", "lens-empty",
+      `No titles match “${searchQuery.trim()}” — clear the search in the nav to see the whole board.`);
   }
 
   /* ---- the timeline view ----------------------------------------------------------
@@ -3170,6 +3278,12 @@
   }
 
   function renderTimeline() {
+    // Before any chrome is drawn: a legend and an axis over zero rows would read as a
+    // broken chart, where the lane view's equivalent is simply an empty page.
+    if (searchActive() && !flatGroups().length) {
+      board.appendChild(searchEmptyNote());
+      return;
+    }
     const ax = axis();
     const span = ax.end - ax.start;
     const pct = (t) => ((t - ax.start) / span) * 100;
@@ -3428,7 +3542,8 @@
           || (BUCKET_RANK[a.item.bucket] ?? 3) - (BUCKET_RANK[b.item.bucket] ?? 3)
           || a.bar.start - b.bar.start);
 
-        const isOpen = openProjects.has(projectRow.key);
+        // Open while a search is on, mirroring the lane view's projectNode.
+        const isOpen = searchActive() || openProjects.has(projectRow.key);
         const head = el("div", "gantt-row is-project");
 
         const label = el("button", "gantt-label");
