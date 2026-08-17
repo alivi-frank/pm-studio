@@ -1926,8 +1926,9 @@ def _sync_epic_projects() -> None:
     to represent properly. A change anyone touched is somebody's work and stays put.
 
     Anything else is counted, not guessed: an epic held by a change someone touched
-    (unlink it there to let it become a project), an unrouted one, a done-category one
-    (history, not a plan), and any project whose evidence points at several epics.
+    (unlink it there to let it become a project), an unrouted one, a won't-do one
+    (declined, not a plan), a done-category one (history, not a plan), and any project
+    whose evidence points at several epics.
     """
     for config in CONFIG.trackers:
         if not config.imports:
@@ -1941,6 +1942,7 @@ def _sync_epic_projects() -> None:
             "held_by_changes": 0,
             "unrouted_epics": 0,
             "skipped_done": 0,
+            "skipped_wont_do": 0,
             "contested_epics": 0,
             "ambiguous": [],
         }
@@ -2108,6 +2110,12 @@ def _sync_epic_projects() -> None:
             if _match_route(maps, epic) is None:
                 report["unrouted_epics"] += 1
                 continue
+            # Checked before the done-category skip, which would otherwise swallow it:
+            # won't-do sits in the Done category, but "declined" and "history" are
+            # different answers to "where did my epic go".
+            if _is_wont_do(epic):
+                report["skipped_wont_do"] += 1
+                continue
             if _imported_status(epic) == "done":
                 report["skipped_done"] += 1
                 continue
@@ -2169,6 +2177,20 @@ def _assign_changes_to_epic_projects() -> None:
                 roadmap_store.update(change["id"], project_id=project.id)
                 if report is not None:
                     report["changes_assigned"] += 1
+
+
+def _is_wont_do(ticket) -> bool:
+    """Whether the tracker resolved this ticket as not-happening. Jira says it in the
+    resolution ("Won't Do") or sometimes in a status of the same name; both sit in the
+    Done category, so without this check a declined ticket imports as a shipped-looking
+    "done". Spelled leniently (apostrophes, hyphens, case) because the name is
+    per-instance configuration, not a Jira constant."""
+    for raw in (ticket.resolution, ticket.state):
+        text = (raw or "").replace("'", "").replace("’", "")
+        text = text.replace("-", " ").replace("_", " ")
+        if " ".join(text.split()).casefold() == "wont do":
+            return True
+    return False
 
 
 def _imported_status(ticket) -> str:
@@ -2278,6 +2300,7 @@ def _import_routed_tickets() -> None:
                 ).append(t)
         imported = 0
         excluded_count = 0
+        wont_do_count = 0
         unrouted: dict[str, int] = {}
         for ticket in tickets:
             if ticket.raw_type.casefold() not in types:
@@ -2286,6 +2309,12 @@ def _import_routed_tickets() -> None:
             # means "route this someday", excluded means "never, it lives elsewhere".
             if normalize_key(config.id, ticket.key) in excluded:
                 excluded_count += 1
+                continue
+            # Resolved as won't-do: a decision NOT to build. It has no place on the
+            # board at all - imported, it would read as shipped work, since the only
+            # coarse state its Done category maps to is "done".
+            if _is_wont_do(ticket):
+                wont_do_count += 1
                 continue
             # Epic-level tickets are NEVER changes, whatever import_types says - they
             # are the epic pass's to represent, as projects. Without this, a done epic
@@ -2347,6 +2376,7 @@ def _import_routed_tickets() -> None:
         _import_report[config.id] = {
             "imported": imported,
             "excluded": excluded_count,
+            "wont_do": wont_do_count,
             "unrouted": {c: n for c, n in sorted(unrouted.items(), key=lambda kv: -kv[1])},
             "unrouted_total": sum(unrouted.values()),
         }

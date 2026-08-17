@@ -191,6 +191,36 @@ class ComponentsReachTheCatalogTest(unittest.TestCase):
         )
         self.assertEqual(ticket.components, ["Checkout Web"])
 
+    def test_jira_requests_and_parses_the_resolution(self) -> None:
+        """Same rot mode as components: the won't-do exclusion keys on the resolution,
+        so the field must provably be requested and parsed - an unresolved ticket's
+        null resolution must come back as ''."""
+        from pm_studio.trackers import JiraClient
+        self.assertIn("resolution", JiraClient.JQL_FIELDS)
+        config = TrackerConfig(
+            id="jira", provider="jira", label="J",
+            base_url="https://acme.atlassian.net", projects=("PROJ",), token="t",
+        )
+        client = JiraClient(config)
+        declined = client._ticket(
+            {"key": "PROJ-1", "fields": {
+                "summary": "S", "issuetype": {"name": "Story"},
+                "status": {"name": "Closed", "statusCategory": {"name": "Done"}},
+                "resolution": {"name": "Won't Do"},
+            }},
+            now=0.0,
+        )
+        self.assertEqual(declined.resolution, "Won't Do")
+        unresolved = client._ticket(
+            {"key": "PROJ-2", "fields": {
+                "summary": "S", "issuetype": {"name": "Story"},
+                "status": {"name": "To Do", "statusCategory": {"name": "To Do"}},
+                "resolution": None,
+            }},
+            now=0.0,
+        )
+        self.assertEqual(unresolved.resolution, "")
+
     def test_ado_requests_and_parses_the_area_path(self) -> None:
         from pm_studio.trackers import AdoClient
         self.assertIn("System.AreaPath", AdoClient.FIELDS)
@@ -209,13 +239,16 @@ class ComponentsReachTheCatalogTest(unittest.TestCase):
         self.assertEqual(ticket.components, ["Portal\\Web"])
 
 
-def _ticket(key, raw_type="Story", components=(), state_category="To Do", title=None):
+def _ticket(key, raw_type="Story", components=(), state_category="To Do", title=None,
+            state=None, resolution=""):
     return Ticket(
         tracker_id="jira", provider="jira", key=key, type="story", raw_type=raw_type,
-        title=title or f"Ticket {key}", state=state_category, url=f"https://x/{key}",
+        title=title or f"Ticket {key}", state=state or state_category,
+        url=f"https://x/{key}",
         synced_at=time.time(), state_category=state_category,
         components=list(components),
         project=key.rsplit("-", 1)[0] if "-" in key else "",
+        resolution=resolution,
     )
 
 
@@ -318,6 +351,24 @@ class ImportPassTest(unittest.TestCase):
         self._run([_ticket("PROJ-2", components=["Ops Misc"])])
         item = self.store.list_product("ops")[0]
         self.assertIsNone(item["system"])
+
+    def test_wont_do_is_never_imported(self) -> None:
+        """A ticket declined in Jira has no place on the board: its Done category would
+        land it as a shipped-looking "done" change. Both spellings of the decision - the
+        resolution and a status named after it - are dropped, and counted so the report
+        says where the tickets went."""
+        self._run([
+            _ticket("PROJ-1", components=["Checkout Web"],
+                    state_category="Done", state="Closed", resolution="Won't Do"),
+            _ticket("PROJ-2", components=["Checkout Web"],
+                    state_category="Done", state="Won't Do"),
+            _ticket("PROJ-3", components=["Checkout Web"],
+                    state_category="Done", state="Closed", resolution="Done"),
+        ])
+        items = self.store.list_product("checkout")
+        self.assertEqual([i["ticket_key"] for i in items], ["PROJ-3"])
+        report = server_module._import_report["jira"]
+        self.assertEqual((report["imported"], report["wont_do"]), (1, 2))
 
     def test_status_maps_from_the_state_category(self) -> None:
         self._run([

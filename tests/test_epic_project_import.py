@@ -38,6 +38,7 @@ def _ticket(
     parent=None,
     parent_type=None,
     project="PROJ",
+    resolution="",
 ):
     return Ticket(
         tracker_id="jira",
@@ -54,6 +55,7 @@ def _ticket(
         state_category=category,
         components=[],
         project=project,
+        resolution=resolution,
     )
 
 
@@ -154,6 +156,20 @@ class EpicProjectImportTest(unittest.TestCase):
         self._run([_ticket("PROJ-1", "Epic", state="Done", category="Done")])
         self.assertEqual(self._projects(), [])
         self.assertEqual(server_module._epic_report["jira"]["skipped_done"], 1)
+
+    def test_a_wont_do_epic_is_declined_not_done(self) -> None:
+        """Won't-do sits in Jira's Done category, but must be counted as its own
+        outcome, not folded into skipped_done - "declined" and "history" are different
+        answers to "where did my epic go"."""
+        self._run([
+            _ticket("PROJ-1", "Epic", state="Closed", category="Done",
+                    resolution="Won't Do"),
+            _ticket("PROJ-2", "Epic", state="Won't Do", category="Done"),
+        ])
+        self.assertEqual(self._projects(), [])
+        report = server_module._epic_report["jira"]
+        self.assertEqual(report["skipped_wont_do"], 2)
+        self.assertEqual(report["skipped_done"], 0)
 
     def test_an_unrouted_epic_is_counted_not_imported(self) -> None:
         self._run([_ticket("OTHER-1", "Epic", project="OTHER")])

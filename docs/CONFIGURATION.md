@@ -222,6 +222,13 @@ status mapped from the ticket's state category, linked to its ticket in the same
 The 1:1 link is the dedupe: re-syncs and restarts never double-import, and a manually
 linked ticket is never re-imported. Nothing is ever written back to the tracker.
 
+Tickets resolved as **won't-do** are never imported — not as changes and not as
+projects. Jira files "Won't Do" under the Done status category, so without this the
+declined work would land on the board as shipped-looking `done` changes. The check
+reads the Jira resolution (and a status literally named "Won't Do"), spelled
+leniently — apostrophes, hyphens, and case don't matter. Won't-do tickets are counted
+in the sync report rather than silently dropped.
+
 A ticket with **no matching route is reported, never guessed**: the board's tracker
 strip counts unrouted importable tickets and names their components (the fix is a
 config line, not an investigation). No catch-all product is invented. A route without

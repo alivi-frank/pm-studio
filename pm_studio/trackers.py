@@ -172,6 +172,11 @@ class Ticket:
     # the many workflow-specific names in `state` and is therefore what a bucket/status
     # mapping should key on.
     state_category: str = ""
+    # Jira's resolution name ("Done", "Won't Do", ...) - what distinguishes work that
+    # shipped from work that was declined, which the Done status category collapses.
+    # Empty while unresolved and on providers without the concept (ADO); additive
+    # default so a cache written before this existed still loads.
+    resolution: str = ""
     # The tracker-side taxonomy this ticket carries: Jira components (several), or the
     # ADO area path (one). What import routes match on (see TrackerConfig.routes). A
     # list, not a tuple, so to_dict/from_dict round-trip through JSON unchanged; empty
@@ -194,6 +199,7 @@ class Ticket:
         # come back as "no components", not as a None that breaks every iteration.
         known["components"] = list(known.get("components") or [])
         known["project"] = str(known.get("project") or "")
+        known["resolution"] = str(known.get("resolution") or "")
         return cls(**known)  # type: ignore[arg-type]
 
 
@@ -305,7 +311,7 @@ class JiraClient:
     A 404/410 on the first is the documented signal that an instance does not have it.
     """
 
-    JQL_FIELDS = "summary,issuetype,status,parent,components"
+    JQL_FIELDS = "summary,issuetype,status,resolution,parent,components"
 
     def __init__(self, config: TrackerConfig) -> None:
         self.config = config
@@ -353,6 +359,7 @@ class JiraClient:
                 str((parent_fields.get("issuetype") or {}).get("name") or "").strip() or None
             ),
             state_category=str((status.get("statusCategory") or {}).get("name") or "").strip(),
+            resolution=str((fields.get("resolution") or {}).get("name") or "").strip(),
             components=[
                 str(c.get("name") or "").strip()
                 for c in (fields.get("components") or [])
