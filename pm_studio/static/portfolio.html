@@ -22,6 +22,10 @@
     --warn-bg: rgba(199, 119, 0, 0.09);
     --note-bg: rgba(42, 120, 214, 0.07);
     --closed: #898781;
+    /* Same violet the board uses for the state (see roadmap.html): a portfolio
+       phase, deliberately not one of the delivery colors. */
+    --ideation: #7a4fc0;
+    --ideation-bg: rgba(122, 79, 192, 0.10);
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -36,6 +40,8 @@
       --warn: #e0a33c;
       --warn-bg: rgba(224, 163, 60, 0.13);
       --note-bg: rgba(57, 135, 229, 0.12);
+      --ideation: #b087e8;
+      --ideation-bg: rgba(176, 135, 232, 0.14);
     }
   }
   * { box-sizing: border-box; }
@@ -130,6 +136,8 @@
     background: var(--warn-bg);
   }
   .flag.catch-all { color: var(--accent); background: var(--note-bg); }
+  .flag.ideation { color: var(--ideation); background: var(--ideation-bg); }
+  .meta .activity { color: var(--ideation); font-weight: 600; }
   /* The epic a project is tracked as — the same badge language roadmap.html uses for
      linked tickets, trimmed to the two states this page can show: an epic, or a link
      whose ticket the last sync did not resolve. */
@@ -256,6 +264,9 @@
       <form id="project-form">
         <input id="project-title" type="text" placeholder="New project" required />
         <select id="project-initiative"></select>
+        <label class="hint" style="display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;" title="An idea being worked — real and visible, expected to have no changes yet. Set it to open when you commit to building.">
+          <input id="project-ideation" type="checkbox" /> ideation
+        </label>
         <button type="submit">Add</button>
       </form>
       <ul id="projects"></ul>
@@ -308,6 +319,37 @@
     button.addEventListener("click", () => act(() =>
       api(`/portfolio/${entity}/${record.id}`, json("PATCH", { status: closing ? "closed" : "open" }))));
     return button;
+  }
+
+  // Projects carry a third state (ideation), so their lifecycle control is a select
+  // rather than the two-state Close/Reopen toggle goals and initiatives keep.
+  // Catch-alls never offer ideation: they are attribution plumbing, not ideas, and
+  // the server refuses it anyway.
+  function projectStatusPicker(project) {
+    const picker = document.createElement("select");
+    const statuses = project.catch_all_for_initiative
+      ? ["open", "closed"]
+      : ["ideation", "open", "closed"];
+    for (const value of statuses) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value;
+      if (value === project.status) option.selected = true;
+      picker.appendChild(option);
+    }
+    picker.addEventListener("change", () => act(() =>
+      api(`/portfolio/projects/${project.id}`, json("PATCH", { status: picker.value }))));
+    return picker;
+  }
+
+  function relativeTime(seconds) {
+    if (!seconds) return "";
+    const diff = Date.now() / 1000 - seconds;
+    if (diff < 60) return "just now";
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    if (diff < 86400 * 30) return `${Math.floor(diff / 86400)}d ago`;
+    return new Date(seconds * 1000).toLocaleDateString();
   }
 
   function deleteButton(entity, record) {
@@ -379,6 +421,15 @@
         const flag = document.createElement("span");
         flag.className = "flag";
         flag.textContent = "no goal";
+        title.appendChild(document.createTextNode(" "));
+        title.appendChild(flag);
+      }
+      if (initiative.in_ideation) {
+        const flag = document.createElement("span");
+        flag.className = "flag ideation";
+        flag.textContent = "in ideation";
+        flag.title = "Derived: every project under this initiative is in ideation " +
+          "(or there are none yet). Graduating one project to open flips this by itself.";
         title.appendChild(document.createTextNode(" "));
         title.appendChild(flag);
       }
@@ -471,6 +522,14 @@
         title.appendChild(document.createTextNode(" "));
         title.appendChild(flag);
       }
+      if (project.status === "ideation") {
+        const flag = document.createElement("span");
+        flag.className = "flag ideation";
+        flag.textContent = "ideation";
+        flag.title = "An idea being worked — expected to have no changes yet.";
+        title.appendChild(document.createTextNode(" "));
+        title.appendChild(flag);
+      }
       // The tracker rung: a project is tracked as an EPIC in Jira/ADO, 1:1. Linked, it
       // wears the epic's badge; unlinked (and real — catch-alls are local plumbing by
       // design) it is flagged as existing only here, pending an upload the sync cannot
@@ -501,7 +560,10 @@
               `${project.ticket.tracker_label || project.ticket.tracker_id}` +
               (project.ticket.state ? ` · ${project.ticket.state}` : "");
           title.appendChild(badge);
-        } else if (!anyCatchAll) {
+        } else if (!anyCatchAll && project.status !== "ideation") {
+          // Ideation projects are exempt on purpose, matching pending_upload_report:
+          // an idea has nothing to file an epic for yet - graduating to open is the
+          // moment it earns a ticket, and that is when this flag starts applying.
           const flag = document.createElement("span");
           flag.className = "flag";
           flag.textContent = "not in tracker";
@@ -530,7 +592,7 @@
         actions.append(epicBtn);
       }
       if (!project.is_catch_all) {
-        actions.append(lifecycleButton("projects", project), deleteButton("projects", project));
+        actions.append(projectStatusPicker(project), deleteButton("projects", project));
       }
       row.append(title, actions);
       item.appendChild(row);
@@ -559,6 +621,27 @@
         const meta = document.createElement("div");
         meta.className = "meta";
         meta.textContent = `rolls up to ${byId[project.initiative_id]}`;
+        item.appendChild(meta);
+      }
+
+      // An ideation project's liveness comes from session activity, not changes -
+      // there are none by definition. Same readout the board shows on its rows.
+      if (project.status === "ideation") {
+        const activity = (data.activity || {})[project.id];
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        if (activity && activity.recent_sessions) {
+          const span = document.createElement("span");
+          span.className = "activity";
+          span.textContent =
+            `${activity.recent_sessions} session${activity.recent_sessions === 1 ? "" : "s"} recently · ` +
+            `touched ${relativeTime(activity.last_at)}`;
+          meta.appendChild(span);
+        } else if (activity && activity.last_at) {
+          meta.textContent = `last touched ${relativeTime(activity.last_at)}`;
+        } else {
+          meta.textContent = "no activity yet";
+        }
         item.appendChild(meta);
       }
       list.appendChild(item);
@@ -709,12 +792,15 @@
     event.preventDefault();
     const input = document.getElementById("project-title");
     const picker = document.getElementById("project-initiative");
+    const ideation = document.getElementById("project-ideation");
     act(async () => {
       await api("/portfolio/projects", json("POST", {
         title: input.value,
         initiative_id: picker.value,
+        status: ideation.checked ? "ideation" : "open",
       }));
       input.value = "";
+      ideation.checked = false;
     });
   });
 

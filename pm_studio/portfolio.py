@@ -66,6 +66,15 @@ PORTFOLIO_PATH = CONFIG.workspace_dir / "portfolio.json"
 Lifecycle = Literal["open", "closed"]
 LIFECYCLES: tuple[Lifecycle, ...] = ("open", "closed")
 
+# Projects alone get a third, pre-delivery state. Ideation is a declared phase, not an
+# activity signal: it says "the absence of changes here is expected, not neglect", so
+# the board can stop reading an idea being researched as a dead project. Goals and
+# initiatives never carry it - an initiative is "in ideation" only derivatively, when
+# every real project under it is (see PortfolioStore.initiative_in_ideation), which is
+# what makes graduating ONE project flip the initiative without touching it.
+ProjectLifecycle = Literal["ideation", "open", "closed"]
+PROJECT_LIFECYCLES: tuple[ProjectLifecycle, ...] = ("ideation", "open", "closed")
+
 # Defaults for the catch-all scaffold. They are only defaults - every deployment names
 # its own, and the labels are the operator's, never this package's opinion about how a
 # company organizes work.
@@ -163,7 +172,7 @@ class Project:
     id: str
     title: str
     description: str
-    status: Lifecycle
+    status: ProjectLifecycle
     # Exactly one initiative, or None. None is the "unaligned" state: permitted (so a
     # bug fix is never blocked on someone inventing a strategy first) but reported.
     initiative_id: str | None = None
@@ -280,7 +289,41 @@ class PortfolioStore:
         return [g.to_dict() for g in self._sorted(self._goals)]
 
     def list_initiatives(self) -> list[dict]:
-        return [i.to_public_dict() for i in self._sorted(self._initiatives)]
+        return [self._initiative_public(i) for i in self._sorted(self._initiatives)]
+
+    def _initiative_public(self, initiative: Initiative) -> dict:
+        """The public dict plus the derived `in_ideation` flag - every read path that
+        hands an initiative to a page or a session goes through here, so no consumer
+        can see an initiative without the flag riding along."""
+        data = initiative.to_public_dict()
+        data["in_ideation"] = self.initiative_in_ideation(initiative)
+        return data
+
+    def initiative_in_ideation(self, initiative: Initiative) -> bool:
+        """Derived, never stored: an initiative is in ideation when every project that
+        counts under it is. Deriving it is what keeps it honest - the moment one
+        project graduates to "open", the initiative reads as delivering without anyone
+        editing the initiative, and it can never drift out of sync with its projects.
+
+        Two exclusions make "every project that counts" mean what a stakeholder means:
+        catch-alls are attribution plumbing every initiative has (counting them would
+        make the state unreachable), and closed projects are history (an initiative
+        that shipped three things and is now exploring its next wave is back in
+        ideation). Vacuously true for an initiative with no real projects yet - a
+        brand-new initiative that is nothing but brainstorming so far is exactly the
+        thing this flag exists to represent. The maintenance initiative is never in
+        ideation: it is standing infrastructure, not a bet being formed.
+        """
+        if initiative.status == "closed" or initiative.is_maintenance:
+            return False
+        counted = [
+            p
+            for p in self._projects.values()
+            if p.initiative_id == initiative.id
+            and not p.is_any_catch_all
+            and p.status != "closed"
+        ]
+        return all(p.status == "ideation" for p in counted)
 
     def list_projects(self) -> list[dict]:
         return [p.to_public_dict() for p in self._sorted(self._projects)]
@@ -340,7 +383,10 @@ class PortfolioStore:
         knows about them yet. Reported, never blocked - same posture as unaligned_report:
         the upload half of the sync does not exist yet, so this is the work statement,
         not an error list. Catch-alls are exempt: they are auto-created plumbing for cost
-        attribution, not projects anyone would file an epic for."""
+        attribution, not projects anyone would file an epic for. Ideation projects are
+        exempt too, deliberately: pre-commitment ideas have nothing to file an epic
+        for yet - graduating to "open" is the moment a project earns a ticket, and
+        that is when it starts appearing here."""
         return [
             {"id": p.id, "title": p.title}
             for p in self._sorted(self._projects)
@@ -419,7 +465,7 @@ class PortfolioStore:
         if initiative is None:
             return None
         return {
-            "initiative": initiative.to_public_dict(),
+            "initiative": self._initiative_public(initiative),
             "goals": [
                 {"id": g.id, "title": g.title}
                 for g in self._sorted(self._goals)
@@ -437,10 +483,12 @@ class PortfolioStore:
         mandatory as a practice, so the system reports the gap rather than blocking the
         work that created it."""
         return {
+            # Ideation counts: an idea nobody has aligned to an initiative is still a
+            # reportable gap, and surfacing it early is cheaper than after graduation.
             "projects": [
                 {"id": p.id, "title": p.title}
                 for p in self._sorted(self._projects)
-                if p.is_unaligned and p.status == "open"
+                if p.is_unaligned and p.status != "closed"
             ],
             "initiatives": [
                 {"id": i.id, "title": i.title}
@@ -485,6 +533,14 @@ class PortfolioStore:
         if status not in LIFECYCLES:
             raise PortfolioError(
                 f"Unknown status: {status!r}. Must be one of: {', '.join(LIFECYCLES)}"
+            )
+        return status  # type: ignore[return-value]
+
+    def _validate_project_status(self, status: str) -> ProjectLifecycle:
+        if status not in PROJECT_LIFECYCLES:
+            raise PortfolioError(
+                f"Unknown status: {status!r}. Must be one of: "
+                + ", ".join(PROJECT_LIFECYCLES)
             )
         return status  # type: ignore[return-value]
 
@@ -675,7 +731,11 @@ class PortfolioStore:
         description: str = "",
         initiative_id: str | None = None,
         is_catch_all: bool = False,
+        status: str = "open",
     ) -> Project:
+        """`status="ideation"` creates the project as a declared idea: real, visible,
+        expected to have no changes yet. Catch-alls are always open - they are
+        attribution plumbing, and plumbing is never an idea."""
         with self._lock:
             if is_catch_all and self.catch_all_project_id is not None:
                 raise PortfolioError("A catch-all project already exists.")
@@ -683,7 +743,7 @@ class PortfolioStore:
                 id=_new_id(),
                 title=self._validate_title(title),
                 description=(description or "").strip(),
-                status="open",
+                status="open" if is_catch_all else self._validate_project_status(status),
                 initiative_id=self._validate_initiative_id(initiative_id),
                 created_at=_now(),
                 updated_at=_now(),
@@ -715,10 +775,15 @@ class PortfolioStore:
             if description is not None:
                 project.description = description.strip()
             if status is not None:
-                new_status = self._validate_status(status)
+                new_status = self._validate_project_status(status)
                 if new_status == "closed" and project.is_catch_all:
                     raise PortfolioError(
                         "The catch-all project stays open - unplanned work lands there."
+                    )
+                if new_status == "ideation" and project.is_any_catch_all:
+                    raise PortfolioError(
+                        "A catch-all project cannot be in ideation - it is attribution "
+                        "plumbing, not an idea."
                     )
                 project.status = new_status
                 project.closed_at = _now() if new_status == "closed" else None
@@ -857,7 +922,7 @@ class PortfolioStore:
             ]
             groups.append(
                 {
-                    "initiative": initiative.to_public_dict(),
+                    "initiative": self._initiative_public(initiative),
                     "projects": [project_entry(p) for p in children],
                 }
             )

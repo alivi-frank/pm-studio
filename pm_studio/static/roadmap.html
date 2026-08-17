@@ -20,6 +20,10 @@
     --status-pending: #898781;
     --status-in-progress: #2a78d6;
     --status-done: #0ca30c;
+    /* Ideation borrows the initiative hue on purpose: it is a portfolio state, not a
+       change status, and the violet keeps it from reading as one more delivery color. */
+    --status-ideation: #7a4fc0;
+    --ideation-bg: rgba(122, 79, 192, 0.10);
     --suggestion-bg: rgba(184, 134, 11, 0.10);
     --suggestion-border: #b8860b;
     --accent: #2a78d6;
@@ -51,6 +55,8 @@
       --status-pending: #898781;
       --status-in-progress: #3987e5;
       --status-done: #0ca30c;
+      --status-ideation: #b087e8;
+      --ideation-bg: rgba(176, 135, 232, 0.14);
       --suggestion-bg: rgba(212, 167, 44, 0.10);
       --suggestion-border: #d4a72c;
       --accent: #3987e5;
@@ -136,6 +142,7 @@
     white-space: nowrap;
   }
   .group-head .tally .live { color: var(--status-in-progress); font-weight: 600; }
+  .group-head .tally .ideation { color: var(--status-ideation); font-weight: 600; }
   .group-head .info {
     flex: 0 0 auto;
     font-size: 0.85em;
@@ -320,6 +327,7 @@
     font-variant-numeric: tabular-nums;
   }
   .project-stats .live { color: var(--status-in-progress); font-weight: 600; }
+  .project-stats .ideation { color: var(--status-ideation); }
   .project-body {
     display: none;
     padding: 8px 10px 10px;
@@ -511,6 +519,13 @@
     background: var(--suggestion-bg);
   }
   .chip.warn::after { content: none; }
+  .chip.ideation {
+    padding: 0 5px;
+    border-radius: 4px;
+    color: var(--status-ideation);
+    background: var(--ideation-bg);
+  }
+  .chip.ideation::after { content: none; }
   .chip.owner { color: var(--ink-secondary); }
 
   .card-body {
@@ -1306,7 +1321,7 @@
   }
   // The work model, used only by the initiative grouping. Empty on a deployment that
   // doesn't use /portfolio, in which case everything lands in one "Unaligned" group.
-  let PORTFOLIO = { initiatives: [], projects: [], catch_all_project_id: null };
+  let PORTFOLIO = { initiatives: [], projects: [], catch_all_project_id: null, activity: {} };
   // External trackers (see trackers.py). `configured: false` on a deployment with no
   // [[trackers]] block, which hides every ticket control on this page.
   let TRACKERS = { configured: false, syncing: false, trackers: [], last_sync_at: null };
@@ -1738,6 +1753,24 @@
   let PROJECTS_BY_ID = {};
   function indexProjects() {
     PROJECTS_BY_ID = Object.fromEntries(PORTFOLIO.projects.map((p) => [p.id, p]));
+  }
+
+  /* The session-activity readout for a project: {last_at, recent_sessions}, or null.
+     This is how an ideation project testifies to being alive - it has no changes by
+     definition, so the roadmap itself cannot. The recency window is the server's
+     (see server.ACTIVITY_RECENT_DAYS); the board never re-derives it. */
+  function projectActivity(projectId) {
+    return (PORTFOLIO.activity || {})[projectId] || null;
+  }
+
+  /* Whether any project under this section - catch-alls included, since an
+     initiative-scoped session's brainstorming lands in its catch-all until the idea
+     names a project - was touched by a session recently. */
+  function groupIdeationAlive(group) {
+    return (group.projectIds || []).some((id) => {
+      const act = projectActivity(id);
+      return act && act.recent_sessions > 0;
+    });
   }
 
   /* The metadata a change carries, minus whatever the surrounding section already says.
@@ -2201,11 +2234,19 @@
     const open = changes.filter((c) => c.status !== "done");
     if (open.some((c) => c.bucket === "now" || c.bucket === "next")) return "active";
     if (group.kind !== "initiative") return "inactive";
+    // An initiative in ideation that sessions touched recently IS being worked -
+    // capturing ideas, researching, checking data. It has no changes by definition,
+    // so this is the one active state the roadmap cannot testify to itself; the
+    // session-activity log does. Without recent activity it falls through to
+    // "inactive" like anything else - a dormant idea should not stay green forever.
+    if (group.inIdeation && groupIdeationAlive(group)) return "active";
     // A declared project with no changes yet is plan nobody has started - it keeps its
-    // initiative out of "completed" the same way an open change would.
+    // initiative out of "completed" the same way an open change would. Ideation
+    // projects count too: an initiative whose shipped work is done but whose next
+    // wave is being formed is parked, not finished.
     const unstarted = (group.projectIds || []).some((id) => {
       const project = PROJECTS_BY_ID[id];
-      return project && project.status === "open" && !changes.some((c) => c.project_id === id);
+      return project && project.status !== "closed" && !changes.some((c) => c.project_id === id);
     });
     if (changes.length && !open.length && !unstarted) return "completed";
     return "inactive";
@@ -2305,6 +2346,9 @@
       const flags = [];
       if (initiative.is_maintenance) flags.push(["always open", false]);
       if (initiative.status === "closed") flags.push(["closed", false]);
+      // Derived server-side (portfolio.initiative_in_ideation): every real project
+      // under it is an idea, so the absence of changes is expected, not neglect.
+      if (initiative.in_ideation) flags.push(["in ideation", "ideation"]);
       // The product spread is the point of this grouping: it is what a per-product
       // board structurally cannot show.
       const products = new Set(changes.map((c) => c.product));
@@ -2325,6 +2369,8 @@
         // For the sort below: within one activity state, closed initiatives sink
         // below open ones. A fact of its own, not read back out of the flags.
         closed: initiative.status === "closed",
+        // For computeGroupState: ideation + recent session activity reads active.
+        inIdeation: !!initiative.in_ideation,
       };
     });
 
@@ -2470,6 +2516,8 @@
       const flags = [];
       if (project && project.is_catch_all) flags.push(["catch-all", false]);
       if (project && project.status === "closed") flags.push(["closed", false]);
+      // The marked state: delivering projects wear no phase chip, an idea does.
+      if (project && project.status === "ideation") flags.push(["ideation", "ideation"]);
       if (project && project.is_unaligned && groupBy === "product") flags.push(["no initiative", true]);
       const products = new Set(rowChanges.map((c) => c.product));
       if (!group.product && products.size > 1) flags.push([`${products.size} products`, false]);
@@ -2747,7 +2795,7 @@
     head.appendChild(el("span", "chevron", "▾"));
     head.appendChild(kindIcon(row.project ? "project" : "loose"));
     head.appendChild(el("span", "project-name" + (row.project ? "" : " loose"), row.title));
-    for (const [text, warn] of row.flags) head.appendChild(chip(text, warn ? "warn" : null));
+    for (const [text, warn] of row.flags) head.appendChild(chip(text, warn === true ? "warn" : warn || null));
     // The epic this project is tracked as - or the pending-upload chip when it only
     // exists locally (see projectEpicNode).
     const epic = projectEpicNode(row.project);
@@ -2769,6 +2817,20 @@
       stats.appendChild(el("span", null, `${row.roll.done}/${row.roll.total} shipped`));
       if (row.roll.live) stats.appendChild(el("span", "live", `${row.roll.live} in progress`));
       stats.appendChild(el("span", null, `${row.roll.now} now`));
+    } else if (row.project && row.project.status === "ideation") {
+      // An ideation row's right side answers a different question: not "how much has
+      // shipped" (nothing, by definition - "0 changes" would read as dead) but "is
+      // anyone thinking about this". Session turns attributed to the project are that
+      // evidence, already recorded; see projectActivity.
+      const act = projectActivity(row.project.id);
+      if (act && act.recent_sessions) {
+        stats.appendChild(el("span", "ideation",
+          `${act.recent_sessions} session${act.recent_sessions === 1 ? "" : "s"} · touched ${relativeTime(act.last_at)}`));
+      } else if (act && act.last_at) {
+        stats.appendChild(el("span", null, `last touched ${relativeTime(act.last_at)}`));
+      } else {
+        stats.appendChild(el("span", null, "no activity yet"));
+      }
     } else {
       stats.appendChild(el("span", null, "no changes yet"));
     }
@@ -2851,7 +2913,9 @@
                      m.description].filter(Boolean).join(" · ");
       if (facts) head.title = facts;
     }
-    for (const [text, warn] of group.flags) head.appendChild(chip(text, warn ? "warn" : null));
+    // A flag's second slot is `true` for the amber warn look, or a class name for a
+    // styled chip of its own (see "in ideation").
+    for (const [text, warn] of group.flags) head.appendChild(chip(text, warn === true ? "warn" : warn || null));
 
     /* Untriaged cross-product suggestions are lifted to the section, not filed under
        a project: nobody has accepted them onto this board yet, so claiming they are
@@ -2878,6 +2942,10 @@
     if (closedRows.length) tally.appendChild(el("span", null, `${closedRows.length} closed`));
     tally.appendChild(el("span", null, `${open.length} open`));
     if (live) tally.appendChild(el("span", "live", `${live} in progress`));
+    // Folded, the heading is all a section says - so ideas being formed inside it
+    // have to be audible here, the same way in-progress work is.
+    const ideating = currentRows.filter((r) => r.project && r.project.status === "ideation").length;
+    if (ideating) tally.appendChild(el("span", "ideation", `${ideating} in ideation`));
     if (suggestions.length) tally.appendChild(el("span", null, `${suggestions.length} to triage`));
     if (subgroups.length) {
       // Counted separately from the section's own numbers rather than folded into them:

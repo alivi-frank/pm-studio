@@ -204,6 +204,17 @@ def _initiative_context(initiative_id: str) -> tuple[str, list[str]] | None:
     )
     if initiative.get("description"):
         heading += f'\n{initiative["description"]}'
+    # Derived from its projects (see portfolio.initiative_in_ideation). Said to the PM
+    # explicitly so it treats the emptiness as the phase, not as a board to fill:
+    # ideation sessions produce sharper ideas, not synthetic changes.
+    if initiative.get("in_ideation"):
+        heading += (
+            "\nThis initiative is in IDEATION: its projects are ideas being explored, "
+            "not committed work. Researching, checking data and shaping the ideas IS "
+            "this session's output - do not invent changes to make the board look "
+            "busy. When the stakeholder decides to build, set the project's status "
+            "to open; that is what graduates it."
+        )
 
     groups = []
     for project in scope["projects"]:
@@ -1307,6 +1318,24 @@ def _session_project_id(session_id: str) -> str | None:
     return portfolio_store.catch_all_project_id
 
 
+# The window "recently touched" is measured over, for the activity readout the board
+# shows on ideation rows. One constant, applied server-side, so the board and any other
+# consumer count the same sessions - a client never re-derives the window.
+ACTIVITY_RECENT_DAYS = 30
+
+
+def _project_activity() -> dict:
+    """Per-project last-touched + recent-session counts (see costing.project_activity).
+    Failures degrade to "no activity" rather than breaking a board load - the same
+    posture as _record_signal, whose data this reads back."""
+    try:
+        return costing_store.project_activity(
+            recent_since=time.time() - ACTIVITY_RECENT_DAYS * 86400
+        )
+    except Exception:
+        return {}
+
+
 def _record_signal(
     actor: User | None,
     kind: str,
@@ -1472,6 +1501,8 @@ def portfolio_data() -> dict:
         "unassigned_changes": roadmap_store.unassigned_items(),
         "session_scope": _session_scope_report(),
         "trackers_configured": tracker_store.is_configured,
+        # Same shape as /roadmap/data's portfolio.activity - see _project_activity.
+        "activity": _project_activity(),
     }
 
 
@@ -1598,6 +1629,10 @@ def create_project(request: Request, payload: dict = Body(...)) -> dict:
             title=payload.get("title") or "",
             description=payload.get("description") or "",
             initiative_id=(payload.get("initiative_id") or "").strip() or None,
+            # "ideation" declares the project as an idea being worked, expected to
+            # have no changes yet. Defaulted here, not just in the store, so an
+            # empty/absent field can never read as a status.
+            status=(payload.get("status") or "").strip() or "open",
         )
     except PortfolioError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2355,6 +2390,11 @@ def roadmap_data() -> dict:
             # draws a badge per project row, and it must not need a second request.
             "projects": [_with_ticket(p) for p in portfolio_store.list_projects()],
             "catch_all_project_id": portfolio_store.catch_all_project_id,
+            # project_id -> {last_at, recent_sessions}: what lets the board show an
+            # ideation project as ALIVE (sessions touched it) when it has no changes
+            # for the roadmap to read liveness from. Timestamps and counts only -
+            # cost stays behind the admin endpoints.
+            "activity": _project_activity(),
         },
         # So the board can render the badge palette and the picker without a second
         # round trip. Empty/`configured: false` when no [[trackers]] are declared.

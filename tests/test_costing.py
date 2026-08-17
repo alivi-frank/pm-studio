@@ -393,5 +393,63 @@ class ActivityLogTest(unittest.TestCase):
         self.assertEqual(report["users"], [])
 
 
+class ProjectActivityTest(unittest.TestCase):
+    """The signal log read as ACTIVITY rather than cost: per project, when it was last
+    touched and how many sessions touched it recently. What lets an ideation project -
+    which has no changes by definition - testify to being alive."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.store = CostingStore(
+            path=root / "costing.json", activity_path=root / "activity.jsonl"
+        )
+        self.now = week_bounds(WEEK)[0]
+        self.window = self.now - 30 * 86400
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_counts_distinct_recent_sessions_and_keeps_the_last_touch(self) -> None:
+        day = 86400
+        # An old session outside the window, two recent ones (one touching twice).
+        self.store.record("dana", KIND_PM_TURN, project_id="alpha", session_id="s1",
+                          at=self.now - 40 * day)
+        self.store.record("dana", KIND_PM_TURN, project_id="alpha", session_id="s2",
+                          at=self.now - 2 * day)
+        self.store.record("dana", KIND_PM_TURN, project_id="alpha", session_id="s2",
+                          at=self.now - 1 * day)
+        self.store.record("dana", KIND_PM_TURN, project_id="alpha", session_id="s3",
+                          at=self.now - 3 * day)
+        alpha = self.store.project_activity(recent_since=self.window)["alpha"]
+        self.assertEqual(alpha["recent_sessions"], 2)
+        self.assertAlmostEqual(alpha["last_at"], self.now - 1 * day, places=3)
+
+    def test_last_at_outlives_the_recent_window(self) -> None:
+        """"Last touched 74d ago" must stay sayable long after the window empties -
+        that is what lets a dormant idea read as dormant rather than blank."""
+        self.store.record("dana", KIND_PM_TURN, project_id="alpha", session_id="s1",
+                          at=self.now - 74 * 86400)
+        alpha = self.store.project_activity(recent_since=self.window)["alpha"]
+        self.assertEqual(alpha["recent_sessions"], 0)
+        self.assertAlmostEqual(alpha["last_at"], self.now - 74 * 86400, places=3)
+
+    def test_machine_only_turns_still_count_as_touches(self) -> None:
+        """No user at the keyboard is still the project being worked (the PM
+        auto-continuing) - activity is not labour, so it counts here."""
+        self.store.record("", KIND_PM_TURN, project_id="alpha", session_id="s1",
+                          at=self.now - 60)
+        alpha = self.store.project_activity(recent_since=self.window)["alpha"]
+        self.assertEqual(alpha["recent_sessions"], 1)
+
+    def test_unattributed_signals_are_ignored(self) -> None:
+        self.store.record("dana", KIND_PM_TURN, project_id=None, session_id="s1",
+                          at=self.now - 60)
+        self.assertEqual(self.store.project_activity(recent_since=self.window), {})
+
+    def test_missing_log_is_empty_not_an_error(self) -> None:
+        self.assertEqual(self.store.project_activity(recent_since=self.window), {})
+
+
 if __name__ == "__main__":
     unittest.main()

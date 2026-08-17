@@ -378,11 +378,9 @@ class CostingStore:
                 handle.write(json.dumps(signal.to_dict()) + "\n")
         return signal
 
-    def signals_in_week(self, week: str) -> list[Signal]:
-        start, end = week_bounds(week)
+    def _iter_signals(self):
         if not self._activity_path.exists():
-            return []
-        signals = []
+            return
         for line in self._activity_path.read_text().splitlines():
             line = line.strip()
             if not line:
@@ -392,10 +390,43 @@ class CostingStore:
             except json.JSONDecodeError:
                 # A truncated final line (killed mid-append) must not break a report.
                 continue
-            signal = Signal.from_dict(data)
-            if start <= signal.at < end:
-                signals.append(signal)
-        return signals
+            yield Signal.from_dict(data)
+
+    def signals_in_week(self, week: str) -> list[Signal]:
+        start, end = week_bounds(week)
+        return [s for s in self._iter_signals() if start <= s.at < end]
+
+    def project_activity(self, recent_since: float) -> dict[str, dict]:
+        """Per project: when it was last touched, and how many sessions touched it
+        recently. This is the signal log read as ACTIVITY rather than cost - which is
+        why it returns only timestamps and counts, never hours, rates or tokens: those
+        stay behind the admin-only costing endpoints.
+
+        What it exists for: a project in ideation has no changes by definition, so the
+        board cannot read its liveness off the roadmap. But brainstorming with the PM,
+        checking data, researching - those are session turns, and every one is already
+        recorded here (see server._record_signal). Counting them makes working on ideas
+        BE the activity instead of something the board is blind to.
+
+        `last_at` is unbounded (so "last touched 74d ago" stays sayable long after the
+        recent window empties); `recent_sessions` counts distinct sessions at or after
+        `recent_since`.
+        """
+        activity: dict[str, dict] = {}
+        recent_sessions: dict[str, set] = {}
+        for signal in self._iter_signals():
+            if not signal.project_id:
+                continue
+            entry = activity.setdefault(
+                signal.project_id, {"last_at": 0.0, "recent_sessions": 0}
+            )
+            if signal.at > entry["last_at"]:
+                entry["last_at"] = signal.at
+            if signal.at >= recent_since and signal.session_id:
+                recent_sessions.setdefault(signal.project_id, set()).add(signal.session_id)
+        for project_id, sessions in recent_sessions.items():
+            activity[project_id]["recent_sessions"] = len(sessions)
+        return activity
 
     # ---- the distribution ----
 

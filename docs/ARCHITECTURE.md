@@ -236,9 +236,20 @@ Goals  ⇄  Initiative  →  Project  →  Change
   derived (`roadmap.products_of_system`). Systems own **no roadmap**: a change's home is
   its product's board, and system-shaped work (infra, performance) is an *initiative*.
   See `docs/CONFIGURATION.md` § Systems.
-- Goals, Initiatives and Projects each carry a `status` of `"open"|"closed"` plus a
-  `closed_at` stamp. Products and Systems are persistent (they come from config);
-  everything in the chain is temporary.
+- Goals and Initiatives each carry a `status` of `"open"|"closed"` plus a `closed_at`
+  stamp. Projects carry a third, pre-delivery state: `"ideation"|"open"|"closed"`.
+  Ideation is a **declared phase, not an activity signal** — it says "the absence of
+  changes here is expected, not neglect", so the board stops reading an idea being
+  researched as a dead project. Its liveness comes from the session-activity log
+  instead (`costing.project_activity`): session turns attributed to the project are
+  the evidence someone is working the idea, since changes don't exist yet by
+  definition. Graduating to `open` is an explicit act, and the moment a project earns
+  its epic (`pending_upload_report` exempts ideation). Initiatives are never *stored*
+  as in-ideation — `initiative_in_ideation` derives it (true when every non-catch-all,
+  non-closed project under it is in ideation; vacuously true with none yet; never for
+  maintenance or closed initiatives), so one project graduating flips the initiative
+  by itself and the two can never drift. Products and Systems are persistent (they
+  come from config); everything in the chain is temporary.
 
 ### Why single-parent below the initiative
 

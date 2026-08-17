@@ -258,6 +258,126 @@ class PortfolioShapeTest(unittest.TestCase):
         self.assertEqual(events[0]["entity"], "goal")
 
 
+class IdeationTest(unittest.TestCase):
+    """Projects carry a third, pre-delivery state; initiatives only ever DERIVE it.
+
+    The stored fact lives in one place (the project's status) and the initiative-level
+    answer is computed from it, so the two can never disagree - graduating one project
+    flips its initiative without anyone editing the initiative.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "portfolio.json"
+        self.store = PortfolioStore(self.path)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _in_ideation(self, initiative_id: str) -> bool:
+        listed = next(i for i in self.store.list_initiatives() if i["id"] == initiative_id)
+        return listed["in_ideation"]
+
+    # ---- the project state ----
+
+    def test_project_can_be_created_in_ideation(self) -> None:
+        project = self.store.create_project("Usage-based trial limits", status="ideation")
+        self.assertEqual(project.status, "ideation")
+
+    def test_unknown_project_status_rejected(self) -> None:
+        with self.assertRaises(PortfolioError):
+            self.store.create_project("Bad", status="parked")
+        project = self.store.create_project("Fine")
+        with self.assertRaises(PortfolioError):
+            self.store.update_project(project.id, status="parked")
+
+    def test_goals_and_initiatives_never_carry_ideation(self) -> None:
+        """Ideation is a project state only - an initiative is in ideation
+        derivatively or not at all."""
+        goal = self.store.create_goal("Grow revenue")
+        initiative = self.store.create_initiative("Onboarding")
+        with self.assertRaises(PortfolioError):
+            self.store.update_goal(goal.id, status="ideation")
+        with self.assertRaises(PortfolioError):
+            self.store.update_initiative(initiative.id, status="ideation")
+
+    def test_catch_alls_are_never_ideas(self) -> None:
+        """Catch-alls are attribution plumbing; asking one to be an idea is refused,
+        and creating one in ideation is silently corrected to open."""
+        catch_all = self.store.create_project(
+            "Unplanned", is_catch_all=True, status="ideation"
+        )
+        self.assertEqual(catch_all.status, "open")
+        with self.assertRaises(PortfolioError):
+            self.store.update_project(catch_all.id, status="ideation")
+        initiative = self.store.create_initiative("Bet")
+        scoped = self.store.ensure_initiative_catch_all(initiative.id)
+        with self.assertRaises(PortfolioError):
+            self.store.update_project(scoped.id, status="ideation")
+
+    # ---- the derived initiative rollup ----
+
+    def test_new_initiative_is_vacuously_in_ideation(self) -> None:
+        """A brand-new initiative that is nothing but brainstorming so far is exactly
+        what the flag exists to represent - no extra mechanism, no project needed."""
+        initiative = self.store.create_initiative("Next big bet")
+        self.assertTrue(self._in_ideation(initiative.id))
+
+    def test_the_catch_all_does_not_veto_the_rollup(self) -> None:
+        """Every initiative that ever hosted a scoped session has a catch-all (always
+        open); counting it would make the state unreachable."""
+        initiative = self.store.create_initiative("Bet")
+        self.store.ensure_initiative_catch_all(initiative.id)
+        self.assertTrue(self._in_ideation(initiative.id))
+
+    def test_one_graduated_project_flips_the_initiative(self) -> None:
+        initiative = self.store.create_initiative("Bet")
+        idea = self.store.create_project(
+            "The idea", initiative_id=initiative.id, status="ideation"
+        )
+        self.assertTrue(self._in_ideation(initiative.id))
+        self.store.update_project(idea.id, status="open")
+        self.assertFalse(self._in_ideation(initiative.id))
+
+    def test_closed_projects_are_history_not_a_veto(self) -> None:
+        """An initiative that shipped three things and is now exploring its next wave
+        is back in ideation."""
+        initiative = self.store.create_initiative("Bet")
+        shipped = self.store.create_project("Shipped thing", initiative_id=initiative.id)
+        self.store.update_project(shipped.id, status="closed")
+        self.store.create_project(
+            "Next wave", initiative_id=initiative.id, status="ideation"
+        )
+        self.assertTrue(self._in_ideation(initiative.id))
+
+    def test_maintenance_is_never_in_ideation(self) -> None:
+        maintenance = self.store.create_initiative("Maintenance", is_maintenance=True)
+        self.assertFalse(self._in_ideation(maintenance.id))
+
+    def test_a_closed_initiative_is_not_in_ideation(self) -> None:
+        initiative = self.store.create_initiative("Old bet")
+        self.store.update_initiative(initiative.id, status="closed")
+        self.assertFalse(self._in_ideation(initiative.id))
+
+    # ---- how ideation reads in the reports ----
+
+    def test_ideation_projects_stay_out_of_pending_upload(self) -> None:
+        """An idea has nothing to file an epic for yet; graduating is what earns the
+        ticket, and that is when the project starts counting as pending upload."""
+        idea = self.store.create_project("The idea", status="ideation")
+        self.assertEqual(self.store.pending_upload_report(), [])
+        self.store.update_project(idea.id, status="open")
+        self.assertEqual(
+            [p["id"] for p in self.store.pending_upload_report()], [idea.id]
+        )
+
+    def test_unaligned_report_includes_ideation_projects(self) -> None:
+        """An idea nobody aligned to an initiative is still a reportable gap."""
+        idea = self.store.create_project("Floating idea", status="ideation")
+        report = self.store.unaligned_report()
+        self.assertEqual([p["id"] for p in report["projects"]], [idea.id])
+
+
 class ChangeBelongsToOneProjectTest(unittest.TestCase):
     """A Change is the existing roadmap item - this PR adds a single project_id to it
     rather than inventing a parallel concept."""
