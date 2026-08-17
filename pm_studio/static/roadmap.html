@@ -1377,12 +1377,37 @@
   /* The open-text filter, typed straight into the nav. Deliberately NOT persisted,
      unlike the three view axes around it: a search is a question being asked right
      now, and a board that comes back tomorrow still filtered to last week's word
-     looks broken. Matching is by title, case-insensitively, at every level of the
-     model at once - see changeMatchesSearch. */
+     looks broken. Matching is by title or ticket key, case-insensitively, at every
+     level of the model at once - see changeMatchesSearch.
+
+     The words "and" / "or" combine terms rather than being searched for: OR binds
+     loosest, so "a and b or c" reads (a AND b) OR c. The price is that neither word
+     can itself be searched for mid-phrase, which for titles is the right trade. */
   let searchQuery = "";
   const searchTerm = () => searchQuery.trim().toLowerCase();
   const searchActive = () => searchTerm().length > 0;
-  const matchesSearch = (text) => !!text && text.toLowerCase().includes(searchTerm());
+
+  // Parsed once per query, not once per card: matchesSearch runs per field of every
+  // change on every keystroke. [["a","b"],["c"]] means (a AND b) OR c.
+  let parsedSearch = { term: "", alternatives: [] };
+  function searchAlternatives() {
+    const term = searchTerm();
+    if (parsedSearch.term !== term) {
+      parsedSearch = {
+        term,
+        alternatives: term.split(/\s+or\s+/)
+          .map((alt) => alt.split(/\s+and\s+/).map((t) => t.trim()).filter(Boolean))
+          .filter((terms) => terms.length),
+      };
+    }
+    return parsedSearch.alternatives;
+  }
+
+  function matchesSearch(text) {
+    if (!text) return false;
+    const hay = text.toLowerCase();
+    return searchAlternatives().some((terms) => terms.every((t) => hay.includes(t)));
+  }
 
   /* While a search is on, everything it kept renders unfolded - a filter whose matches
      stay hidden inside collapsed sections answers "where is it" with more clicks. The
@@ -1577,8 +1602,10 @@
   function searchControl() {
     const input = el("input", "pmnav-search");
     input.type = "search";
-    input.placeholder = "Search titles…";
-    input.setAttribute("aria-label", "Filter the board by title");
+    input.placeholder = "Search titles or tickets…";
+    input.setAttribute("aria-label", "Filter the board by title or ticket key");
+    input.title = "Matches titles and ticket keys at every level — product, initiative, project, change.\n" +
+      "“and” / “or” combine terms: billing and search, NDT-5434 or 6440.";
     input.value = searchQuery;
     const apply = () => {
       searchQuery = input.value;
@@ -2184,16 +2211,31 @@
      title on its path - its own, its project's, its initiative's, its product's full
      path - so a query naming a container keeps that container's contents: typing
      "billing" shows the Billing board's cards rather than emptying the section whose
-     heading just matched. Applied at grouping time (both lenses filter their source
-     through searchFilter), which keeps every count, state and tally downstream honest
-     about what is actually drawn. */
+     heading just matched. Ticket keys count as titles here: the badge on a card is a
+     name people know it by, and substring matching means the number alone ("5434")
+     finds "NDT-5434" without asking anyone to type the project prefix. Applied at
+     grouping time (both lenses filter their source through searchFilter), which keeps
+     every count, state and tally downstream honest about what is actually drawn. */
+  function projectMatchesSearch(project) {
+    if (!project) return false;
+    return matchesSearch([project.title, project.ticket && project.ticket.key]
+      .filter(Boolean).join(" · "));
+  }
+
+  /* One haystack per change, not a field-by-field check: an AND has to be free to
+     satisfy its terms from different fields - "billing and search" means search work
+     on the Billing board, and no single field says both. */
   function changeMatchesSearch(change) {
-    if (matchesSearch(change.title)) return true;
-    if (matchesSearch(productPathLabel(change.product))) return true;
     const project = PROJECTS_BY_ID[change.project_id];
-    if (project && matchesSearch(project.title)) return true;
     const initiative = project && project.initiative_id ? INITIATIVES_BY_ID[project.initiative_id] : null;
-    return !!initiative && matchesSearch(initiative.title);
+    return matchesSearch([
+      change.title,
+      change.ticket && change.ticket.key,
+      productPathLabel(change.product),
+      project && project.title,
+      project && project.ticket && project.ticket.key,
+      initiative && initiative.title,
+    ].filter(Boolean).join(" · "));
   }
 
   function searchFilter(changes) {
@@ -2335,17 +2377,14 @@
 
   /* Whether the search leaves this section anything to say: its own title, a change
      that survived the filter (`changes` is pre-filtered at grouping time), a declared
-     project whose title matches (empty of changes, it is still a findable artifact),
-     or a descendant with any of those - the same pass-through rule the state filter
-     keeps, so a matching sub-product is never orphaned by its parent. */
+     project whose title or epic key matches (empty of changes, it is still a findable
+     artifact), or a descendant with any of those - the same pass-through rule the
+     state filter keeps, so a matching sub-product is never orphaned by its parent. */
   function groupSearchVisible(group) {
     if (!searchActive()) return true;
     if (matchesSearch(group.title)) return true;
     if (groupChanges(group).length) return true;
-    if ((group.projectIds || []).some((id) => {
-      const project = PROJECTS_BY_ID[id];
-      return project && matchesSearch(project.title);
-    })) return true;
+    if ((group.projectIds || []).some((id) => projectMatchesSearch(PROJECTS_BY_ID[id]))) return true;
     return (group.subgroups || []).some(groupSearchVisible);
   }
 
@@ -2636,10 +2675,10 @@
     let rows = ids.map((id) => row(PROJECTS_BY_ID[id], byProject.get(id) || []));
     if (byProject.has(null)) rows.push(row(null, byProject.get(null)));
     /* Under a search, a declared project holding nothing that matched is noise unless
-       its own title is what matched - the changes are already filtered upstream, so an
-       empty row here has nothing to say about the query. */
+       its own title or epic key is what matched - the changes are already filtered
+       upstream, so an empty row here has nothing to say about the query. */
     if (searchActive()) {
-      rows = rows.filter((r) => r.changes.length || (r.project && matchesSearch(r.project.title)));
+      rows = rows.filter((r) => r.changes.length || projectMatchesSearch(r.project));
     }
     /* The same active / inactive / completed order the sections themselves keep, one
        level down: a row is active when it holds open Now/Next work, completed when it
@@ -3153,7 +3192,7 @@
 
   function searchEmptyNote() {
     return el("p", "lens-empty",
-      `No titles match “${searchQuery.trim()}” — clear the search in the nav to see the whole board.`);
+      `No titles or ticket keys match “${searchQuery.trim()}” — clear the search in the nav to see the whole board.`);
   }
 
   /* ---- the timeline view ----------------------------------------------------------
