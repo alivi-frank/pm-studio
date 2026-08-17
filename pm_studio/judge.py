@@ -96,15 +96,15 @@ def inconclusive(summary: str, model: str = "", usage: dict | None = None) -> di
 
 
 def judge_model(fallback: str) -> str:
-    """Mechanical compliance-checking against a written rule sheet doesn't need the
-    deployment's biggest model - prefer the cheap tier when the deployment offers it,
-    fall back to the dispatching registry's model when it doesn't. Matched by
-    substring, not exact id, because a [models] table may spell the tier either way
-    ("sonnet" or "claude-sonnet-5") and both mean the same preference."""
-    for tier in ("sonnet", "haiku"):
-        for model_id in MODELS:
-            if tier in model_id:
-                return model_id
+    """The judge runs on the Opus tier by default: a wrong verdict is expensive in
+    both directions (a false violation burns a remediation task, a false pass defeats
+    the whole layer), so the verdict gets the strongest model the deployment offers.
+    Falls back to the dispatching registry's model when no opus id is declared.
+    Matched by substring, not exact id, because a [models] table may spell the tier
+    either way ("opus" or "claude-opus-5") and both mean the same preference."""
+    for model_id in MODELS:
+        if "opus" in model_id:
+            return model_id
     return fallback
 
 

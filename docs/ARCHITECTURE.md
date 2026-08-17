@@ -469,7 +469,9 @@ class TaskRegistry:
   `{verdict: "pass"|"violation"|"inconclusive", violations: [{rule, evidence}], summary,
   model, agent_usage}`. Every judge failure (timeout, bad output shape, uncited
   violation) maps to `inconclusive` with the reason: fail loud, never fail open. Runs on
-  the cheap model tier when the deployment offers one (`judge.judge_model`).
+  the Opus tier when the deployment declares one, else the registry's model
+  (`judge.judge_model`) - a wrong verdict is expensive in both directions, so the
+  verdict gets the strongest model available.
 - `run_conflict_resolution(description)` — same `_execute`, but **synchronous**, id
   prefixed `merge-`, `kind="merge_resolution"`, and **no snapshot commit** (the merge
   flow verifies and commits or aborts explicitly).

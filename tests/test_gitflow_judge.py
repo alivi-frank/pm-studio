@@ -376,18 +376,20 @@ class JudgeParsingTest(unittest.TestCase):
         )
         self.assertEqual(verdict["violations"], [{"rule": "r", "evidence": "e"}])
 
-    def test_judge_model_prefers_the_cheap_tier(self) -> None:
+    def test_judge_model_defaults_to_the_opus_tier(self) -> None:
+        """The verdict gets the strongest model the deployment offers, whichever way
+        the [models] table spells it - never a cheaper model over spelling."""
         with mock.patch.object(judge_module, "MODELS", {"claude-opus-4-8": "Opus", "sonnet": "Sonnet"}):
-            self.assertEqual(judge_module.judge_model("claude-opus-4-8"), "sonnet")
-        with mock.patch.object(judge_module, "MODELS", {"claude-opus-4-8": "Opus"}):
-            self.assertEqual(judge_module.judge_model("claude-opus-4-8"), "claude-opus-4-8")
-
-    def test_judge_model_matches_full_ids_too(self) -> None:
-        """A [models] table may spell the tier as a full id ("claude-sonnet-5") - the
-        preference must not silently fall back to the big model over spelling."""
-        models = {"claude-opus-5": "Opus", "claude-sonnet-5": "Sonnet", "claude-haiku-4-5-20251001": "Haiku"}
+            self.assertEqual(judge_module.judge_model("sonnet"), "claude-opus-4-8")
+        models = {"claude-sonnet-5": "Sonnet", "claude-opus-5": "Opus"}
         with mock.patch.object(judge_module, "MODELS", models):
-            self.assertEqual(judge_module.judge_model("claude-opus-5"), "claude-sonnet-5")
+            self.assertEqual(judge_module.judge_model("claude-sonnet-5"), "claude-opus-5")
+
+    def test_judge_model_falls_back_to_the_registry_model(self) -> None:
+        """A deployment that declares no opus id judges on the dispatching session's
+        own model rather than inventing an id the CLI may not accept."""
+        with mock.patch.object(judge_module, "MODELS", {"sonnet": "Sonnet", "haiku": "Haiku"}):
+            self.assertEqual(judge_module.judge_model("sonnet"), "sonnet")
 
 
 class PromptSlotsTest(unittest.TestCase):
