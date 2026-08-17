@@ -229,6 +229,14 @@ reads the Jira resolution (and a status literally named "Won't Do"), spelled
 leniently — apostrophes, hyphens, and case don't matter. Won't-do tickets are counted
 in the sync report rather than silently dropped.
 
+A ticket declined **after** it was imported leaves the board too: each sync ends with
+a removal pass that deletes imported changes and projects whose ticket has since been
+resolved won't-do. Only provably untouched imports are removed — the import stamp
+still opening the description, no owner, the change still in `later`, the project
+under no initiative and with no changes left beneath it. Anything a human touched
+stays and is counted in the sync report instead. A linked ticket absent from the
+catalog is unknown, not declined — nothing is removed on absence of evidence.
+
 A ticket with **no matching route is reported, never guessed**: the board's tracker
 strip counts unrouted importable tickets and names their components (the fix is a
 config line, not an investigation). No catch-all product is invented. A route without

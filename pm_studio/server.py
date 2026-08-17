@@ -1793,8 +1793,11 @@ def _run_tracker_sync(tracker_id: str | None) -> None:
 
     Pass order matters. Epics become projects FIRST, so that by the time the change
     import runs, an epic-level ticket is already project-held and cannot be imported as
-    a change; the assignment pass runs LAST, so changes the import just created land in
-    their epic's project in the same cycle instead of waiting for the next one.
+    a change; the assignment pass runs after, so changes the import just created land in
+    their epic's project in the same cycle instead of waiting for the next one. The
+    won't-do removal runs LAST and changes-before-projects internally, so a declined
+    epic's declined changes are gone by the time its project's emptiness is judged -
+    the whole subtree can leave in one cycle.
     """
     try:
         tracker_store.sync(tracker_id)
@@ -1807,6 +1810,7 @@ def _run_tracker_sync(tracker_id: str | None) -> None:
         _sync_epic_projects()
         _import_routed_tickets()
         _assign_changes_to_epic_projects()
+        _remove_wont_do_imports()
     except Exception as exc:  # noqa: BLE001
         print(f"[trackers] sync failed: {exc}")
     _on_roadmap_update({"type": "trackers_synced", "trackers": _described_trackers()})
@@ -2177,6 +2181,98 @@ def _assign_changes_to_epic_projects() -> None:
                 roadmap_store.update(change["id"], project_id=project.id)
                 if report is not None:
                     report["changes_assigned"] += 1
+
+
+def _remove_wont_do_imports() -> None:
+    """A ticket declined AFTER it was imported must leave the board the way it would
+    never have arrived: the won't-do checks in the import passes only stop NEW imports,
+    so this pass re-reads every linked change and project each sync and removes the
+    ones whose ticket has since been resolved won't-do.
+
+    Only provably untouched imports are removed - the same posture as the epic pass's
+    reclaim. For a change: the import stamp still opens the description, nobody owns
+    it, and it still sits in the "later" bucket the import filed it in (project_id
+    does NOT count as a touch - the assignment pass sets it automatically). For a
+    project: the import stamp, no initiative anyone filed it under, and no changes
+    left beneath it. Anything a human touched is somebody's work: it stays, and is
+    counted in the report instead so the decline is surfaced rather than guessed at.
+
+    A linked ticket absent from the catalog is UNKNOWN, not declined - it may simply
+    have aged out of the sync window - so it is never removed."""
+    for config in CONFIG.trackers:
+        if not config.imports:
+            continue
+        by_key = {
+            normalize_key(config.id, t.key): t for t in tracker_store.tickets_of(config.id)
+        }
+
+        removed = kept = 0
+        for items in roadmap_store.list_all().values():
+            for change in items:
+                if change.get("tracker_id") != config.id or not change.get("ticket_key"):
+                    continue
+                ticket = by_key.get(normalize_key(config.id, change["ticket_key"]))
+                if ticket is None or not _is_wont_do(ticket):
+                    continue
+                pristine = (
+                    change["description"].startswith("Imported from ")
+                    and not change.get("owner")
+                    and change.get("bucket") == "later"
+                )
+                if not pristine:
+                    kept += 1
+                    continue
+                roadmap_store.delete(change["id"])
+                removed += 1
+                _audit(None, "roadmap.wont_do_removed", change["id"], change["ticket_key"])
+
+        projects_removed = projects_kept = 0
+        # Recounted AFTER the change removals above, so a declined epic whose declined
+        # changes just left counts as empty in the same cycle.
+        change_counts: dict[str, int] = {}
+        for items in roadmap_store.list_all().values():
+            for change in items:
+                if change.get("project_id"):
+                    change_counts[change["project_id"]] = (
+                        change_counts.get(change["project_id"], 0) + 1
+                    )
+        for project in portfolio_store.list_projects():
+            if project["tracker_id"] != config.id or not project["ticket_key"]:
+                continue
+            ticket = by_key.get(normalize_key(config.id, project["ticket_key"]))
+            if ticket is None or not _is_wont_do(ticket):
+                continue
+            pristine = (
+                project["description"].startswith("Imported from ")
+                and project["initiative_id"] is None
+                and not project["is_catch_all"]
+                and not project["catch_all_for_initiative"]
+                and change_counts.get(project["id"], 0) == 0
+            )
+            if not pristine:
+                projects_kept += 1
+                continue
+            portfolio_store.delete_project(project["id"])
+            projects_removed += 1
+            _audit(
+                None, "portfolio.wont_do_project_removed", project["id"], project["ticket_key"]
+            )
+
+        # Stashed onto the reports the import passes just rebuilt this same cycle, so
+        # GET /trackers tells the whole won't-do story in one place.
+        report = _import_report.get(config.id)
+        if report is not None:
+            report["wont_do_removed"] = removed
+            report["wont_do_kept"] = kept
+        epic_report = _epic_report.get(config.id)
+        if epic_report is not None:
+            epic_report["wont_do_projects_removed"] = projects_removed
+            epic_report["wont_do_projects_kept"] = projects_kept
+        if removed or projects_removed:
+            print(
+                f"[trackers] {config.id}: won't-do -> removed {removed} change(s), "
+                f"{projects_removed} project(s)"
+            )
 
 
 def _is_wont_do(ticket) -> bool:

@@ -67,7 +67,10 @@ class _StubTrackerStore:
         return [t for t in self._tickets if t.tracker_id == tracker_id]
 
 
-class EpicProjectImportTest(unittest.TestCase):
+class _EpicHarness(unittest.TestCase):
+    """Stores swapped for throwaways, reports cleared - shared by the epic-pass tests
+    and the won't-do removal tests, which exercise the same machinery."""
+
     TRACKER = TrackerConfig(
         id="jira", provider="jira", label="Jira", base_url="https://x",
         projects=("PROJ",), token="t",
@@ -132,6 +135,8 @@ class EpicProjectImportTest(unittest.TestCase):
     def _projects(self):
         return server_module.portfolio_store.list_projects()
 
+
+class EpicProjectImportTest(_EpicHarness):
     # ---- creation ----
 
     def test_a_new_open_epic_becomes_a_linked_project(self) -> None:
@@ -519,6 +524,87 @@ class EpicProjectImportTest(unittest.TestCase):
         self.assertEqual(self._projects(), [])
         self.assertEqual(server_module._import_report["jira"]["imported"], 0)
         self.assertEqual(server_module._epic_report["jira"]["reclaimed_from_changes"], 0)
+
+
+class WontDoRemovalTest(_EpicHarness):
+    """_remove_wont_do_imports: a ticket declined AFTER import leaves the board the way
+    it would never have arrived - but only if nobody touched what the import created.
+    Runs the full pass order, since the removal's contract is about what earlier
+    cycles created."""
+
+    def _cycle(self, tickets):
+        """One sync cycle exactly as _run_tracker_sync orders the passes."""
+        server_module.tracker_store = _StubTrackerStore(tickets)
+        server_module._sync_epic_projects()
+        server_module._import_routed_tickets()
+        server_module._assign_changes_to_epic_projects()
+        server_module._remove_wont_do_imports()
+
+    def _changes(self):
+        return server_module.roadmap_store.list_product("checkout")
+
+    def test_a_change_declined_after_import_is_removed(self) -> None:
+        story = _ticket("PROJ-2", "Story")
+        self._cycle([story])
+        self.assertEqual(len(self._changes()), 1)
+        declined = _ticket("PROJ-2", "Story", state="Closed", category="Done",
+                           resolution="Won't Do")
+        self._cycle([declined])
+        self.assertEqual(self._changes(), [])
+        report = server_module._import_report["jira"]
+        self.assertEqual((report["wont_do_removed"], report["wont_do_kept"]), (1, 0))
+
+    def test_a_touched_change_is_kept_and_counted(self) -> None:
+        """A human moved it out of "later": somebody's work, reported instead."""
+        self._cycle([_ticket("PROJ-2", "Story")])
+        change = self._changes()[0]
+        server_module.roadmap_store.update(change["id"], bucket="now")
+        self._cycle([_ticket("PROJ-2", "Story", state="Closed", category="Done",
+                             resolution="Won't Do")])
+        self.assertEqual(len(self._changes()), 1)
+        report = server_module._import_report["jira"]
+        self.assertEqual((report["wont_do_removed"], report["wont_do_kept"]), (0, 1))
+
+    def test_a_ticket_missing_from_the_catalog_is_unknown_not_declined(self) -> None:
+        """Aged out of the sync window is not won't-do - nothing may be removed on
+        absence of evidence."""
+        self._cycle([_ticket("PROJ-2", "Story")])
+        self._cycle([])
+        self.assertEqual(len(self._changes()), 1)
+
+    def test_a_declined_epic_and_its_changes_leave_in_one_cycle(self) -> None:
+        """Changes are removed before projects are judged empty, so the whole declined
+        subtree goes at once instead of the project waiting a cycle for its changes."""
+        epic = _ticket("PROJ-1", "Epic", title="Doomed epic")
+        story = _ticket("PROJ-2", "Story", parent="PROJ-1", parent_type="Epic")
+        self._cycle([epic, story])
+        self.assertEqual(len(self._projects()), 1)
+        self.assertEqual(len(self._changes()), 1)
+        self._cycle([
+            _ticket("PROJ-1", "Epic", title="Doomed epic", state="Closed",
+                    category="Done", resolution="Won't Do"),
+            _ticket("PROJ-2", "Story", parent="PROJ-1", parent_type="Epic",
+                    state="Closed", category="Done", resolution="Won't Do"),
+        ])
+        self.assertEqual(self._changes(), [])
+        self.assertEqual(self._projects(), [])
+        report = server_module._epic_report["jira"]
+        self.assertEqual(report["wont_do_projects_removed"], 1)
+
+    def test_a_project_filed_under_an_initiative_is_kept(self) -> None:
+        self._cycle([_ticket("PROJ-1", "Epic", title="Filed epic")])
+        project = self._projects()[0]
+        initiative = server_module.portfolio_store.create_initiative("Strategy")
+        server_module.portfolio_store.update_project(
+            project["id"], initiative_id=initiative.id
+        )
+        self._cycle([_ticket("PROJ-1", "Epic", title="Filed epic", state="Closed",
+                             category="Done", resolution="Won't Do")])
+        self.assertEqual(len(self._projects()), 1)
+        report = server_module._epic_report["jira"]
+        self.assertEqual(
+            (report["wont_do_projects_removed"], report["wont_do_projects_kept"]), (0, 1)
+        )
 
 
 if __name__ == "__main__":
