@@ -137,6 +137,9 @@ use_tls = true
 # thing and the roadmap board looks exactly as it did before ticket linking
 # existed. `projects` is required: it bounds what the sync pulls, and it is what
 # lets a bare key like PROJ-123 be attributed to the right tracker.
+# Each sync also pulls the projects' RELEASES (Jira versions; ADO iterations) into
+# the same cache - no extra configuration, read back on GET /trackers/releases.
+# Data only for now: nothing on the board consumes them yet.
 # ALWAYS use `token_env` (the NAME of an environment variable) rather than
 # `token` - pm_studio_local/ is normally committed, so an inline token is a token
 # in your git history. PM Studio warns loudly if you use `token`. Put the value in

@@ -418,6 +418,16 @@ configured*, waking each minute and pulling whichever trackers are due on their 
 outside the configured `projects` are fetched individually, so a one-off dependency on
 another team's board resolves instead of rendering unresolved forever.
 
+**Releases (data only, so far).** Each sync also pulls the tracker's release catalog:
+Jira project *versions* (the Releases page; paginated `/project/{key}/version` on Cloud,
+falling back to the plain `/versions` array on Server/DC) and ADO *iterations* (the
+classification-node tree, flattened, root skipped — Boards has no first-class release,
+and the classic Release *pipelines* are deployment executions, deliberately out of
+scope). Cached as `Release` entries in the same `trackers.json`, served read-only on
+`GET /trackers/releases`, counted on `describe()`. Releases fail independently of the
+ticket pull (`SyncStatus.release_error`), with the same keep-on-failure posture. Nothing
+on the board consumes them yet.
+
 **Read-only.** Nothing writes back to Jira or ADO. The board's bucket/status stays
 independent of the ticket's state, on purpose, and the PM prompt says so explicitly.
 

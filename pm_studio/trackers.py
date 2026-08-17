@@ -204,6 +204,57 @@ class Ticket:
 
 
 @dataclass
+class Release:
+    """One release as of the last successful sync of its tracker.
+
+    "Release" is each provider's own planning container, kept as the provider states it:
+
+    - **Jira**: a project *version* - what the Releases page lists. Carries the
+      instance's own released/archived flags and start/release dates.
+    - **ADO**: an *iteration* (the tree under the project's iteration root). Boards has
+      no first-class release concept; iterations are the dated planning containers that
+      Jira versions map onto. The classic Release *pipelines* are deployment executions,
+      not planning material, and are deliberately out of scope. ADO states no released
+      flag, so it is derived from the finish date at sync time.
+
+    For now this catalog is only imported and cached - nothing on the board consumes it
+    yet. The shape mirrors Ticket so a future consumer joins it the same way.
+    """
+
+    tracker_id: str
+    provider: str
+    # Jira: the version id. ADO: the iteration node id. Unique within one tracker.
+    key: str
+    name: str
+    description: str
+    # Provider truth (Jira) or date-derived (ADO, see docstring). Both False for a
+    # release that is still open and planned.
+    released: bool
+    archived: bool
+    # ISO dates (YYYY-MM-DD) or "" when the provider left them unset. For ADO,
+    # release_date is the iteration's finish date.
+    start_date: str
+    release_date: str
+    url: str
+    # The tracker project this release belongs to - same meaning as Ticket.project.
+    project: str
+    synced_at: float
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Release":
+        known = {f: data.get(f) for f in cls.__dataclass_fields__}
+        known["synced_at"] = float(known.get("synced_at") or 0.0)
+        known["released"] = bool(known.get("released"))
+        known["archived"] = bool(known.get("archived"))
+        for text_field in ("name", "description", "start_date", "release_date", "url", "project"):
+            known[text_field] = str(known.get(text_field) or "")
+        return cls(**known)  # type: ignore[arg-type]
+
+
+@dataclass
 class SyncStatus:
     """Per-tracker outcome of the last sync attempt, shown in the board header so a
     stale or failing tracker is visible rather than looking like an empty one."""
@@ -219,6 +270,11 @@ class SyncStatus:
     error: str | None = None
     # Set when a tracker has more tickets than MAX_TICKETS_PER_TRACKER.
     truncated: bool = False
+    # The release half of the sync, reported separately: releases failing must not make
+    # a healthy ticket pull look broken, and vice versa. Additive defaults so a status
+    # cached before releases existed still loads.
+    release_count: int = 0
+    release_error: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -456,6 +512,87 @@ class JiraClient:
             return self._ticket(payload, time.time())
         return None
 
+    # ---- releases (project versions) ----
+
+    def _release(self, version: dict, project: str, now: float) -> Release | None:
+        key = str(version.get("id") or "").strip()
+        if not key:
+            return None
+        return Release(
+            tracker_id=self.config.id,
+            provider="jira",
+            key=key,
+            name=str(version.get("name") or "").strip(),
+            description=str(version.get("description") or "").strip(),
+            released=bool(version.get("released")),
+            archived=bool(version.get("archived")),
+            start_date=str(version.get("startDate") or "").strip(),
+            release_date=str(version.get("releaseDate") or "").strip(),
+            # The version's page under the project's Releases tab.
+            url=f"{self.config.base_url}/projects/{urllib.parse.quote(project)}/versions/{key}",
+            project=project,
+            synced_at=now,
+        )
+
+    def fetch_releases(self) -> list[Release]:
+        """Every version of the configured projects - Jira's Releases page, as data."""
+        releases: list[Release] = []
+        now = time.time()
+        for project in self.config.projects:
+            releases.extend(self._fetch_project_releases(project, now))
+        return releases
+
+    def _fetch_project_releases(self, project: str, now: float) -> list[Release]:
+        # Same endpoint split as the ticket search: Cloud has a paginated
+        # `/project/{key}/version`, Server/DC only the plain-array `/versions`.
+        # A 404/410 on the first is the signal to fall back, exactly like fetch_catalog.
+        try:
+            return self._fetch_releases_paginated(project, now)
+        except TrackerError as exc:
+            if _http_status(exc) not in (404, 410):
+                raise
+        last_error: TrackerError | None = None
+        for version in (3, 2):
+            url = (
+                f"{self.config.base_url}/rest/api/{version}/project/"
+                f"{urllib.parse.quote(project)}/versions"
+            )
+            try:
+                payload = _request(url, headers=self._headers())
+            except TrackerError as exc:
+                if _http_status(exc) not in (404, 410):
+                    raise
+                last_error = exc
+                continue
+            # _request wraps a bare JSON array as {"value": [...]}.
+            releases = []
+            for entry in payload.get("value") or []:
+                release = self._release(entry, project, now)
+                if release is not None:
+                    releases.append(release)
+            return releases
+        raise last_error or TrackerError("no supported Jira versions endpoint responded")
+
+    def _fetch_releases_paginated(self, project: str, now: float) -> list[Release]:
+        releases: list[Release] = []
+        start_at = 0
+        for _ in range(MAX_PAGES):
+            params = {"startAt": str(start_at), "maxResults": str(PAGE_SIZE)}
+            url = (
+                f"{self.config.base_url}/rest/api/3/project/"
+                f"{urllib.parse.quote(project)}/version?{urllib.parse.urlencode(params)}"
+            )
+            payload = _request(url, headers=self._headers())
+            values = payload.get("values") or []
+            for entry in values:
+                release = self._release(entry, project, now)
+                if release is not None:
+                    releases.append(release)
+            start_at += len(values)
+            if payload.get("isLast") or not values:
+                return releases
+        return releases
+
 
 class AdoClient:
     """Azure DevOps Boards.
@@ -597,6 +734,69 @@ class AdoClient:
             project = self.config.projects[0]
         return self._ticket(payload, project, time.time())
 
+    # ---- releases (iterations) ----
+    #
+    # See Release's docstring for why iterations: they are ADO's dated planning
+    # containers, the rung Jira versions occupy. The classification-nodes API returns
+    # the whole tree in ONE call per project, `$depth` levels deep.
+
+    ITERATION_DEPTH = 10
+
+    def fetch_releases(self) -> list[Release]:
+        releases: list[Release] = []
+        now = time.time()
+        for project in self.config.projects:
+            params = {"$depth": str(self.ITERATION_DEPTH), "api-version": self.API_VERSION}
+            url = (
+                f"{self.config.base_url}/{urllib.parse.quote(project)}"
+                f"/_apis/wit/classificationnodes/iterations?{urllib.parse.urlencode(params)}"
+            )
+            payload = _request(url, headers=self._headers())
+            # The root node is the project's iteration root (named after the project),
+            # a container rather than a plannable release - only its subtree counts.
+            for node in payload.get("children") or []:
+                self._collect_iterations(node, project, now, releases)
+        return releases
+
+    def _collect_iterations(
+        self, node: dict, project: str, now: float, out: list[Release]
+    ) -> None:
+        release = self._iteration_release(node, project, now)
+        if release is not None:
+            out.append(release)
+        for child in node.get("children") or []:
+            self._collect_iterations(child, project, now, out)
+
+    def _iteration_release(self, node: dict, project: str, now: float) -> Release | None:
+        key = str(node.get("id") or "").strip()
+        if not key:
+            return None
+        attributes = node.get("attributes") or {}
+        # ADO dates are UTC ISO timestamps ("2026-01-05T00:00:00Z"); only the date part
+        # is planning material.
+        start = str(attributes.get("startDate") or "")[:10]
+        finish = str(attributes.get("finishDate") or "")[:10]
+        today = time.strftime("%Y-%m-%d", time.gmtime(now))
+        return Release(
+            tracker_id=self.config.id,
+            provider="ado",
+            key=key,
+            name=str(node.get("name") or "").strip(),
+            # ADO iterations carry no description.
+            description="",
+            # Derived, not stated (see Release docstring): an iteration whose finish
+            # date has passed is over, which is the nearest fact ADO has to "released".
+            released=bool(finish and finish < today),
+            archived=False,
+            start_date=start,
+            release_date=finish,
+            # The node's API URL - ADO has no stable per-iteration page without knowing
+            # a team, and a wrong guess would be worse than an honest API reference.
+            url=str(node.get("url") or ""),
+            project=project,
+            synced_at=now,
+        )
+
 
 def client_for(config: TrackerConfig) -> JiraClient | AdoClient:
     return JiraClient(config) if config.provider == "jira" else AdoClient(config)
@@ -681,12 +881,19 @@ def _key_from_url(url: str, tracker: TrackerConfig) -> str | None:
 @dataclass
 class _State:
     tickets: dict[str, Ticket] = field(default_factory=dict)  # "tracker_id\x00key" -> Ticket
+    releases: dict[str, Release] = field(default_factory=dict)  # "tracker_id\x00key" -> Release
     statuses: dict[str, SyncStatus] = field(default_factory=dict)
     last_sync_at: float | None = None
 
 
 def _catalog_key(tracker_id: str, key: str) -> str:
     return f"{tracker_id}\x00{normalize_key(tracker_id, key)}"
+
+
+def _release_key(tracker_id: str, key: str) -> str:
+    # No normalization: release keys are provider-generated ids (Jira version id, ADO
+    # node id), never hand-typed, so there is no case drift to defend against.
+    return f"{tracker_id}\x00{(key or '').strip()}"
 
 
 def normalize_key(tracker_id: str, key: str) -> str:
@@ -737,6 +944,13 @@ class TrackerStore:
             except (TypeError, ValueError):
                 continue
             self._state.tickets[_catalog_key(ticket.tracker_id, ticket.key)] = ticket
+        # Absent from any cache written before releases existed - loads as none.
+        for entry in raw.get("releases") or []:
+            try:
+                release = Release.from_dict(entry)
+            except (TypeError, ValueError):
+                continue
+            self._state.releases[_release_key(release.tracker_id, release.key)] = release
         for entry in raw.get("statuses") or []:
             try:
                 status = SyncStatus(**entry)
@@ -749,6 +963,7 @@ class TrackerStore:
         CATALOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "tickets": [t.to_dict() for t in self._state.tickets.values()],
+            "releases": [r.to_dict() for r in self._state.releases.values()],
             "statuses": [s.to_dict() for s in self._state.statuses.values()],
             "last_sync_at": self._state.last_sync_at,
         }
@@ -779,6 +994,24 @@ class TrackerStore:
         A snapshot under the lock, so a concurrent sync can't mutate mid-iteration."""
         with self._lock:
             return [t for t in self._state.tickets.values() if t.tracker_id == tracker_id]
+
+    def releases_of(self, tracker_id: str) -> list[Release]:
+        """One tracker's release catalog, as Release objects. A snapshot under the lock,
+        same as tickets_of."""
+        with self._lock:
+            return [r for r in self._state.releases.values() if r.tracker_id == tracker_id]
+
+    def list_releases(self, tracker_id: str = "") -> list[dict]:
+        """The synced release catalog, for the API. Data only for now - nothing on the
+        board consumes releases yet, so this is the whole surface."""
+        with self._lock:
+            releases = list(self._state.releases.values())
+        if tracker_id:
+            releases = [r for r in releases if r.tracker_id == tracker_id]
+        # Deterministic order for the API: grouped by tracker and project, newest
+        # planned end last, name as the tiebreak for the undated.
+        releases.sort(key=lambda r: (r.tracker_id, r.project, r.release_date, r.name))
+        return [r.to_dict() for r in releases]
 
     def search(
         self, query: str = "", tracker_id: str = "", limit: int = 50, canonical: str = ""
@@ -815,6 +1048,9 @@ class TrackerStore:
             counts: dict[str, int] = {}
             for ticket in self._state.tickets.values():
                 counts[ticket.tracker_id] = counts.get(ticket.tracker_id, 0) + 1
+            release_counts: dict[str, int] = {}
+            for release in self._state.releases.values():
+                release_counts[release.tracker_id] = release_counts.get(release.tracker_id, 0) + 1
         trackers = []
         for config in CONFIG.trackers:
             status = statuses.get(config.id)
@@ -828,6 +1064,7 @@ class TrackerStore:
                     "usable": config.is_usable,
                     "unusable_reason": config.unusable_reason,
                     "ticket_count": counts.get(config.id, 0),
+                    "release_count": release_counts.get(config.id, 0),
                     "status": status.to_dict() if status else None,
                 }
             )
@@ -938,8 +1175,9 @@ class TrackerStore:
                 self._save_locked()
             return
 
+        client = client_for(config)
         try:
-            tickets, truncated = client_for(config).fetch_catalog()
+            tickets, truncated = client.fetch_catalog()
         except TrackerError as exc:
             status.error = _scrub(str(exc), config.token)
             status.finished_at = time.time()
@@ -971,6 +1209,19 @@ class TrackerStore:
                     if parent is not None:
                         ticket.parent_type = parent.raw_type
 
+        # Releases ride the same sync but fail on their own: a versions endpoint being
+        # broken must not make a healthy ticket pull look failed, so the outcome lands
+        # in release_error rather than error, and `None` (vs an empty list, which is a
+        # real answer) means "keep the previous release slice" - the same keep-on-failure
+        # posture as the ticket catalog.
+        releases: list[Release] | None = None
+        try:
+            releases = client.fetch_releases()
+        except TrackerError as exc:
+            status.release_error = _scrub(str(exc), config.token)
+        except Exception as exc:  # noqa: BLE001 - same backstop as the ticket pull
+            status.release_error = _scrub(f"unexpected error: {exc}", config.token)
+
         status.ok = True
         status.ticket_count = len(tickets)
         status.truncated = truncated
@@ -984,5 +1235,15 @@ class TrackerStore:
                 del self._state.tickets[catalog_key]
             for ticket in tickets:
                 self._state.tickets[_catalog_key(ticket.tracker_id, ticket.key)] = ticket
+            if releases is not None:
+                for release_key in [
+                    k for k, r in self._state.releases.items() if r.tracker_id == config.id
+                ]:
+                    del self._state.releases[release_key]
+                for release in releases:
+                    self._state.releases[_release_key(release.tracker_id, release.key)] = release
+            status.release_count = sum(
+                1 for r in self._state.releases.values() if r.tracker_id == config.id
+            )
             self._state.statuses[config.id] = status
             self._save_locked()

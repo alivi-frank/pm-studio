@@ -1751,6 +1751,20 @@ def search_tickets(q: str = "", tracker_id: str = "", limit: int = 50, type: str
     return {"tickets": tickets}
 
 
+@app.get("/trackers/releases")
+def get_tracker_releases(tracker_id: str = "") -> dict:
+    """The synced release catalog (Jira project versions, ADO iterations), from the
+    cache only - like the ticket search, this endpoint never calls out to a tracker.
+
+    Data only for now: nothing on the board consumes releases yet, so this read is the
+    feature's whole surface until something does. Open like every other read (see
+    authz.py's transparency note); the sync that fills it stays a `manage_roadmap`
+    write."""
+    if tracker_id and CONFIG.tracker(tracker_id) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown tracker: {tracker_id}")
+    return {"releases": tracker_store.list_releases(tracker_id)}
+
+
 @app.post("/trackers/sync")
 def sync_trackers(request: Request, payload: dict = Body(default={})) -> dict:
     """Kicks off a sync and returns immediately.
