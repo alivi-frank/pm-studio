@@ -382,6 +382,13 @@ class JudgeParsingTest(unittest.TestCase):
         with mock.patch.object(judge_module, "MODELS", {"claude-opus-4-8": "Opus"}):
             self.assertEqual(judge_module.judge_model("claude-opus-4-8"), "claude-opus-4-8")
 
+    def test_judge_model_matches_full_ids_too(self) -> None:
+        """A [models] table may spell the tier as a full id ("claude-sonnet-5") - the
+        preference must not silently fall back to the big model over spelling."""
+        models = {"claude-opus-5": "Opus", "claude-sonnet-5": "Sonnet", "claude-haiku-4-5-20251001": "Haiku"}
+        with mock.patch.object(judge_module, "MODELS", models):
+            self.assertEqual(judge_module.judge_model("claude-opus-5"), "claude-sonnet-5")
+
 
 class PromptSlotsTest(unittest.TestCase):
     """The PM-side halves: the dispatch slots and the completion-turn judge note."""

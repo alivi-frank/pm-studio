@@ -98,10 +98,13 @@ def inconclusive(summary: str, model: str = "", usage: dict | None = None) -> di
 def judge_model(fallback: str) -> str:
     """Mechanical compliance-checking against a written rule sheet doesn't need the
     deployment's biggest model - prefer the cheap tier when the deployment offers it,
-    fall back to the dispatching registry's model when it doesn't."""
-    for candidate in ("sonnet", "haiku"):
-        if candidate in MODELS:
-            return candidate
+    fall back to the dispatching registry's model when it doesn't. Matched by
+    substring, not exact id, because a [models] table may spell the tier either way
+    ("sonnet" or "claude-sonnet-5") and both mean the same preference."""
+    for tier in ("sonnet", "haiku"):
+        for model_id in MODELS:
+            if tier in model_id:
+                return model_id
     return fallback
 
 
