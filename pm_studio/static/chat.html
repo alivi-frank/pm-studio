@@ -298,6 +298,15 @@
     50% { box-shadow: 0 0 0 3px rgba(42, 120, 214, 0.14); }
   }
   .task-card .description { font-weight: 500; }
+  /* Compliance-judge verdict on a finished task: a one-line disclosure whose color
+     carries the verdict, expanding into the cited violations / summary. */
+  .task-card .judge-line { margin-top: 8px; font-size: 0.9em; }
+  .task-card .judge-line summary { cursor: pointer; }
+  .judge-verdict { font-weight: 600; }
+  .judge-verdict.pass { color: var(--status-done); }
+  .judge-verdict.violation { color: var(--status-error); }
+  .judge-verdict.inconclusive { color: var(--status-running); }
+  .task-card .judge-body { margin-top: 6px; white-space: pre-wrap; }
   .card {
     background: var(--bg);
     border: 1px solid var(--border);
@@ -765,6 +774,7 @@
         <div class="description"></div>
       </details>
       ${task.result ? `<details><summary>Result</summary><pre></pre></details>` : ""}
+      ${task.judge ? `<details class="judge-line"><summary><span class="judge-verdict ${task.judge.verdict}"></span></summary><div class="judge-body"></div></details>` : ""}
     `;
     const desc = (task.description ?? "").trim();
     // Collapsed preview: first line, truncated to a short one-line snippet.
@@ -774,6 +784,20 @@
     card.querySelector(".description").textContent = task.description;
     if (task.result) {
       card.querySelector("pre").textContent = task.result;
+    }
+    if (task.judge) {
+      const judge = task.judge;
+      const count = (judge.violations ?? []).length;
+      const label =
+        judge.verdict === "pass" ? "Git rules: compliant"
+        : judge.verdict === "violation" ? `Git rules: ${count} violation${count === 1 ? "" : "s"}`
+        : "Git rules: unverified";
+      card.querySelector(".judge-verdict").textContent = label;
+      const lines = (judge.violations ?? []).map(
+        (v) => `• ${v.rule}${v.evidence ? ` — ${v.evidence}` : ""}`
+      );
+      if (judge.summary) lines.push(judge.summary);
+      card.querySelector(".judge-body").textContent = lines.join("\n") || "No detail recorded.";
     }
     return card;
   }

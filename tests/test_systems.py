@@ -699,17 +699,26 @@ class SystemPromptTest(unittest.TestCase):
         self.assertNotIn('"system"', prompt)
 
     def test_the_block_is_absent_on_an_out_of_scope_product(self) -> None:
-        """Systems exist, but this product declares none. Telling its PM to attribute would
-        make it pick from whatever systems happen to exist - wrong data, not missing data.
-        The prompt and roadmap.requires_system are two statements of one rule."""
+        """Systems exist, but this product declares none. Telling its PM to attribute
+        CHANGES would make it pick from whatever systems happen to exist - wrong data,
+        not missing data. The prompt and roadmap.requires_system are two statements of
+        one rule. DEV-TASK attribution is deliberately different: once [systems] is
+        declared, the dispatch endpoint requires a system on every dispatch (it is what
+        routes gitflow rules to the dev agent, deployment-wide, not per product - see
+        tasks.validate_dispatch_system), so the dispatch note must stay or this PM
+        would just hit unexplained 400s."""
         roadmap_module.PRODUCTS = {"checkout": "Checkout", "ops": "Ops"}
         roadmap_module.PRODUCT_SYSTEMS = {"checkout": ("claims",)}
         with tempfile.TemporaryDirectory() as tmp:
             prompt = self._agent("ops", Path(tmp)).system_prompt
-        self.assertNotIn('"system"', prompt)
-        # ...while the in-scope sibling on the same deployment still gets it.
+        self.assertNotIn("attributed to a SYSTEM", prompt)
+        self.assertIn("Every dev task must name", prompt)
+        # ...while the in-scope sibling on the same deployment still gets the
+        # roadmap-attribution block.
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertIn('"system"', self._agent("checkout", Path(tmp)).system_prompt)
+            self.assertIn(
+                "attributed to a SYSTEM", self._agent("checkout", Path(tmp)).system_prompt
+            )
 
 
 if __name__ == "__main__":

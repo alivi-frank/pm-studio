@@ -61,6 +61,7 @@ from .roadmap import (
     systems_declared,
 )
 from .sessions import DEFAULT_SESSION_ID, SessionManager, SessionRuntime
+from .tasks import validate_dispatch_system
 from .trackers import (
     TYPE_EPIC,
     TYPE_SUBTASK,
@@ -399,6 +400,18 @@ def _on_task_update(session_id: str, task: dict) -> None:
                 KIND_DEV_TASK,
                 session_id,
                 usage={**usage, "cost_usd": usage.get("cost_usd", 0.0)},
+                user_id="",
+            )
+        # The compliance judge's spend is agent spend of the same task - measured
+        # separately (it's a different run on a different model) but recorded the same
+        # way, so judged deployments don't under-report their token cost.
+        judge_usage = (task.get("judge") or {}).get("agent_usage") or {}
+        if judge_usage.get("cost_usd") or judge_usage.get("input_tokens"):
+            _record_signal(
+                None,
+                KIND_DEV_TASK,
+                session_id,
+                usage={**judge_usage, "cost_usd": judge_usage.get("cost_usd", 0.0)},
                 user_id="",
             )
         _dev_task_dispatchers.pop(task.get("id", ""), None)
@@ -2760,7 +2773,14 @@ def create_task(session_id: str, request: Request, payload: dict = Body(...)) ->
     description = (payload.get("task") or "").strip()
     if not description:
         return {"error": "task description required"}
-    task = _get_runtime(session_id).task_registry.start_task(description)
+    # Attribution is what routes a system's non-negotiable git workflow rules into the
+    # dev agent's prompt, so it's enforced here with the same posture as roadmap
+    # creates: a 400 that names the valid ids, never a silent default.
+    system = str(payload.get("system") or "").strip()
+    system_error = validate_dispatch_system(system)
+    if system_error is not None:
+        raise HTTPException(status_code=400, detail=system_error)
+    task = _get_runtime(session_id).task_registry.start_task(description, system)
     _audit(actor, "dev_task.dispatched", session_id, description[:300])
     # Dispatching is the strongest signal of human intent in the system - it is a
     # decision to build something - so it carries the most weight in the split.

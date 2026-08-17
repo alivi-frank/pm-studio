@@ -472,6 +472,11 @@
       meta.appendChild(
         metaRow("Guidance", system.guidance ? el("code", null, system.guidance) : el("span", "soon", "none declared"))
       );
+      // Unlike guidance/pipelines this one is live: dev tasks for this system get the
+      // file injected at dispatch and a compliance judge verifies the work against it.
+      meta.appendChild(
+        metaRow("Git rules", system.gitflow ? el("code", null, system.gitflow) : el("span", "soon", "none declared"))
+      );
       card.appendChild(meta);
 
       const counts = el("div", "counts");

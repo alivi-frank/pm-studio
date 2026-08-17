@@ -610,6 +610,7 @@ class RoadmapStore:
                     "path": spec.path,
                     "repo": spec.repo,
                     "guidance": spec.guidance,
+                    "gitflow": spec.gitflow,
                     "pipelines": list(spec.pipelines),
                     "products": [
                         {"id": p, "label": product_path_label(p)}

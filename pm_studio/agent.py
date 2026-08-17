@@ -250,6 +250,46 @@ work that belongs to a system rather than a product (infra, performance, upgrade
 to an initiative instead.
 """
 
+# Fills the {dispatch_system_note} slot in the dev-task dispatch instructions, only
+# when [systems] is declared - otherwise the slot (and {task_system_field} beside it)
+# renders empty and the prompt is byte-identical to the pre-system one, the same
+# back-compat promise the rest of the layer keeps. Unlike SYSTEM_GUIDANCE_TEMPLATE
+# this is NOT gated on the home product's edge: any session that can dispatch a dev
+# task (initiative-scoped, default) must attribute it, because attribution is what
+# routes a system's git workflow rules into the dev agent's prompt.
+DISPATCH_SYSTEM_NOTE_TEMPLATE = """
+- Every dev task must name the ONE system whose code it will change (`"system"` in the payload \
+above) - normally the same system as the roadmap change it implements. Declared systems: \
+{system_ids}. A dispatch without a valid `"system"` is rejected with a 400 naming the valid \
+ids - read it rather than retrying the same payload; if genuinely none of them fits, ask the \
+stakeholder which system owns the work instead of guessing.{gitflow_sentence}"""
+
+# Appended inside the note above only when at least one system declares gitflow rules.
+GITFLOW_DISPATCH_SENTENCE = """ \
+Systems marked [git rules] carry non-negotiable git workflow rules: they are attached to the \
+dev agent's instructions automatically at dispatch and the finished work is verified against \
+them by an independent compliance judge, so never restate, paraphrase or relax them in a task \
+description - the verbatim rules always travel with the task. When a completion message \
+reports violations, remediation IS the next task; never build on non-compliant work."""
+
+
+def _dispatch_system_slots() -> tuple[str, str]:
+    """({task_system_field}, {dispatch_system_note}) for the PM prompt - ("", "") when
+    no [systems] is declared, so the rendered prompt stays byte-identical."""
+    if not SYSTEMS:
+        return "", ""
+    ids = ", ".join(
+        f"`{system_id}`" + (" [git rules]" if spec.gitflow else "")
+        for system_id, spec in SYSTEMS.items()
+    )
+    gitflow_sentence = (
+        GITFLOW_DISPATCH_SENTENCE if any(s.gitflow for s in SYSTEMS.values()) else ""
+    )
+    return ', "system": "<system_id>"', DISPATCH_SYSTEM_NOTE_TEMPLATE.format(
+        system_ids=ids, gitflow_sentence=gitflow_sentence
+    )
+
+
 # Appended to ROADMAP_GUIDANCE_TEMPLATE only when the deployment declared [[trackers]].
 # Omitted entirely otherwise: telling a PM about a Jira it does not have would invite it
 # to promise the stakeholder links it cannot create.
@@ -413,8 +453,8 @@ there, and dev tasks should never be told to create it there.
 
 {roadmap_guidance}
 - Start a dev task (returns immediately - does not wait for it to finish):
-  curl -s -X POST {tasks_base_url}{auth_header} -H "Content-Type: application/json" -d '{{"task": "<specific, actionable task description - what to build/fix and what done looks like>"}}'
-  This returns JSON like {{"id": "...", "status": "running", ...}}. Remember the id.
+  curl -s -X POST {tasks_base_url}{auth_header} -H "Content-Type: application/json" -d '{{"task": "<specific, actionable task description - what to build/fix and what done looks like>"{task_system_field}}}'
+  This returns JSON like {{"id": "...", "status": "running", ...}}. Remember the id.{dispatch_system_note}
 - Check one task's status/result:
   curl -s {tasks_base_url}/<id>{auth_header}
 - Check all tasks (e.g. if the stakeholder asks for status, or to catch up on anything that \
@@ -488,6 +528,46 @@ additional rules and knowledge for THIS deployment only. They add to everything 
 they never replace or relax it. Where they impose restrictions, follow them strictly, \
 including in every dev task description you write:
 {body}"""
+
+
+def _judge_completion_note(task: dict, at_cap: bool) -> str:
+    """The sentence(s) spliced into a task-completion prompt when the compliance judge
+    ruled on the work (see tasks.TaskRegistry._judge) - "" for unjudged tasks, which is
+    every task in a deployment without gitflow rules. A violation changes what the
+    PM's next move IS, so it's stated as the plan, not an aside; the at_cap variant
+    respects MAX_AUTO_CONTINUE_STREAK, which exists precisely so a stuck loop can't
+    keep dispatching - remediation gets described to the stakeholder instead."""
+    judge = task.get("judge") or {}
+    verdict = judge.get("verdict")
+    if verdict == "violation":
+        cited = "; ".join(
+            f"{v.get('rule') or 'unnamed rule'} (evidence: {v.get('evidence') or 'none cited'})"
+            for v in judge.get("violations", [])
+        ) or judge.get("summary", "")
+        action = (
+            "you cannot dispatch another task this turn, so spell out for the "
+            "stakeholder exactly what a remediation task must fix"
+            if at_cap
+            else "dispatch a remediation dev task to bring it back into compliance "
+            "before building anything on top of it"
+        )
+        return (
+            " The independent compliance judge checked this work against the system's "
+            f"non-negotiable git workflow rules and found VIOLATIONS: {cited}. Treat "
+            f"the work as non-compliant: tell the stakeholder plainly, and {action}."
+        )
+    if verdict == "inconclusive":
+        return (
+            " The compliance judge could not verify this work against the system's git "
+            f'workflow rules ({judge.get("summary") or "no reason recorded"}) - say so '
+            "when you report, and do not claim compliance was checked."
+        )
+    if verdict == "pass":
+        return (
+            " The independent compliance judge verified this work against the system's "
+            "git workflow rules: compliant."
+        )
+    return ""
 
 
 def _local_instructions_block() -> str:
@@ -727,9 +807,12 @@ class PMAgent:
                 for owned in owned_products
             )
 
+        task_system_field, dispatch_system_note = _dispatch_system_slots()
         self.system_prompt = PM_SYSTEM_PROMPT_TEMPLATE.format(
             tasks_base_url=self.tasks_base_url,
             session_meta_url=self.session_meta_url,
+            task_system_field=task_system_field,
+            dispatch_system_note=dispatch_system_note,
             spec_path=self.spec_path,
             project_status_path=self.project_status_path,
             project_index_path=self.project_index_path,
@@ -984,6 +1067,7 @@ class PMAgent:
             f'"{task["description"]}". Check its result via curl and tell the stakeholder what '
             "happened."
         )
+        prompt += _judge_completion_note(task, at_cap)
         if at_cap:
             prompt += (
                 " You've auto-continued several times in a row now with no stakeholder input - "

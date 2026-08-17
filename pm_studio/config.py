@@ -261,6 +261,14 @@ class SystemSpec:
     # and the pipelines that build it. Surfaced in the UI and the PM prompt; not acted on.
     guidance: str = ""
     pipelines: tuple[str, ...] = ()
+    # Repo-root-relative path to this system's NON-NEGOTIABLE git workflow rules
+    # (branching, PR targets, commit conventions...). Unlike `guidance`, this IS acted
+    # on: every dev task dispatched for this system gets the file's contents appended
+    # to its prompt verbatim at dispatch time, and an independent judge verifies the
+    # finished work against them (see tasks.py / judge.py). Kept as a path rather than
+    # inline text so the rules are versioned with the code they govern and each
+    # session's worktree reads its own branch's copy.
+    gitflow: str = ""
 
 
 @dataclass(frozen=True)
@@ -505,7 +513,7 @@ def _parse_systems(raw: dict, config_path: Path) -> dict[str, SystemSpec]:
                 f"{config_path} has [systems] entry {system_id!r} as a "
                 f"{type(value).__name__}; a system is either a label string "
                 '(claims = "Claims Processor") or a table with `label` and optional '
-                "`path`, `repo`, `guidance` and `pipelines`"
+                "`path`, `repo`, `guidance`, `gitflow` and `pipelines`"
             )
         # Systems do not nest. `parent` is meaningful in the sibling [products] table, so
         # an operator could reasonably expect it here - refuse loudly rather than accept
@@ -531,6 +539,7 @@ def _parse_systems(raw: dict, config_path: Path) -> dict[str, SystemSpec]:
             repo=str(value.get("repo", "")).strip(),
             guidance=str(value.get("guidance", "")).strip(),
             pipelines=tuple(str(p).strip() for p in pipelines if str(p).strip()),
+            gitflow=str(value.get("gitflow", "")).strip(),
         )
     return systems
 
@@ -1106,6 +1115,18 @@ def load_config(repo_root: Path | None = None) -> Config:
     # Systems first: a product declares which of them it touches, so they have to be
     # known before [products] can validate those references.
     systems = _parse_systems(raw, config_path)
+    # A `gitflow` pointing at nothing would silently mean "no rules injected" on every
+    # dev task for that system - the exact opposite of what the operator declared. Same
+    # refuse-loudly posture as every other config error. Checked against the primary
+    # checkout; worktrees branch from it, so the file exists in them too.
+    for system_id, spec in systems.items():
+        if spec.gitflow and not (root / spec.gitflow).is_file():
+            _fatal(
+                f"{config_path} declares system {system_id!r} with "
+                f"gitflow = {spec.gitflow!r}, but {root / spec.gitflow} does not exist. "
+                "The path is repo-root-relative and must point at the file holding that "
+                "system's git workflow rules."
+            )
     products, product_parents, product_systems, product_meta = _parse_products(raw, config_path, systems)
     # An id in both tables is the reclassification-in-progress state, not an error: see
     # Config.transitional_ids. Ordered by the [products] table so the report reads in the

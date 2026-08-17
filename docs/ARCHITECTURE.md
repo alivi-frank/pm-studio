@@ -2,7 +2,7 @@
 
 Complete technical spec of PM Studio (~6,100 lines of Python + 11 static HTML pages):
 the package `pm_studio/` with modules `config.py`, `models.py`, `gitsnapshot.py`,
-`roadmap.py`, `portfolio.py`, `tasks.py`, `agent.py`, `sessions.py`, `accounts.py`,
+`roadmap.py`, `portfolio.py`, `tasks.py`, `judge.py`, `agent.py`, `sessions.py`, `accounts.py`,
 `authz.py`, `costing.py`, `mailer.py`, `server.py`, `scaffold.py`, `__main__.py`, and
 `static/` (11 pages). Dependencies: `fastapi`, `uvicorn`, the `claude` CLI on PATH,
 `git` — no database, and no third-party crypto or ORM: everything is JSON files + git,
@@ -95,7 +95,7 @@ hiccup must never break a PM turn or dev task. Snapshots are repo-wide; `.gitign
   its product id — so re-parenting, at any depth, is a config edit, never a migration.
 - `SYSTEMS: dict[str, SystemSpec]` — the ordered **system** taxonomy from the `[systems]`
   table: the bounded pieces of technology a change is contained within (`label`, plus
-  optional `path`, `repo`, `guidance`, `pipelines`). Distinct from a product in kind, not
+  optional `path`, `repo`, `guidance`, `gitflow`, `pipelines`). Distinct from a product in kind, not
   in level: a product is business-facing and owns a board; a system is code and owns
   none. `PRODUCT_SYSTEMS: dict[str, tuple[str, ...]]` is the declared many-to-many edge
   from the product's side; `products_of_system()` derives the reverse rather than storing
@@ -433,19 +433,43 @@ class TaskRegistry:
     def __init__(session_id, workspace_dir, repo_root, git_lock, model=DEFAULT_MODEL)
 ```
 - Task records are JSON files at `<workspace_dir>/tasks/<id>.json`:
-  `{id: 8hex, kind: "dev"|"merge_resolution", description, status:
-  "running"|"done"|"error", started_at, finished_at, result}`.
-- `start_task(description)` — writes a `running` record, spawns a **daemon thread**,
-  returns immediately. The thread runs `_execute`, writes the final record, then (under
-  `git_lock`) snapshots: `Dev task <id> (<status>): <description[:72]>`.
-- `_execute(description)` runs:
-  `claude -p <description> --output-format json --permission-mode bypassPermissions
+  `{id: 8hex, kind: "dev"|"merge_resolution", description, system, status:
+  "running"|"done"|"error", started_at, finished_at, result, head_before, head_after,
+  judge?}`.
+- `validate_dispatch_system(system)` (module-level, called by the dispatch endpoint) —
+  once `[systems]` is declared every dev task must name a declared system (400 naming
+  the valid ids otherwise; with no `[systems]`, naming one is refused and omitting it
+  is the pre-system dispatch, byte for byte). Attribution is what routes a system's
+  `gitflow` rules into the dev agent's prompt, so it is enforced deployment-wide.
+- `start_task(description, system="")` — records `head_before` (`git rev-parse HEAD`
+  under `git_lock`), writes a `running` record, spawns a **daemon thread**, returns
+  immediately. The thread runs `_execute`, then (under `git_lock`) snapshots
+  (`Dev task <id> (<status>): <description[:72]>`) and records `head_after` — the
+  task's exact commit range — runs the compliance judge if there is anything to judge,
+  and only then writes the final record: the `done` notification (which triggers the
+  PM's auto-continue) must already carry the verdict.
+- `_execute(description, system="")` runs:
+  `claude -p <prompt> --output-format json --permission-mode bypassPermissions
   --model <self.model>` with `cwd=repo_root` (the worktree root — product sources live
   there; historically cwd=workspace_dir made agents create code inside the bookkeeping
-  folder). Timeout 1800 s. Parse stdout JSON; `result = data["result"]`;
-  `is_error = data.get("is_error") or returncode != 0`. Handle timeout /
-  CLI-not-found / empty output / non-JSON output as error results with the literal
-  evidence (stderr excerpt), never a guess.
+  folder). The prompt is the description plus, appended at dispatch time (never stored
+  in the record), `DEV_INSTRUCTIONS.md` and then — last, so they win on conflict — the
+  system's `gitflow` rules, read fresh from this worktree's copy; an unreadable rules
+  file refuses the task before any agent spend. Timeout 1800 s. Parse stdout JSON;
+  `result = data["result"]`; `is_error = data.get("is_error") or returncode != 0`.
+  Handle timeout / CLI-not-found / empty output / non-JSON output as error results with
+  the literal evidence (stderr excerpt), never a guess.
+- `_judge(...)` — nothing to judge (no system, no `gitflow`, HEAD never moved) means no
+  `judge` key at all; rules declared but no usable commit range is a visible
+  `inconclusive`, never a silent skip. Otherwise delegates to `judge.run_judge`: an
+  independent read-only agent (`--allowedTools` limited to Read/Grep/Glob and git
+  inspection subcommands, **no** bypassPermissions) that inspects
+  `head_before..head_after` against the rules file — composed entirely server-side, the
+  dev agent's own claims never shown — and returns
+  `{verdict: "pass"|"violation"|"inconclusive", violations: [{rule, evidence}], summary,
+  model, agent_usage}`. Every judge failure (timeout, bad output shape, uncited
+  violation) maps to `inconclusive` with the reason: fail loud, never fail open. Runs on
+  the cheap model tier when the deployment offers one (`judge.judge_model`).
 - `run_conflict_resolution(description)` — same `_execute`, but **synchronous**, id
   prefixed `merge-`, `kind="merge_resolution"`, and **no snapshot commit** (the merge
   flow verifies and commits or aborts explicitly).
@@ -709,10 +733,10 @@ background-thread → websocket hops via `loop.call_soon_threadsafe(asyncio.crea
 | `GET /history/{id}` | chat_history.json |
 | `GET /chat/{id}/uploads/{filename}` | attachment files (basename-sanitized) |
 | `POST /chat/{id}/reset` | archive + clear |
-| `POST /tasks/{id}` `{"task": "..."}` | dispatch dev task (immediate return) |
+| `POST /tasks/{id}` `{"task": "...", "system": "..."}` | dispatch dev task (immediate return); `system` required once `[systems]` is declared — it routes the system's `gitflow` rules into the dev agent's prompt — and refused when it isn't (400 naming the valid ids either way) |
 | `GET /tasks/{id}`, `GET /tasks/{id}/{tid}` | list / one |
 | `GET /roadmap/data` | `{products, product_parents, systems, product_systems, unattributed, items-by-product}` |
-| `GET /systems`, `GET /systems/data` | the system catalogue page and its dataset: one row per declared system (label, path, repo, guidance, pipelines, the products touching it, its change counts, whether it is mid-reclassification), plus the restructure gap. `{"declared": false}` when no `[systems]` table exists |
+| `GET /systems`, `GET /systems/data` | the system catalogue page and its dataset: one row per declared system (label, path, repo, guidance, gitflow, pipelines, the products touching it, its change counts, whether it is mid-reclassification), plus the restructure gap. `{"declared": false}` when no `[systems]` table exists |
 | `GET/POST /roadmap/{product}/items`, `PATCH/DELETE /roadmap/{product}/items/{item_id}` | board CRUD; PATCH/DELETE verify the URL product OWNS the item (this is what makes own-product-scoped allowlists safe); PATCH with `move_to_product` triggers the move flow; `start_at`/`target_at` accept `"YYYY-MM-DD"` or `""` to clear, and a malformed or inverted pair is a 400 naming the reason with nothing applied |
 | WS `/ws/chat/{id}`, `/ws/tasks/{id}`, `/ws/sessions`, `/ws/roadmap` | push channels |
 

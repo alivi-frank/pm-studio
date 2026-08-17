@@ -363,6 +363,7 @@ label    = "Rides & Logistics"
 path     = "services/rides"             # source folder, repo-root-relative
 repo     = "github.com/org/rides"       # its own repo, when it has one
 guidance = "docs/rides/GUIDANCE.md"     # declared now, acted on later
+gitflow  = "docs/rides/GITFLOW.md"      # non-negotiable git workflow rules - LIVE
 pipelines = ["rides-ci"]                # declared now, acted on later
 ```
 
@@ -370,6 +371,32 @@ pipelines = ["rides-ci"]                # declared now, acted on later
 descriptive: they are shown on the Systems page and named in the PM's prompt (so it
 knows where a change's code lives before dispatching a dev task), but nothing enforces
 or triggers them yet.
+
+`gitflow` is optional too, but it is **acted on**. It points (repo-root-relative) at a
+file of that system's non-negotiable git workflow rules — branching model, PR targets,
+commit conventions — and the file must exist, or the server refuses to start. Two
+things then happen on every dev task dispatched for the system:
+
+- **Delivery.** The file's contents are appended to the dev agent's prompt verbatim at
+  dispatch time, after (and explicitly overriding) `DEV_INSTRUCTIONS.md`, read fresh
+  from the dispatching session's own worktree — an edit to the rules applies to the
+  very next task, and a task whose rules file cannot be read is refused before any
+  agent spend rather than run without them. The PM is told the rules travel
+  automatically and never to restate or paraphrase them in a task description, so the
+  only copy that reaches a dev agent is the declared one.
+- **Verification.** After the task finishes, an independent compliance judge — a
+  read-only agent that inspects the task's exact commit range and never sees the dev
+  agent's own claims — rules `pass` / `violation` / `inconclusive` against the file.
+  The verdict lands on the task record (and its card), and the PM's auto-continue turn
+  is told about violations with instructions to dispatch a remediation task. A judge
+  that fails is a visible `inconclusive`, never a silent pass.
+
+Once `[systems]` is declared, every dev-task dispatch must name the one system whose
+code it changes (`"system"` in the POST /tasks payload) — that attribution is what
+routes the rules, so it is required deployment-wide, unlike roadmap attribution below.
+Prompt injection guarantees delivery, not obedience: branch protection and CI in each
+repo remain the hard enforcement floor, and the judge is how the studio tells you when
+they're about to be tested.
 
 **The edge is many-to-many, so systems totals never sum across products.** A system
 touched by three products would be counted three times. This is the same overlap rule
