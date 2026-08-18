@@ -108,9 +108,10 @@
        the full text is still in the open list and in the `title` tooltip. */
     text-overflow: ellipsis;
   }
-  /* The model picker holds short fixed labels - no reason to give it a share of the
-     leftover space the two long-labelled pickers can use. */
-  #new-form #new-model { flex: 0 1 auto; }
+  /* The model and mode pickers hold short fixed labels - no reason to give them a share
+     of the leftover space the two long-labelled pickers can use. */
+  #new-form #new-model,
+  #new-form #new-mode { flex: 0 1 auto; }
   /* Both badges follow .goal's one-line-with-ellipsis rule rather than wrapping. Each can
      now hold a long string - an initiative title is a phrase, and the board line lists every
      adopted board - and in the narrow column this card gives them, wrapping turned a 240px
@@ -266,6 +267,18 @@
     user-select: none;
   }
   .card.archived-row { opacity: 0.55; }
+  /* Research/strategy sessions dispatch no dev work; the pill says so at a glance.
+     Same shape as the archived flag, but in the accent - it's a capability statement,
+     not a lifecycle one. */
+  .research-flag-badge {
+    font-size: 0.72em;
+    font-weight: 600;
+    color: var(--accent);
+    background: var(--border);
+    padding: 2px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
   .archived-flag-badge {
     font-size: 0.72em;
     font-weight: 600;
@@ -296,6 +309,11 @@
       <option value="">No initiative</option>
     </select>
     <select id="new-model"></select>
+    <select id="new-mode"
+            title="Build sessions dispatch dev tasks that change code. Research / strategy sessions can't - the PM researches, specs and plans only, until you switch it to build from its chat header.">
+      <option value="build">Build</option>
+      <option value="research">Research / strategy</option>
+    </select>
     <button id="new-submit" type="submit">+ New session</button>
   </form>
   <div id="toggle-row">
@@ -313,6 +331,7 @@
   const productSelect = document.getElementById("new-product");
   const initiativeSelect = document.getElementById("new-initiative");
   const modelSelect = document.getElementById("new-model");
+  const modeSelect = document.getElementById("new-mode");
   const submitBtn = document.getElementById("new-submit");
   const showArchivedCheckbox = document.getElementById("show-archived");
   let showArchived = false;
@@ -489,6 +508,7 @@
         ${note ? `<div class="result-note"></div>` : ""}
       </a>
       <div class="actions"></div>
+      ${session.mode === "research" ? `<span class="research-flag-badge" title="Research / strategy session - no dev tasks can be dispatched from it.">Research</span>` : ""}
       ${session.archived ? `<span class="archived-flag-badge">Archived</span>` : ""}
       <span class="badge ${session.status}">${label}</span>
     `;
@@ -676,6 +696,7 @@
         product: productSelect.value,
         initiative_id: initiativeSelect.value,
         model: modelSelect.value,
+        mode: modeSelect.value,
       }),
     })
       .then((r) => r.json())

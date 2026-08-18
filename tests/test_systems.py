@@ -668,13 +668,14 @@ class SystemPromptTest(unittest.TestCase):
 
         session = dataclasses.make_dataclass(
             "StubSession",
-            ["id", "product", "initiative_id", "adopted_products", "model", "worktree_path"],
+            ["id", "product", "initiative_id", "adopted_products", "model", "mode", "worktree_path"],
         )(
             id="s1",
             product=product,
             initiative_id=None,
             adopted_products=[],
             model="claude-opus-5",
+            mode="build",
             worktree_path=str(tmp),
         )
         return agent_module.PMAgent(session, threading.Lock())

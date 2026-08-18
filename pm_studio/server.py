@@ -898,6 +898,7 @@ def create_session(request: Request, payload: dict = Body(default={})) -> dict:
     name = (payload.get("name") or "").strip() or None
     product = (payload.get("product") or "").strip() or None
     model = (payload.get("model") or "").strip() or None
+    mode = (payload.get("mode") or "").strip() or None
     project_id = _validated_project_id(payload.get("project_id"))
     initiative_id = (payload.get("initiative_id") or "").strip() or None
     initiative = None
@@ -920,7 +921,8 @@ def create_session(request: Request, payload: dict = Body(default={})) -> dict:
         name = initiative.title
     try:
         session = sessions.create(
-            name, product, model, project_id=project_id, initiative_id=initiative_id
+            name, product, model, project_id=project_id, initiative_id=initiative_id,
+            mode=mode,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -950,6 +952,23 @@ def set_session_model(session_id: str, request: Request, payload: dict = Body(..
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return session.to_dict()
+
+
+@app.post("/sessions/{session_id}/mode")
+def set_session_mode(session_id: str, request: Request, payload: dict = Body(...)) -> dict:
+    """Switches a session between build and research/strategy (see sessions.Mode), live.
+    Audited because it moves the code-execution boundary: switching to build is the
+    stakeholder deciding this session's work may now become dev dispatches. Not reachable
+    by the PM itself - its allowlist carries no curl for this URL, so graduating a
+    research session is always a human's call, never the agent's."""
+    actor = _require(request, "run_session")
+    mode = (payload.get("mode") or "").strip()
+    try:
+        session = sessions.set_mode(session_id, mode)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit(actor, "session.mode_set", session_id, mode)
+    return _public_session(session)
 
 
 @app.post("/sessions/{session_id}/meta")
@@ -2910,6 +2929,21 @@ def create_task(session_id: str, request: Request, payload: dict = Body(...)) ->
     arbitrary code on the host - agents run with bypassed permissions inside the repo.
     It is gated here, on the HTTP path, and audited by actor."""
     actor = _require(request, "dispatch_dev_task")
+    # A research/strategy session cannot dispatch, whoever asks: its PM's allowlist
+    # already omits the dispatch curl, but the allowlist only binds the PM subprocess -
+    # this is the check that binds everyone else (and any future caller). 403 with the
+    # remedy, so a refused dispatch never reads as a transient error worth retrying.
+    session = sessions.get(session_id)
+    if session is not None and session.mode == "research":
+        _audit(actor, "dev_task.refused", session_id, "research/strategy session")
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This session is in research/strategy mode - dev tasks cannot be "
+                "dispatched from it. Switch the session to build mode "
+                "(POST /sessions/{id}/mode) if this work is ready to build."
+            ),
+        )
     description = (payload.get("task") or "").strip()
     if not description:
         return {"error": "task description required"}

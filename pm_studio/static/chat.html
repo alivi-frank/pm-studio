@@ -101,7 +101,8 @@
     flex-direction: column;
     overflow: hidden;
   }
-  #model-select {
+  #model-select,
+  #mode-select {
     font: inherit;
     font-size: 0.8em;
     font-weight: 500;
@@ -112,7 +113,11 @@
     padding: 2px 6px;
     margin-left: 6px;
   }
-  #model-select:disabled { opacity: 0.6; }
+  #model-select:disabled,
+  #mode-select:disabled { opacity: 0.6; }
+  /* In research mode the pill takes the accent, so "this session can't dispatch dev
+     work" is visible from the header without opening the select. */
+  #mode-select.research { color: var(--accent); border-color: var(--accent); }
   #log {
     flex: 1;
     overflow-y: auto;
@@ -453,7 +458,10 @@
 <!-- "Sessions › this session" and the Chat / Dev lifecycle sub-tabs come from the shared
      nav; the header keeps only what acts on this session. -->
 <div id="pm-nav" data-page="chat"></div>
-<header><span id="product-badge"></span><select id="model-select" title="Claude model for this session's PM turns and dev tasks"></select> &middot; <button id="reset-btn" type="button" style="background:none;border:none;color:var(--muted);font:inherit;font-size:0.85em;cursor:pointer;padding:0;text-decoration:underline;">Reset chat</button><div id="session-goal"></div></header>
+<header><span id="product-badge"></span><select id="model-select" title="Claude model for this session's PM turns and dev tasks"></select><select id="mode-select" title="Build: the PM dispatches dev tasks that change code. Research / strategy: it can't - research, specs and planning only, until you switch it back.">
+  <option value="build">Build</option>
+  <option value="research">Research / strategy</option>
+</select> &middot; <button id="reset-btn" type="button" style="background:none;border:none;color:var(--muted);font:inherit;font-size:0.85em;cursor:pointer;padding:0;text-decoration:underline;">Reset chat</button><div id="session-goal"></div></header>
 <div id="session-strip">
   <button id="strip-summary" type="button" aria-expanded="false" title="Session lifecycle">
     <span id="strip-summary-content"></span>
@@ -496,7 +504,14 @@
   const sessionGoalEl = document.getElementById("session-goal");
   const productBadgeEl = document.getElementById("product-badge");
   const modelSelectEl = document.getElementById("model-select");
+  const modeSelectEl = document.getElementById("mode-select");
   let availableModels = null; // [{id, label}], once /models resolves
+
+  function applyMode(mode) {
+    modeSelectEl.value = mode;
+    modeSelectEl.dataset.pendingMode = mode;
+    modeSelectEl.classList.toggle("research", mode === "research");
+  }
 
   function applySessionMeta(session) {
     // The heading itself is the nav's breadcrumb now, so this only names the tab -
@@ -539,6 +554,8 @@
       modelSelectEl.dataset.pendingModel = session.model;
       populateModelSelect(session.model);
     }
+    // Sessions that predate the mode field arrive without one - they are build sessions.
+    applyMode((session && session.mode) || "build");
   }
 
   function populateModelSelect(currentModel) {
@@ -884,7 +901,11 @@
     sessionsSocket.onclose = () => setTimeout(connectSessions, RECONNECT_DELAY_MS);
     sessionsSocket.onmessage = (msg) => {
       const event = JSON.parse(msg.data);
-      if (event.session && event.session.id === sessionId) renderSessionStrip(event.session);
+      if (event.session && event.session.id === sessionId) {
+        renderSessionStrip(event.session);
+        // Mode can be flipped from another tab (or by an admin); keep the header pill live.
+        if (!modeSelectEl.disabled) applyMode(event.session.mode || "build");
+      }
     };
   }
 
@@ -914,6 +935,24 @@
       .then((session) => { modelSelectEl.dataset.pendingModel = session.model; modelSelectEl.value = session.model; })
       .catch((err) => { alert(err.message); modelSelectEl.value = previous; })
       .finally(() => { modelSelectEl.disabled = false; });
+  });
+
+  modeSelectEl.addEventListener("change", () => {
+    const chosen = modeSelectEl.value;
+    const previous = modeSelectEl.dataset.pendingMode || chosen;
+    modeSelectEl.disabled = true;
+    fetch(`/sessions/${sessionId}/mode`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: chosen }),
+    })
+      .then((r) => {
+        if (!r.ok) return r.json().then((body) => { throw new Error(body.detail ?? "mode change failed"); });
+        return r.json();
+      })
+      .then((session) => { applyMode(session.mode || "build"); })
+      .catch((err) => { alert(err.message); applyMode(previous); })
+      .finally(() => { modeSelectEl.disabled = false; });
   });
 
   let chatSocket = null;

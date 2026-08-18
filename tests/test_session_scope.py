@@ -108,16 +108,17 @@ class AgentScopeTest(unittest.TestCase):
         roadmap_module.PRODUCT_PARENTS = self._orig_parents
         self._tmp.cleanup()
 
-    def _agent(self, product=None, initiative_id=None, adopted=None):
+    def _agent(self, product=None, initiative_id=None, adopted=None, mode="build"):
         session = dataclasses.make_dataclass(
             "StubSession",
-            ["id", "product", "initiative_id", "adopted_products", "model", "worktree_path"],
+            ["id", "product", "initiative_id", "adopted_products", "model", "mode", "worktree_path"],
         )(
             id="s1",
             product=product,
             initiative_id=initiative_id,
             adopted_products=list(adopted or []),
             model="claude-opus-5",
+            mode=mode,
             worktree_path=str(self.tmp),
         )
         return agent_module.PMAgent(session, threading.Lock())

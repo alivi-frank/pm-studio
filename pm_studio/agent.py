@@ -388,13 +388,22 @@ guidance below says about your own board applies to each of them. Every other pr
 digest-only - suggest, don't edit."""
 
 
-PM_SYSTEM_PROMPT_TEMPLATE = """You are the Product Manager for a software product being built for a single \
-stakeholder (the person chatting with you). You represent them to the engineering process: you \
+# The {mission} + {operating_model} slots of PM_SYSTEM_PROMPT_TEMPLATE, per session mode
+# (see sessions.Mode). The build pair is today's prompt verbatim; the research pair is
+# the behavioral half of research mode - the enforcement half is the allowlist built
+# alongside it in _refresh_scope (no dispatch curl) and server.py's 403 on POST /tasks.
+
+BUILD_MISSION = """You represent them to the engineering process: you \
 turn their goals into a clear spec, hand off implementation work, check the results, and only \
 surface back to the stakeholder when you have something to show them or need a decision only they \
-can make.
+can make."""
 
-Dev work runs in the background - dispatching it does not block you, so keep talking to the \
+RESEARCH_MISSION = """You represent them to the engineering process: in this session you turn \
+their goals into research, strategy, and a clear spec - sharpening scope, weighing options, and \
+deciding what is worth building - and you surface back to the stakeholder when you have findings \
+to show or need a decision only they can make."""
+
+BUILD_OPERATING_MODEL = """Dev work runs in the background - dispatching it does not block you, so keep talking to the \
 stakeholder while it runs rather than waiting on it. You have Write, Read, WebSearch, WebFetch, \
 and two Bash command patterns (do not attempt any other bash command). Use WebSearch/WebFetch to \
 research the market, competitors, vendors, code/regulatory requirements, and technical approaches \
@@ -422,7 +431,37 @@ with a bracketed block naming it and summarizing what it's currently running or 
 read it before you dispatch anything. If what you're about to start overlaps with what's in that \
 block, do not dispatch it: tell the stakeholder about the overlap and ask how to proceed (let the \
 other session own it, wait for it to land and sync first, or explicitly diverge) instead of \
-duplicating work you can see is already happening.
+duplicating work you can see is already happening."""
+
+RESEARCH_OPERATING_MODEL = """This is a RESEARCH / STRATEGY session: you cannot dispatch dev tasks, and no product code gets \
+written or changed from it. There is no dev-task command on your allowlist, and the server \
+refuses dispatch for this session no matter how it's asked - a property of the session, not a \
+permission you can request mid-conversation. So never tell the stakeholder you will "kick off", \
+"queue", or "hand off" implementation from here, and never write or edit product source code \
+yourself with your Write tool - Write is for the spec, research docs, and PM bookkeeping only. \
+You have Write, Read, WebSearch, WebFetch, and a small set of literal Bash curl commands (do not \
+attempt any other bash command). Use WebSearch/WebFetch to research the market, competitors, \
+vendors, code/regulatory requirements, and technical approaches, and Read to study the existing \
+code and docs - fold findings into the spec or a research doc in the workspace rather than just \
+reporting them back conversationally.
+
+When a slice of work becomes concrete enough to build, capture it instead of starting it: write \
+it into the spec (and onto the roadmap, if you have a board) as ready-to-build, and tell the \
+stakeholder plainly that it's waiting on a build session - they can switch this session to build \
+mode from the UI, or hand it to another session, when they decide it's time. Until they do, \
+"ready to build" is a finding to report, never a task to start.
+
+Other PM sessions may be active against this same repo at the same time; when one is, a turn \
+will open with a bracketed block naming it and summarizing what it's running or just finished. \
+You dispatch nothing from here, so you can't duplicate dev work - but read the block anyway and \
+fold what's already being built into your research and recommendations rather than proposing it \
+from scratch."""
+
+
+PM_SYSTEM_PROMPT_TEMPLATE = """You are the Product Manager for a software product being built for a single \
+stakeholder (the person chatting with you). {mission}
+
+{operating_model}
 
 You work with three kinds of documents, and they serve different purposes - don't confuse them:
 - {project_index_path}: the master map of every document in the project, at the repo root. \
@@ -452,10 +491,7 @@ Your own working files (spec, chat history, task records, uploads) live under \
 there, and dev tasks should never be told to create it there.
 
 {roadmap_guidance}
-- Start a dev task (returns immediately - does not wait for it to finish):
-  curl -s -X POST {tasks_base_url}{auth_header} -H "Content-Type: application/json" -d '{{"task": "<specific, actionable task description - what to build/fix and what done looks like>"{task_system_field}}}'
-  This returns JSON like {{"id": "...", "status": "running", ...}}. Remember the id.{dispatch_system_note}
-- Check one task's status/result:
+{dispatch_curls}- Check one task's status/result:
   curl -s {tasks_base_url}/<id>{auth_header}
 - Check all tasks (e.g. if the stakeholder asks for status, or to catch up on anything that \
 finished since you last checked):
@@ -494,7 +530,24 @@ each time it changes - keep it current as understanding evolves. Whenever someth
 happens - a slice ships, a decision gets made, direction changes - also rewrite the FULL content \
 of {project_status_path} with your Write tool so it reflects current reality. Keep it a compact, \
 high-signal summary (what's built, what's decided, what's open) rather than a full history dump.
-3. Once a slice of the spec is concrete enough to build, check this turn's other-active-sessions \
+{loop_steps}
+
+Keep replies to the stakeholder conversational and concise. Do not narrate internal tool mechanics \
+to them - summarize outcomes in plain language.{local_instructions}"""
+
+
+# The {dispatch_curls} + {loop_steps} slots, per session mode - split out of the template
+# the same way, so a research session's prompt never even shows it the dispatch command
+# its allowlist would refuse. The read-task curls stay in the shared template for both
+# modes: a session switched to research mid-life still has task records worth reading,
+# and reading is not the boundary.
+
+BUILD_DISPATCH_CURLS_TEMPLATE = """- Start a dev task (returns immediately - does not wait for it to finish):
+  curl -s -X POST {tasks_base_url}{auth_header} -H "Content-Type: application/json" -d '{{"task": "<specific, actionable task description - what to build/fix and what done looks like>"{task_system_field}}}'
+  This returns JSON like {{"id": "...", "status": "running", ...}}. Remember the id.{dispatch_system_note}
+"""
+
+BUILD_LOOP_STEPS = """3. Once a slice of the spec is concrete enough to build, check this turn's other-active-sessions \
 block (if present - see above) for overlap, then start a dev task for it (above), tell the \
 stakeholder briefly that you've kicked it off, and move on - don't wait for it in this turn.
 4. When a task finishes (this turn, or the auto-invocation you get the instant it completes - see \
@@ -510,10 +563,16 @@ burning a third attempt blind. If "status" is "running", it's still working - ju
 asked.
 5. Only ask the stakeholder something when it's genuinely their call: scope tradeoffs, ambiguous \
 product decisions, or confirming a milestone is done. This is the only thing that should make you \
-stop the autonomous loop in step 4 short of the goal being done or the safety limit kicking in.
+stop the autonomous loop in step 4 short of the goal being done or the safety limit kicking in."""
 
-Keep replies to the stakeholder conversational and concise. Do not narrate internal tool mechanics \
-to them - summarize outcomes in plain language.{local_instructions}"""
+RESEARCH_LOOP_STEPS = """3. When a slice becomes concrete enough to build, do NOT try to start it - you can't from this \
+session. Record it in the spec (and on the roadmap, if you have a board) as ready to build, tell \
+the stakeholder it's waiting on a build session, and move on to the next open question.
+4. Keep the research moving on your own: study the code and docs, run the market/technical \
+research, and write findings into the spec and docs/ as you go, rather than stopping to narrate \
+every finding conversationally.
+5. Only ask the stakeholder something when it's genuinely their call: scope tradeoffs, ambiguous \
+product decisions, or whether a proposal is ready to graduate to a build session."""
 
 
 # Wraps the deployment's own PM_INSTRUCTIONS.md / knowledge listing when present.
@@ -605,6 +664,11 @@ class PMAgent:
         self.initiative_id = session.initiative_id
         self.adopted_products = list(session.adopted_products)
         self.model = session.model
+        # build vs research (see sessions.Mode) - like initiative/adopted_products it can
+        # change over the session's life, and the prompt and allowlist derived from it are
+        # rebuilt when it does (set_mode), because dispatch authority is exactly the kind
+        # of thing those two must never disagree about.
+        self.mode = session.mode
         self.repo_root = Path(session.worktree_path)
         # workspace_rel, not the primary checkout's absolute workspace_dir: this
         # session's workspace lives inside its OWN worktree.
@@ -807,12 +871,33 @@ class PMAgent:
                 for owned in owned_products
             )
 
-        task_system_field, dispatch_system_note = _dispatch_system_slots()
+        # The mode slots: research swaps the mission/operating-model paragraphs and the
+        # loop tail, and drops the dispatch curl from the prompt entirely - the allowlist
+        # below drops it in the same breath, so the PM is never shown a command it would
+        # be refused (or refused a command it was shown).
+        if self.mode == "research":
+            mission = RESEARCH_MISSION
+            operating_model = RESEARCH_OPERATING_MODEL
+            dispatch_curls = ""
+            loop_steps = RESEARCH_LOOP_STEPS
+        else:
+            task_system_field, dispatch_system_note = _dispatch_system_slots()
+            mission = BUILD_MISSION
+            operating_model = BUILD_OPERATING_MODEL
+            dispatch_curls = BUILD_DISPATCH_CURLS_TEMPLATE.format(
+                tasks_base_url=self.tasks_base_url,
+                auth_header=agent_auth_header(),
+                task_system_field=task_system_field,
+                dispatch_system_note=dispatch_system_note,
+            )
+            loop_steps = BUILD_LOOP_STEPS
         self.system_prompt = PM_SYSTEM_PROMPT_TEMPLATE.format(
+            mission=mission,
+            operating_model=operating_model,
+            dispatch_curls=dispatch_curls,
+            loop_steps=loop_steps,
             tasks_base_url=self.tasks_base_url,
             session_meta_url=self.session_meta_url,
-            task_system_field=task_system_field,
-            dispatch_system_note=dispatch_system_note,
             spec_path=self.spec_path,
             project_status_path=self.project_status_path,
             project_index_path=self.project_index_path,
@@ -830,8 +915,16 @@ class PMAgent:
         scope_tool = (
             f"Bash(curl -s -X POST {self.scope_url}*) " if self.initiative_id else ""
         )
+        # The enforcement half of research mode: no dispatch entry, so launching a dev
+        # task is structurally impossible for this PM - the same mechanism that scopes
+        # roadmap PATCHes to owned boards. Reading task records stays granted in both
+        # modes (a session switched to research keeps its history inspectable).
+        dispatch_tool = (
+            "" if self.mode == "research"
+            else f"Bash(curl -s -X POST {self.tasks_base_url}*) "
+        )
         self.allowed_tools = (
-            f"Bash(curl -s -X POST {self.tasks_base_url}*) "
+            f"{dispatch_tool}"
             f"Bash(curl -s {self.tasks_base_url}*) "
             f"Bash(curl -s -X POST {self.session_meta_url}*) "
             f"{scope_tool}"
@@ -870,6 +963,13 @@ class PMAgent:
         """Live update, called by SessionManager.set_model - takes effect on the
         very next turn since _run_pm_turn reads self.model fresh each call."""
         self.model = model
+
+    def set_mode(self, mode: str) -> None:
+        """Live update, called by SessionManager.set_mode. Rebuilds the prompt and the
+        allowlist together (see _refresh_scope); like set_scope, it takes effect on the
+        NEXT turn - a turn already running was launched with the old --allowedTools."""
+        self.mode = mode
+        self._refresh_scope()
 
     def _ensure_project_status_seed(self) -> None:
         """Guarantees {project_status_path} exists so the system prompt's Read \
@@ -1068,7 +1168,16 @@ class PMAgent:
             "happened."
         )
         prompt += _judge_completion_note(task, at_cap)
-        if at_cap:
+        if self.mode == "research":
+            # A task can only be running here if it was dispatched before the session was
+            # switched to research - so the standard "start the next task" continuation
+            # would be an instruction to do the one thing this session can no longer do.
+            prompt += (
+                " This session has since been switched to research/strategy mode: you "
+                "cannot dispatch any follow-up dev task. Report the outcome, record what "
+                "it means for the plan, and leave any next build step to the stakeholder.]"
+            )
+        elif at_cap:
             prompt += (
                 " You've auto-continued several times in a row now with no stakeholder input - "
                 "do NOT dispatch another task this turn. Summarize where things stand and ask the "
@@ -1092,22 +1201,34 @@ class PMAgent:
             commit_message=f'PM auto-continue after dev task {task["id"]} ({task["status"]})',
         )
 
-    @staticmethod
-    def _with_session_context(prompt_text: str, other_sessions_context: str) -> str:
+    def _with_session_context(self, prompt_text: str, other_sessions_context: str) -> str:
         """Prepends a live snapshot of other active sessions' work, when there is any -
         see sessions.py's describe_other_active_sessions. Kept out of the persisted chat
         history (only prompt_text, never history_text, carries it): it's per-turn plumbing
-        the stakeholder doesn't need to read, not something they said or the PM decided."""
+        the stakeholder doesn't need to read, not something they said or the PM decided.
+
+        Instance method, not static, because what the PM should DO with the snapshot is
+        mode-dependent: a build session is warned off duplicate dispatch, a research
+        session (which cannot dispatch at all) is told to fold it into its findings."""
         if not other_sessions_context:
             return prompt_text
-        return (
-            "[Other PM sessions active right now, each its own git worktree/branch off "
-            "this same repo, invisible to you unless told here - before dispatching any "
-            "new dev task this turn, check whether it overlaps with something already "
-            "running or just finished below. If it does, don't duplicate it: tell the "
-            "stakeholder about the overlap and ask how to proceed instead of dispatching.\n"
-            f"{other_sessions_context}\n]\n\n{prompt_text}"
-        )
+        if self.mode == "research":
+            instruction = (
+                "[Other PM sessions active right now, each its own git worktree/branch off "
+                "this same repo, invisible to you unless told here - you can't dispatch dev "
+                "work from this research session, but fold what's already running or just "
+                "finished below into your research and recommendations rather than proposing "
+                "it from scratch.\n"
+            )
+        else:
+            instruction = (
+                "[Other PM sessions active right now, each its own git worktree/branch off "
+                "this same repo, invisible to you unless told here - before dispatching any "
+                "new dev task this turn, check whether it overlaps with something already "
+                "running or just finished below. If it does, don't duplicate it: tell the "
+                "stakeholder about the overlap and ask how to proceed instead of dispatching.\n"
+            )
+        return instruction + f"{other_sessions_context}\n]\n\n{prompt_text}"
 
     @staticmethod
     def _with_roadmap_context(prompt_text: str, roadmap_context: str) -> str:

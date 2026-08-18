@@ -24,6 +24,27 @@ DEFAULT_SESSION_ID = "default"
 
 Status = Literal["active", "merging", "merged", "conflict", "archived"]
 
+# What a session is FOR - which is a different axis from every other field on it:
+#
+#   build    -> today's behavior: the PM specs work and dispatches dev tasks to build it.
+#   research -> ideation / strategy / planning only: the PM researches, writes specs and
+#               docs, and works the roadmap, but CANNOT dispatch dev tasks - no product
+#               code gets written or changed from this session until the stakeholder
+#               switches it to build.
+#
+# Enforced structurally, not by asking nicely: agent.py omits the dev-task dispatch curl
+# from a research session's Bash allowlist (and tells the PM so), and server.py's
+# POST /tasks/{session_id} refuses with a 403 regardless of who asks - the same
+# belt-and-suspenders pairing that scopes roadmap writes.
+Mode = Literal["build", "research"]
+MODES: tuple[str, ...] = ("build", "research")
+
+
+def validate_mode(mode: str) -> str:
+    if mode not in MODES:
+        raise ValueError(f"Unknown session mode: {mode!r} (valid: {', '.join(MODES)})")
+    return mode
+
 # git status --porcelain codes for unmerged (conflicted) paths.
 _UNMERGED_CODES = ("UU ", "AA ", "DD ", "AU ", "UA ", "UD ", "DU ")
 
@@ -59,6 +80,12 @@ class Session:
     # on. Defaults to Opus so pre-existing sessions.json records with no "model" key
     # (written before this field existed) keep today's behavior unchanged.
     model: str = DEFAULT_MODEL
+    # What this session is for - "build" or "research" (see Mode above). Defaults to
+    # "build" so pre-existing sessions.json records load unchanged with today's behavior;
+    # live-switchable via SessionManager.set_mode, because ideation regularly graduates
+    # into building (and a build session sometimes needs to be parked back into
+    # research while a decision is pending).
+    mode: str = "build"
     # Self-updating identity the PM maintains itself over the conversation (see
     # agent.py's session_meta curl + SessionManager.set_meta), the way claude.ai
     # auto-titles a chat: `title` is a ~2-5 word abbreviation shown as the session's
@@ -170,6 +197,10 @@ class SessionManager:
                 # the dataclass field above - just persist that default explicitly so
                 # sessions.json stops being silently stale about it.
                 if "model" not in data:
+                    dirty = True
+                # Same migration posture for `mode`: pre-existing records are build
+                # sessions, persisted explicitly on first load.
+                if "mode" not in data:
                     dirty = True
 
         if DEFAULT_SESSION_ID not in self._sessions:
@@ -327,10 +358,12 @@ class SessionManager:
         model: str | None = None,
         project_id: str | None = None,
         initiative_id: str | None = None,
+        mode: str | None = None,
     ) -> Session:
         if product is not None and product not in PRODUCTS:
             raise ValueError(f"Unknown product: {product}")
         model = validate_model(model) if model is not None else DEFAULT_MODEL
+        mode = validate_mode(mode) if mode is not None else "build"
         with self._registry_lock:
             session_id = uuid.uuid4().hex[:8]
             branch = f"session/{session_id}"
@@ -353,6 +386,7 @@ class SessionManager:
                 is_default=False,
                 product=product,
                 model=model,
+                mode=mode,
                 project_id=project_id,
                 initiative_id=initiative_id,
             )
@@ -840,6 +874,25 @@ class SessionManager:
             if runtime is not None:
                 runtime.pm_agent.set_model(model)
                 runtime.task_registry.model = model
+            self._save()
+        self._broadcast({"type": "session_updated", "session": session.to_dict()})
+        return session
+
+    # ---- mode (build vs research, live-updatable) ----
+
+    def set_mode(self, session_id: str, mode: str) -> Session:
+        """Switches a session between build and research (see Mode), effective on the
+        very next PM turn - like a scope change, this rebuilds the live PMAgent's
+        system prompt and Bash allowlist together, so what the PM is told and what it
+        can actually do never disagree. The server-side dispatch refusal reads the
+        persisted session directly, so it flips at the same moment."""
+        validate_mode(mode)
+        with self._registry_lock:
+            session = self._require(session_id)
+            session.mode = mode
+            runtime = self.runtimes.get(session_id)
+            if runtime is not None:
+                runtime.pm_agent.set_mode(mode)
             self._save()
         self._broadcast({"type": "session_updated", "session": session.to_dict()})
         return session

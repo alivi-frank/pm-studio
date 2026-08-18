@@ -121,8 +121,8 @@ class ProductFactsPromptTest(unittest.TestCase):
     def _agent(self, tmp: Path):
         session = dataclasses.make_dataclass(
             "StubSession",
-            ["id", "product", "initiative_id", "adopted_products", "model", "worktree_path"],
-        )("s1", "checkout", None, [], "claude-opus-5", str(tmp))
+            ["id", "product", "initiative_id", "adopted_products", "model", "mode", "worktree_path"],
+        )("s1", "checkout", None, [], "claude-opus-5", "build", str(tmp))
         return agent_module.PMAgent(session, threading.Lock())
 
     def test_declared_facts_reach_the_prompt(self) -> None:

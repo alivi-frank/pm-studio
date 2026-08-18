@@ -385,13 +385,14 @@ class OwnedBoardsTest(unittest.TestCase):
         __init__ reads are needed, so a stub session keeps this off the session store."""
         session = dataclasses.make_dataclass(
             "StubSession",
-            ["id", "product", "initiative_id", "adopted_products", "model", "worktree_path"],
+            ["id", "product", "initiative_id", "adopted_products", "model", "mode", "worktree_path"],
         )(
             id="s1",
             product=product,
             initiative_id=None,
             adopted_products=[],
             model="claude-opus-5",
+            mode="build",
             worktree_path=str(tmp),
         )
         import threading
