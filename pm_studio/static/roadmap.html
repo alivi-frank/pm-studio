@@ -1200,9 +1200,17 @@
   /* The push section: visually a separate offer from the search results above it, since
      it does something different in kind - creating a ticket rather than pointing at one. */
   #picker-push {
-    margin-top: 12px;
-    padding-top: 12px;
-    border-top: 1px solid var(--border);
+    margin-bottom: 14px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  /* A chip that does something. The board's chips are overwhelmingly labels, so the one
+     that is a control has to look like one rather than relying on the cursor alone. */
+  .chip.clickable { cursor: pointer; }
+  .chip.warn.clickable:hover,
+  .chip.warn.clickable:focus-visible {
+    border-color: currentColor;
+    text-decoration: underline;
   }
   #picker-push .push-lead { font-size: 0.82em; color: var(--ink-muted); margin-bottom: 8px; }
   #picker-push .push-fields { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }
@@ -1267,12 +1275,14 @@
   <div class="sheet">
     <h2 id="picker-title">Link a ticket</h2>
     <p class="sub" id="picker-sub"></p>
+    <!-- Above the search on purpose: this dialog is reached from "not in tracker", where
+         the likely answer is that the ticket does not exist yet - so creating leads and
+         linking an existing one is the alternative below. Hidden unless a tracker
+         declares a push target and the target has no ticket - see renderPushSection. -->
+    <div id="picker-push" class="hidden"></div>
     <input id="picker-input" type="text" autocomplete="off"
            placeholder="Search synced tickets, or paste a ticket URL / key" />
     <div id="picker-results"></div>
-    <!-- The create-it-instead half of this dialog. Hidden unless a tracker declares a
-         push target and the thing being linked has no ticket yet - see renderPushSection. -->
-    <div id="picker-push" class="hidden"></div>
     <div id="picker-note"></div>
     <div class="sheet-actions">
       <button type="button" class="ghost" id="picker-unlink">Unlink</button>
@@ -1769,23 +1779,45 @@
       return badge;
     }
     if (project.is_catch_all || project.catch_all_for_initiative) return null;
+    return notInTrackerChip("epic", () => openEpicPicker(project));
+  }
+
+  /* "not in tracker" - the one affordance for anything that exists only here, whether a
+     change or a project. It lives in the always-visible header rather than behind an
+     expand, because "this work has no ticket" is a fact about the item worth seeing at a
+     glance, and the action that fixes it should be where the fact is.
+
+     Clicking it opens the link-or-create dialog, which is where BOTH answers live: the
+     ticket may already exist and need linking, or it may not exist and need creating. One
+     chip rather than one chip plus a Push button, so there is a single place to look. */
+  function notInTrackerChip(rung, open) {
     const pending = chip("not in tracker", "warn");
+    pending.classList.add("clickable");
     pending.title = pushTrackers().length
-      ? "Only exists here so far. Click to create its epic in the tracker, or to link\n" +
-        "the one that already exists there."
-      : "Created locally — no tracker here is set up to create it.\n" +
-        "If the epic already exists there, click to link it.";
+      ? `Only exists here so far. Click to create the ${rung} in the tracker,\n` +
+        "or to link the one that already exists there."
+      : `Only exists here — no tracker here is set up to create it.\n` +
+        `If the ${rung} already exists there, click to link it.`;
     pending.setAttribute("role", "button");
     pending.tabIndex = 0;
-    const open = (event) => {
+    const go = (event) => {
       event.stopPropagation();
-      openEpicPicker(project);
+      open();
     };
-    pending.addEventListener("click", open);
+    pending.addEventListener("click", go);
     pending.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(event); }
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); go(event); }
     });
     return pending;
+  }
+
+  /* The tracker rung for a CHANGE, in its two states - deliberately the same shape
+     projectEpicNode gives a project, so both say the same thing the same way. Null only
+     when there is no tracker to be absent from. */
+  function itemTicketNode(item, compact) {
+    if (item.ticket) return ticketBadge(item.ticket, compact);
+    if (!TRACKERS.configured) return null;
+    return notInTrackerChip("ticket", () => openTicketPicker(item));
   }
 
   // ---- the change, in its two shapes ----
@@ -2065,19 +2097,9 @@
         : "Link this change to one Jira or Azure DevOps ticket";
       ticketBtn.addEventListener("click", () => openTicketPicker(item));
       row.appendChild(ticketBtn);
-
-      /* One-click push, for the common case this feature exists for: a change planned
-         here that has no ticket anywhere. Shown only when a tracker actually declares a
-         push target AND the change is unlinked - a linked change has nothing to create,
-         and the endpoint would 409. The picker's own push section (see openPicker) is
-         where a different project or issue type gets chosen. */
-      if (!item.ticket && pushTrackers().length) {
-        const pushBtn = el("button", null, "Push");
-        pushBtn.type = "button";
-        pushBtn.title = pushButtonTitle(item);
-        pushBtn.addEventListener("click", () => confirmAndPush(pushBtn, item));
-        row.appendChild(pushBtn);
-      }
+      // No Push button here on purpose: pushing hangs off the "not in tracker" chip in
+      // the card header (see itemTicketNode), where the absence it fixes is stated.
+      // A second entry point buried behind the expand is what this replaced.
     }
 
     const del = el("button", "del", "Delete");
@@ -2107,7 +2129,10 @@
     // nested inside one - a link inside a button is neither reliably clickable nor valid.
     const meta = el("div", "card-meta");
     for (const node of metaChips(item, omit)) meta.appendChild(node);
-    if (item.ticket) meta.appendChild(ticketBadge(item.ticket, true));
+    // Linked: the badge. Unlinked: "not in tracker", which is also the push affordance -
+    // see itemTicketNode. Either way it is here, in the header, not behind the expand.
+    const ticketNode = itemTicketNode(item, true);
+    if (ticketNode) meta.appendChild(ticketNode);
     card.appendChild(meta);
 
     /* Built on first open. itemControls is the single most expensive thing the board
@@ -3508,7 +3533,8 @@
         if (item.description) detail.appendChild(el("div", "desc", item.description));
         const chips = el("div", "card-meta");
         for (const node of metaChips(item, omit)) chips.appendChild(node);
-        if (item.ticket) chips.appendChild(ticketBadge(item.ticket, false));
+        const timelineTicket = itemTicketNode(item, false);
+        if (timelineTicket) chips.appendChild(timelineTicket);
         detail.appendChild(chips);
         detail.appendChild(itemControls(item));
       });
@@ -3922,53 +3948,16 @@
      article has to be chosen rather than written into the sentence. */
   const article = (word) => (/^[aeiou]/i.test(word || "") ? "an" : "a");
 
-  /* What one click will do, spelled out - the button is an outward-facing write, so the
-     tooltip names the board and the type before anyone presses it rather than after. */
-  function pushButtonTitle(item) {
-    const targets = pushTrackers();
-    if (targets.length !== 1) {
-      return "Create this change as a ticket — you'll choose which tracker";
-    }
-    const t = targets[0];
-    const parent = pushParentKey(item, t.id);
-    return (
-      `Create "${item.title}" in ${t.label} as ${article(t.push.change_type)} ` +
-      `${t.push.change_type} in ${t.push.project}, and link it here` +
-      (parent ? `\nIt will hang under ${parent}, its project's epic.` : "")
-    );
-  }
-
   /* The epic a pushed change will land under, mirroring server._parent_epic_for so the
-     confirmation says the same thing the server will do. Empty unless the change's
-     project is linked to an epic IN THE TRACKER being pushed to. */
+     dialog promises exactly what the server will do. Empty unless the change's project
+     is linked to an epic IN THE TRACKER being pushed to. */
   function pushParentKey(item, trackerId) {
     const project = item.project_id ? PROJECTS_BY_ID[item.project_id] : null;
     if (!project || !project.ticket || project.tracker_id !== trackerId) return "";
     return project.ticket.key || "";
   }
 
-  function confirmAndPush(button, item) {
-    const targets = pushTrackers();
-    if (targets.length !== 1) {
-      // Ambiguous target: the picker's push section is where the tracker gets chosen,
-      // and the server refuses a guess for the same reason.
-      openTicketPicker(item);
-      return;
-    }
-    const t = targets[0];
-    const parent = pushParentKey(item, t.id);
-    const ok = confirm(
-      `Create ${article(t.push.change_type)} ${t.push.change_type} in ${t.label} ` +
-      `(${t.push.project}) for:\n\n` +
-      `${item.title}\n\n` +
-      (parent ? `It will hang under ${parent}, its project's epic.\n` : "") +
-      "This creates a real ticket on that board and links it to this change."
-    );
-    if (!ok) return;
-    runPush(button, `/roadmap/${item.product}/items/${item.id}/push`, { tracker_id: t.id });
-  }
-
-  /* The one place a push is actually sent, shared by the row button and the picker.
+  /* The one place a push is actually sent, shared by both dialogs.
      `button` is disabled for the duration: a push is not idempotent, and a double-click
      that created two tickets would be this feature's worst failure. */
   function runPush(button, url, payload, onDone) {
@@ -4023,6 +4012,10 @@
   let searchTimer = null;
 
   function openTicketPicker(item) {
+    // "Create or link" only where creating is actually possible - a read-only deployment
+    // gets the plain "Link a ticket" it had before push existed, rather than a heading
+    // offering an option its dialog does not contain.
+    const canCreate = pushTrackers().length > 0;
     openPicker({
       kind: "item",
       title: item.title,
@@ -4031,10 +4024,13 @@
       item,
       ticket: item.ticket,
       url: `/roadmap/${item.product}/items/${item.id}`,
-      heading: item.ticket ? "Link a ticket" : "Link or create a ticket",
+      heading: item.ticket || !canCreate ? "Link a ticket" : "Create or link a ticket",
       sub: item.ticket
         ? `"${item.title}" is linked to ${item.ticket.key}. Pick another ticket to move the link, or unlink it.`
-        : `Link "${item.title}" to one ticket. A ticket can belong to one change only.`,
+        : canCreate
+          ? `"${item.title}" has no ticket. Create one below, or link the ticket that `
+            + "already exists — a ticket can belong to one change only."
+          : `Link "${item.title}" to one ticket. A ticket can belong to one change only.`,
     });
   }
 
@@ -4049,7 +4045,7 @@
       // Only epic-level tickets are offered (and accepted server-side): a project is
       // what an epic is in the tracker's own hierarchy.
       type: "epic",
-      heading: project.ticket ? "Link an epic" : "Link or create an epic",
+      heading: project.ticket || !canPush ? "Link an epic" : "Create or link an epic",
       sub: project.ticket
         ? `"${project.title}" is tracked as ${project.ticket.key}. Pick another epic to move the link, or unlink it.`
         : canPush
@@ -4095,8 +4091,8 @@
     const isEpic = target.kind === "project";
     section.appendChild(el("div", "push-lead",
       isEpic
-        ? "Not in the tracker yet? Create the epic and link it in one step."
-        : "Not in the tracker yet? Create the ticket and link it in one step."));
+        ? "Create the epic in the tracker and link it, in one step:"
+        : "Create the ticket in the tracker and link it, in one step:"));
 
     const fields = el("div", "push-fields");
     const trackerSelect = el("select");
@@ -4152,6 +4148,16 @@
         pickerNote.classList.add("error");
         return;
       }
+      const t = targets.find((x) => x.id === trackerSelect.value) || targets[0];
+      const parent = isEpic ? "" : pushParentKey(target.item || {}, t.id);
+      // Confirmed, not just clicked: this files a real ticket on a board other people
+      // work from, and it cannot be undone from here - PM Studio never deletes upstream.
+      if (!confirm(
+        `Create ${article(type)} ${type} in ${t.label} (${projectSelect.value}) for:\n\n` +
+        `${target.title}\n\n` +
+        (parent ? `It will hang under ${parent}, its project's epic.\n` : "") +
+        "This creates a real ticket on that board and links it here."
+      )) return;
       pickerNote.textContent = "";
       pickerNote.classList.remove("error");
       runPush(
