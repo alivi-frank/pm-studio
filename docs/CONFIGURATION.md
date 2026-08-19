@@ -154,6 +154,13 @@ email = "pm@acme.com"            # Jira Cloud authenticates as email + API token
 token_env = "PM_STUDIO_JIRA_TOKEN"
 sync_interval_minutes = 15       # default 15, floor 1
 
+# Optional: lets PM Studio CREATE tickets in this tracker (see "Pushing tickets").
+# Omit and the connection stays read-only, exactly as it was before push existed.
+[trackers.push]
+project = "PROJ"                 # where new tickets are created; must be in `projects`
+change_type = "Story"            # default "Story" — a roadmap change becomes one of these
+epic_type = "Epic"               # default "Epic" — a project becomes one of these
+
 [[trackers]]
 id = "ado"
 provider = "ado"
@@ -223,7 +230,8 @@ After each sync, every catalog ticket whose type is in `import_types` and whose
 component matches a route becomes a change on the routed product — `later` bucket,
 status mapped from the ticket's state category, linked to its ticket in the same call.
 The 1:1 link is the dedupe: re-syncs and restarts never double-import, and a manually
-linked ticket is never re-imported. Nothing is ever written back to the tracker.
+linked ticket is never re-imported. The import pass itself never writes to the tracker —
+creating a ticket only ever happens when someone presses Push (see below).
 
 Tickets resolved as **won't-do** are never imported — not as changes and not as
 projects. Jira files "Won't Do" under the Done status category, so without this the
@@ -681,9 +689,10 @@ The badge always shows the tracker's **own** name for the type, so a team that r
 Story to Deliverable sees "Deliverable", and an unrecognised custom type gets a neutral
 colour rather than a wrong one. Colour is never the only signal.
 
-**Nothing is written back.** The sync is read-only: PM Studio never changes a ticket's
-type, state or anything else in Jira or ADO. The board's own bucket/status stays
-independent, on purpose.
+**A ticket is never updated.** The sync is read-only, and so is everything after it: PM
+Studio never changes a ticket's type, state, title or anything else in Jira or ADO. The
+board's own bucket/status stays independent, on purpose. The single exception is
+**creating** a ticket, which only happens when someone presses Push — see below.
 
 **Credentials and cached data.** Tokens are read from the environment via `token_env`
 (filled from the git-ignored root `.env` if you keep it there), are only ever sent in an
@@ -693,6 +702,81 @@ cache at `<workspace>/trackers.json` holds ticket titles from your tracker, so i
 treated like the other credential-bearing state: gitignored *and* unstaged from every
 snapshot unconditionally (see `gitsnapshot.SENSITIVE_WORKSPACE_FILES`). Deleting it
 costs one sync.
+
+## Pushing tickets to a tracker
+
+The write half of a tracker connection: a change you planned in PM Studio becomes a real
+ticket on the board, linked to the change in the same step. It is the inverse of import
+routing — import takes a ticket that exists and makes a change, push takes a change and
+makes the ticket.
+
+**Opt-in, per tracker.** Add a `[trackers.push]` table:
+
+```toml
+[[trackers]]
+provider = "jira"
+projects = ["PROJ", "PLAT"]
+# ... connection keys ...
+
+[trackers.push]
+project = "PROJ"        # required — where new tickets are created
+change_type = "Story"   # default "Story"
+epic_type = "Epic"      # default "Epic"
+```
+
+With no such table the tracker is **read-only** and no push control renders anywhere —
+not disabled, absent. Two reasons it is declared rather than assumed: a sync token is
+often deliberately read-only, so assuming write access would turn one button into a
+confusing 403; and creating an issue on a shared board is an outward-facing act a
+deployment should have to opt into.
+
+`project` must be one the tracker already syncs, or PM Studio **refuses to boot** — a
+ticket created in a project the catalog never pulls would read as "not synced" on the very
+card that created it. A `[trackers.push]` table on an ADO tracker is fatal too: pushing is
+implemented for **Jira only** so far, and silently ignoring the table would leave you
+believing your Boards project was writable.
+
+**What it does.** Pressing Push on an unlinked change creates one issue —
+`change_type`, in `project`, summary from the change's title, description from the
+change's own text plus one provenance line naming the product and change id — and links
+it. Pressing Push epic on a project does the same at the epic rung with `epic_type`.
+Both are one API call plus a read-back, so the badge shows the tracker's own type and
+opening status rather than an echo of what was asked for.
+
+The declared target is a **default, not a cage**: the link dialog's create section lets
+you pick a different synced project and type per push, because which project a given
+change belongs in is a per-change fact.
+
+**Hierarchy.** Push the project's epic first and every change under that project lands
+beneath it — the pushed board then has the same shape as the plan here, instead of a flat
+pile of orphan stories. If an instance will not accept a `parent` on create (older
+Server/DC wants a per-instance "Epic Link" custom field), the ticket is still created and
+you are **told** the epic link was skipped, rather than it failing or silently ending up
+unparented.
+
+**What it deliberately does not do:**
+
+- **It writes once.** A push creates and links. It never transitions, retitles, closes or
+  deletes anything afterwards, and a later edit here is not mirrored there. The tracker
+  owns that ticket's state from the moment it exists.
+- **It does not set status or dates.** Jira workflow transitions are per-instance, so a
+  push that tried to match the change's status would silently no-op on an unfamiliar
+  workflow. The synced state flows back the normal way instead.
+- **It never pushes twice.** A change that already has a ticket is refused with a 409
+  naming the ticket it has; unlink first if a second one is really intended. Catch-all
+  projects (cost-attribution plumbing) and `ideation` projects are exempt, the same
+  exemptions the pending-upload report makes.
+- **The PM agent will not push for you.** The prompt tells it to recommend a push and let
+  you click: which work is worth filing on a shared board, and when, is a product
+  decision. It reports state accurately and names the changes it thinks are ready.
+
+Every push is recorded in the audit log (`roadmap.ticket_pushed` /
+`portfolio.epic_pushed`) and requires the `manage_roadmap` capability.
+
+**If a push fails,** the error carries Jira's own words — which is what names an issue
+type the project doesn't have, or a required field nobody configured. And if the ticket
+was created but could not be linked, the error names the key: a created ticket is never
+left with nothing pointing at it.
 
 ## `PM_INSTRUCTIONS.md`
 

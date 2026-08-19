@@ -381,8 +381,12 @@ class PortfolioStore:
     def pending_upload_report(self) -> list[dict]:
         """Open projects that exist only here: no epic link, so nothing in the tracker
         knows about them yet. Reported, never blocked - same posture as unaligned_report:
-        the upload half of the sync does not exist yet, so this is the work statement,
-        not an error list. Catch-alls are exempt: they are auto-created plumbing for cost
+        this is the work statement, not an error list.
+
+        Still a report rather than an action even now that pushing exists (see
+        server.push_project_epic): whether a project deserves an epic on a shared board,
+        and when, is a product decision, so this names the candidates and a human presses
+        the button. Catch-alls are exempt: they are auto-created plumbing for cost
         attribution, not projects anyone would file an epic for. Ideation projects are
         exempt too, deliberately: pre-commitment ideas have nothing to file an epic
         for yet - graduating to "open" is the moment a project earns a ticket, and

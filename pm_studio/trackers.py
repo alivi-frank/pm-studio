@@ -22,6 +22,13 @@ Three deliberate properties:
 - **Tokens never leave this module.** They go into an Authorization header and nowhere
   else: not into the catalog, not into a status entry, not into an error message. See
   `_scrub`, which is applied to every error before it is stored.
+
+One write exists, and it is deliberately the only one: PUSH creates a ticket for work
+planned here (`JiraClient.create_issue` / `TrackerStore.push_ticket`). Everything else in
+this module still only reads, so a tracker's state is its own - a push hands a change to
+the tracker once and never edits, transitions or deletes anything afterwards. It is
+opt-in per tracker via `[trackers.push]` (see config.PushConfig), so a deployment with a
+read-only sync token behaves exactly as it did before push existed.
 """
 
 from __future__ import annotations
@@ -511,6 +518,114 @@ class JiraClient:
                 raise
             return self._ticket(payload, time.time())
         return None
+
+    # ---- push (create) ----
+    #
+    # The only write this module performs. Everything above reads; this creates one
+    # issue and returns its key, and it is reached only from TrackerStore.push_ticket.
+
+    def _adf(self, text: str) -> dict:
+        """Plain text as an Atlassian Document Format doc, which is what /api/3 wants
+        for a description field (/api/2 takes the string as-is - see create_issue).
+
+        Blank-line-separated blocks become paragraphs, and single newlines WITHIN a block
+        become `hardBreak` nodes rather than newlines inside a text node: ADF forbids a
+        text node from containing one, and the cost of ignoring that is silent - a change
+        described as a list of lines arrives in Jira as one run-on sentence. A PM writing
+        "- one\n- two" means two lines, so two lines is what is sent.
+
+        An empty document is a doc with no content, because ADF also rejects a paragraph
+        holding an empty text node.
+        """
+        content = []
+        for block in re.split(r"\n\s*\n", text or ""):
+            lines = [line.strip() for line in block.strip().split("\n") if line.strip()]
+            if not lines:
+                continue
+            nodes: list[dict] = []
+            for line in lines:
+                if nodes:
+                    nodes.append({"type": "hardBreak"})
+                nodes.append({"type": "text", "text": line})
+            content.append({"type": "paragraph", "content": nodes})
+        return {"type": "doc", "version": 1, "content": content}
+
+    def create_issue(
+        self,
+        *,
+        project: str,
+        issue_type: str,
+        summary: str,
+        description: str = "",
+        parent_key: str | None = None,
+    ) -> tuple[str, bool]:
+        """Creates one issue and returns `(key, parent_was_set)`.
+
+        Two API shapes, tried in the same order and on the same 404/410 signal as
+        fetch_catalog: `/rest/api/3/issue` (Cloud, description as ADF) then
+        `/rest/api/2/issue` (Server/DC, description as plain text).
+
+        The parent is best-effort, and that is the one place this method degrades rather
+        than failing. `fields.parent` is how Jira Cloud's issue hierarchy links a story
+        to its epic, but an older instance wants a per-instance "Epic Link" custom field
+        whose id we cannot know, and it answers a parent it does not accept with a 400.
+        Refusing the whole push there would mean an instance that cannot parent also
+        cannot push at all; instead the create is retried once without the parent and
+        the second element of the return says so, which the caller surfaces. A ticket in
+        the right project with no epic beats no ticket and an error.
+        """
+        if parent_key:
+            try:
+                return self._create(
+                    project, issue_type, summary, description, parent_key
+                ), True
+            except TrackerError as exc:
+                # Only a field-level rejection earns the retry. Auth, permission and
+                # reachability failures mean the unparented attempt would fail too, and
+                # retrying them would just double the noise in the error the PM sees.
+                if _http_status(exc) != 400 or "parent" not in str(exc).lower():
+                    raise
+        return self._create(project, issue_type, summary, description, None), False
+
+    def _create(
+        self,
+        project: str,
+        issue_type: str,
+        summary: str,
+        description: str,
+        parent_key: str | None,
+    ) -> str:
+        last_error: TrackerError | None = None
+        for version in (3, 2):
+            fields: dict = {
+                "project": {"key": project},
+                "issuetype": {"name": issue_type},
+                "summary": summary,
+            }
+            if description:
+                fields["description"] = self._adf(description) if version == 3 else description
+            if parent_key:
+                fields["parent"] = {"key": parent_key}
+            url = f"{self.config.base_url}/rest/api/{version}/issue"
+            try:
+                payload = _request(
+                    url, headers=self._headers(), method="POST", body={"fields": fields}
+                )
+            except TrackerError as exc:
+                if _http_status(exc) not in (404, 410):
+                    raise
+                last_error = exc
+                continue
+            key = str(payload.get("key") or "").strip().upper()
+            if not key:
+                # A 2xx with no key means the issue may or may not exist and we cannot
+                # say which. Loud, because the alternative is a silent orphan.
+                raise TrackerError(
+                    "Jira accepted the create but returned no issue key, so the ticket "
+                    "could not be linked. Check the project in Jira before retrying."
+                )
+            return key
+        raise last_error or TrackerError("no supported Jira create endpoint responded")
 
     # ---- releases (project versions) ----
 
@@ -1063,6 +1178,22 @@ class TrackerStore:
                     "projects": list(config.projects),
                     "usable": config.is_usable,
                     "unusable_reason": config.unusable_reason,
+                    # The push target, or None for a read-only tracker. The board keys
+                    # its push affordance on this being present rather than on the
+                    # provider, so a Jira nobody declared a target for shows no button
+                    # at all instead of one that 400s.
+                    "push": (
+                        {
+                            "project": config.push.project,
+                            "change_type": config.push.change_type,
+                            "epic_type": config.push.epic_type,
+                            # Every project the dialog may override onto - the synced
+                            # set, since a push outside it would read as unresolved.
+                            "projects": list(config.projects),
+                        }
+                        if config.can_push
+                        else None
+                    ),
                     "ticket_count": counts.get(config.id, 0),
                     "release_count": release_counts.get(config.id, 0),
                     "status": status.to_dict() if status else None,
@@ -1099,6 +1230,90 @@ class TrackerStore:
             self._state.tickets[_catalog_key(ticket.tracker_id, ticket.key)] = ticket
             self._save_locked()
         return ticket
+
+    def push_ticket(
+        self,
+        tracker_id: str,
+        *,
+        project: str,
+        issue_type: str,
+        summary: str,
+        description: str = "",
+        parent_key: str | None = None,
+    ) -> tuple[Ticket, bool]:
+        """Creates a ticket in the tracker and returns `(catalog entry, parent_was_set)`.
+
+        The write half of this module, and the mirror of ensure_ticket: that one takes a
+        key a human supplied and makes the catalog hold it, this one makes the tracker
+        hold a ticket and then does the same. The caller links the returned key.
+
+        After the create the new issue is read back with fetch_one, so the catalog entry
+        carries the tracker's OWN facts - the type as its workflow names it, its opening
+        status, its real URL - rather than an echo of what we asked for. If that read
+        fails (a permission that allows create but not read, or the issue not yet
+        visible to search) the entry is synthesized from the create instead: same key,
+        the type we asked for, an empty state. Every field of that fallback is something
+        we know to be true, and an empty state renders as no state rather than a guess.
+        Losing the key here would strand a real ticket with nothing pointing at it, so
+        this method does not fail after a successful create.
+
+        Raises TrackerError if the tracker refuses the create, and ValueError if the
+        tracker cannot push at all - both before anything exists upstream.
+        """
+        config = CONFIG.tracker(tracker_id)
+        if config is None:
+            raise ValueError(f"Unknown tracker: {tracker_id}")
+        if config.push is None:
+            raise ValueError(
+                f"Tracker {tracker_id!r} has no [trackers.push] table, so it is "
+                "read-only. Declare one to create tickets from PM Studio."
+            )
+        if not config.is_usable:
+            raise ValueError(f"Tracker {tracker_id!r} cannot be reached: {config.unusable_reason}")
+        if not summary.strip():
+            raise ValueError("a ticket needs a summary")
+
+        client = client_for(config)
+        if not isinstance(client, JiraClient):  # pragma: no cover - config forbids it
+            raise ValueError(f"Pushing is only implemented for Jira, not {config.provider!r}")
+        try:
+            key, parent_set = client.create_issue(
+                project=project,
+                issue_type=issue_type,
+                summary=summary.strip(),
+                description=description,
+                parent_key=parent_key,
+            )
+        except TrackerError as exc:
+            # Scrubbed HERE, not at the endpoint, so the token-handling stays inside the
+            # module that owns it (see this file's header). A push error is shown to a
+            # browser verbatim - it carries Jira's own response body, which is the useful
+            # part - and that is exactly the path a credential must not travel.
+            raise TrackerError(_scrub(str(exc), config.token, config.username)) from exc
+
+        ticket: Ticket | None = None
+        try:
+            ticket = client.fetch_one(key)
+        except TrackerError:
+            ticket = None
+        if ticket is None:
+            ticket = Ticket(
+                tracker_id=config.id,
+                provider=config.provider,
+                key=key,
+                type=canonical_type(issue_type),
+                raw_type=issue_type,
+                title=summary.strip(),
+                state="",
+                url=client.browse_url(key),
+                synced_at=time.time(),
+                parent_key=parent_key if parent_set else None,
+                project=project,
+            )
+        with self._lock:
+            self._state.tickets[_catalog_key(ticket.tracker_id, ticket.key)] = ticket
+            self._save_locked()
+        return ticket, parent_set
 
     def due_tracker_ids(self, now: float | None = None) -> list[str]:
         """Which trackers the background loop should pull right now.

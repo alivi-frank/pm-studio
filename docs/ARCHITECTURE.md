@@ -428,8 +428,43 @@ scope). Cached as `Release` entries in the same `trackers.json`, served read-onl
 ticket pull (`SyncStatus.release_error`), with the same keep-on-failure posture. Nothing
 on the board consumes them yet.
 
-**Read-only.** Nothing writes back to Jira or ADO. The board's bucket/status stays
-independent of the ticket's state, on purpose, and the PM prompt says so explicitly.
+**Push — the one write** (optional, per tracker, Jira only): `[trackers.push]`
+(`config.PushConfig`) declares a project and the issue type per rung. `can_push` is target
+**and** usable credential, so a declared-but-unauthenticable tracker renders no control
+rather than a failing one; a target naming an unsynced project, or a table on an ADO
+tracker, is fatal at load. `JiraClient.create_issue` → `TrackerStore.push_ticket` →
+`server.push_roadmap_item` / `push_project_epic`, which create, read the issue back into
+the catalog and link it in one request. Three properties:
+
+- **It writes once.** Create and link, never update — nothing transitions, retitles or
+  deletes a ticket afterwards, which is what keeps "a ticket's state is the tracker's
+  fact" true everywhere else in this section.
+- **A created key is never lost.** After a successful create nothing may raise without
+  naming the key: a read-back failure falls back to a synthesized catalog entry built only
+  from what we know (empty state, never a guessed one), and a link failure returns 409
+  *with* the key. An orphan ticket nothing points at is the one outcome worse than a
+  failed push.
+- **The parent is best-effort and reported.** `fields.parent` links a story to its epic on
+  Cloud; older instances answer it with a 400 (they want a per-instance Epic Link custom
+  field), so the create is retried once unparented and `parent_skipped` says so on the
+  response. Only a 400 mentioning `parent` earns the retry — auth and reachability
+  failures surface as themselves.
+
+The epic parent comes from the change's **project** link (`_parent_epic_for`), which is why
+projects are pushable too: push the epic, then every change under it lands beneath it and
+the tracker gets the plan's own shape. Cross-tracker parenting answers None — Jira cannot
+express it.
+
+Pushing needs `manage_roadmap` and is audited (`roadmap.ticket_pushed`,
+`portfolio.epic_pushed`). The PM prompt splits on `can_push` (`PUSH_GUIDANCE` /
+`NO_PUSH_GUIDANCE`): with no pushable tracker it is told upload is unavailable, exactly as
+before; with one it is told the control exists **and told not to press it** — the roadmap
+POST allowlist does reach the endpoint, so the prompt is the only thing standing between an
+agent and a real ticket on someone else's board.
+
+**Read-only otherwise.** Apart from that create, nothing writes to Jira or ADO. The board's
+bucket/status stays independent of the ticket's state, on purpose, and the PM prompt says so
+explicitly.
 
 The cache at `workspace/trackers.json` is in `SENSITIVE_WORKSPACE_FILES`: it holds no
 credential of ours but caches another system's ticket titles, and never committing it costs
@@ -770,6 +805,7 @@ background-thread → websocket hops via `loop.call_soon_threadsafe(asyncio.crea
 | `GET /roadmap/data` | `{products, product_parents, systems, product_systems, unattributed, items-by-product}` |
 | `GET /systems`, `GET /systems/data` | the system catalogue page and its dataset: one row per declared system (label, path, repo, guidance, gitflow, pipelines, the products touching it, its change counts, whether it is mid-reclassification), plus the restructure gap. `{"declared": false}` when no `[systems]` table exists |
 | `GET/POST /roadmap/{product}/items`, `PATCH/DELETE /roadmap/{product}/items/{item_id}` | board CRUD; PATCH/DELETE verify the URL product OWNS the item (this is what makes own-product-scoped allowlists safe); PATCH with `move_to_product` triggers the move flow; `start_at`/`target_at` accept `"YYYY-MM-DD"` or `""` to clear, and a malformed or inverted pair is a 400 naming the reason with nothing applied |
+| `POST /roadmap/{product}/items/{item_id}/push`, `POST /portfolio/projects/{id}/push` | create the ticket/epic for work planned here and link it, in one call. Optional `tracker_id`/`project`/`issue_type` override `[trackers.push]`; an empty body is the one-click path. 409 if already linked (naming the ticket) or if a created ticket could not be linked (naming its key); 400 if no tracker can push or the target is ambiguous; 502 carrying the tracker's own refusal. Response adds `push: {key, url, parent_key, parent_skipped}` |
 | WS `/ws/chat/{id}`, `/ws/tasks/{id}`, `/ws/sessions`, `/ws/roadmap` | push channels |
 
 Optional: zero-segment aliases to the default session (`/tasks`, `/history`, `/ws/chat`,

@@ -342,6 +342,67 @@
     return picker;
   }
 
+  /* ---- push: creating the epic a project doesn't have yet ----
+
+     The write half of the tracker link, and what closes the "not in tracker" state this
+     page has always only been able to report. Gated on `push_trackers` from
+     /portfolio/data, which the server fills only for a tracker that declares a
+     [trackers.push] target and has a working credential - so on a read-only deployment
+     none of this renders rather than rendering disabled. */
+
+  function pushTrackers(payload) {
+    return (payload && payload.push_trackers) || [];
+  }
+
+  /* "a Story" but "an Epic". The type is operator-configured free text, so the article
+     has to be chosen rather than written into the sentence. */
+  const article = (word) => (/^[aeiou]/i.test(word || "") ? "an" : "a");
+
+  function pushEpicButton(project, targets) {
+    const button = document.createElement("button");
+    button.className = "ghost";
+    button.textContent = "Push epic";
+    // More than one pushable tracker means the target is a choice, not a default, and
+    // the server refuses to guess it - so say so before the click rather than in an error.
+    const single = targets.length === 1 ? targets[0] : null;
+    button.title = single
+      ? `Create "${project.title}" in ${single.label} as ${article(single.push.epic_type)} ` +
+        `${single.push.epic_type} in ${single.push.project}, and link it as this project's epic`
+      : "Create this project's epic — you'll choose which tracker";
+    button.addEventListener("click", async () => {
+      let target = single;
+      if (!target) {
+        const wanted = prompt(
+          "Which tracker should the epic be created in?\n" +
+            targets.map((t) => `${t.id} — ${t.label} (${t.push.project})`).join("\n"),
+          targets[0].id
+        );
+        if (wanted === null) return;
+        target = targets.find((t) => t.id === wanted.trim());
+        if (!target) { showError(`No pushable tracker with id "${wanted.trim()}".`); return; }
+      }
+      if (!confirm(
+        `Create ${article(target.push.epic_type)} ${target.push.epic_type} in ` +
+        `${target.label} (${target.push.project}) for:\n\n` +
+        `${project.title}\n\n` +
+        "This creates a real epic on that board and links it to this project."
+      )) return;
+      // Disabled for the duration: a push is not idempotent, and a double-click that
+      // filed two epics for one project is this feature's worst failure.
+      button.disabled = true;
+      button.textContent = "Pushing…";
+      try {
+        await api(`/portfolio/projects/${project.id}/push`, json("POST", { tracker_id: target.id }));
+        await load();
+      } catch (err) {
+        button.disabled = false;
+        button.textContent = "Push epic";
+        showError(err.message);
+      }
+    });
+    return button;
+  }
+
   function relativeTime(seconds) {
     if (!seconds) return "";
     const diff = Date.now() / 1000 - seconds;
@@ -567,8 +628,11 @@
           const flag = document.createElement("span");
           flag.className = "flag";
           flag.textContent = "not in tracker";
-          flag.title = "Created locally — pending upload to the tracker, which isn't available yet. " +
-            "If the epic already exists there, link it with the Epic… button.";
+          flag.title = pushTrackers(data).length
+            ? "Only exists here so far. Use Push epic to create it in the tracker, or " +
+              "Link epic if it already exists there."
+            : "Created locally — no tracker here is set up to create it. " +
+              "If the epic already exists there, link it with the Epic… button.";
           title.appendChild(flag);
         }
       }
@@ -590,6 +654,15 @@
           act(() => api(`/portfolio/projects/${project.id}`, json("PATCH", { ticket: pasted.trim() })));
         });
         actions.append(epicBtn);
+
+        /* Push: create the epic the project doesn't have yet. Only for an UNLINKED,
+           non-ideation project - the same two exemptions pending_upload_report makes,
+           since an idea has nothing to file an epic for and a linked project already
+           has one (the endpoint 409s on both). Absent, not disabled, when no tracker
+           declares a push target. */
+        if (!project.ticket && project.status !== "ideation" && pushTrackers(data).length) {
+          actions.append(pushEpicButton(project, pushTrackers(data)));
+        }
       }
       if (!project.is_catch_all) {
         actions.append(projectStatusPicker(project), deleteButton("projects", project));

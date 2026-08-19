@@ -31,7 +31,7 @@ from .authz import (
     describe_matrix,
     role_has,
 )
-from .config import CONFIG
+from .config import CONFIG, TrackerConfig
 from .costing import (
     KIND_DEV_TASK,
     KIND_PM_TURN,
@@ -234,8 +234,10 @@ def _initiative_context(initiative_id: str) -> tuple[str, list[str]] | None:
         # The same tracked-as annotation a change's line carries, one rung up: the PM
         # should see which epic a project IS in Jira/ADO without asking. Its absence is
         # only stated when there are trackers to be absent from - and it means "created
-        # locally, not uploaded yet", never an error, because the upload half of the
-        # sync does not exist.
+        # locally, no epic filed yet", never an error. Whether filing one is POSSIBLE
+        # differs per deployment, so the annotation says which: a PM told upload is
+        # unavailable on a pushable deployment would refuse a click-away action, and one
+        # told the opposite would promise an upload nobody can perform.
         if project.get("ticket_key"):
             ticket = _lookup_ticket(project["tracker_id"], project["ticket_key"])
             if ticket:
@@ -249,7 +251,10 @@ def _initiative_context(initiative_id: str) -> tuple[str, list[str]] | None:
                 )
         elif tracker_store.is_configured and not project.get("catch_all_for_initiative"):
             project_heading += (
-                " [local only - no epic in the tracker yet; upload sync is not available]"
+                " [local only - no epic in the tracker yet; the stakeholder can file one"
+                " with Push epic on the board]"
+                if any(t.can_push for t in CONFIG.trackers)
+                else " [local only - no epic in the tracker yet; upload is not available]"
             )
         groups.append((project_heading, changes))
     if not groups:
@@ -1525,6 +1530,12 @@ def portfolio_data() -> dict:
     and `trackers_configured` is what lets the page tell "no epic yet - pending
     upload" apart from "this deployment has no trackers at all", where the whole
     linking layer should stay invisible.
+
+    `push_trackers` is the narrower question the page's push affordance keys on: which
+    trackers can actually CREATE an epic. A deployment can have trackers configured and
+    none of them pushable (a read-only sync token, or no [trackers.push] table), and
+    those two states must not look alike - one offers a button, the other offers linking
+    only. Same per-tracker shape as GET /trackers, so the two pages read it identically.
     """
     snapshot = portfolio_store.snapshot()
     snapshot["projects"] = [_with_ticket(p) for p in snapshot["projects"]]
@@ -1533,6 +1544,9 @@ def portfolio_data() -> dict:
         "unassigned_changes": roadmap_store.unassigned_items(),
         "session_scope": _session_scope_report(),
         "trackers_configured": tracker_store.is_configured,
+        "push_trackers": [
+            t for t in tracker_store.describe()["trackers"] if t.get("push")
+        ],
         # Same shape as /roadmap/data's portfolio.activity - see _project_activity.
         "activity": _project_activity(),
     }
@@ -2864,6 +2878,319 @@ def _apply_epic_link(actor: User | None, project_id: str, payload: dict):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _audit(actor, "portfolio.epic_linked", project_id, f"{tracker_id}/{ticket.key}")
     return project
+
+
+# ---- push: creating a ticket for work planned here ----
+#
+# The write half of a tracker connection, and the inverse of the import pass. Import
+# takes a ticket that already exists and makes a change from it; push takes a change
+# planned here and makes the ticket. Both end in the same 1:1 link, which is what keeps
+# them from fighting: a pushed change is a linked change, so the next import pass sees
+# its ticket as already held and leaves it alone.
+#
+# One property worth stating plainly, because it bounds the whole feature: a push writes
+# ONCE. It creates the ticket and links it, and from then on the tracker owns that
+# ticket's type, state and title - a later edit here is never mirrored there, and a push
+# never transitions or deletes anything. That is the same direction of authority the
+# catalog already assumes (see trackers.py), so nothing about how a card renders changes.
+
+
+def _push_target(payload: dict, *, epic: bool) -> tuple[TrackerConfig, str, str]:
+    """Which tracker, project and issue type this push should use.
+
+    Resolved from the payload where the caller stated something and from
+    `[trackers.push]` where it did not, so the ordinary call is `POST` with an empty body
+    and the dialog's overrides are the same endpoint with two more fields. `epic` picks
+    which of the two configured types is the default - a project pushes as an epic, a
+    change as a story - which is the only asymmetry between the two callers.
+    """
+    pushable = [t for t in CONFIG.trackers if t.can_push]
+    if not pushable:
+        declared = [t for t in CONFIG.trackers if t.push is not None]
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                # Two different fixes, so two different messages: a tracker with a push
+                # target but no usable credential is a .env problem, not a config one.
+                f"Tracker {declared[0].id!r} declares a push target but cannot be "
+                f"reached: {declared[0].unusable_reason}."
+                if declared
+                else "No tracker is set up to create tickets. Add a [trackers.push] "
+                "table to a [[trackers]] block in pm_studio_local/config.toml."
+            ),
+        )
+
+    requested = (payload.get("tracker_id") or "").strip()
+    if requested:
+        config = next((t for t in pushable if t.id == requested), None)
+        if config is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tracker {requested!r} cannot create tickets. Trackers that can: "
+                + ", ".join(t.id for t in pushable),
+            )
+    elif len(pushable) > 1:
+        # Never guessed: creating a ticket on the wrong board is not something a default
+        # should be allowed to do silently, and the dialog always sends one anyway.
+        raise HTTPException(
+            status_code=400,
+            detail="More than one tracker can create tickets, so say which: "
+            + ", ".join(t.id for t in pushable),
+        )
+    else:
+        config = pushable[0]
+
+    assert config.push is not None  # can_push guarantees it
+    project = (payload.get("project") or "").strip() or config.push.project
+    if project not in config.projects:
+        # Same rule config enforces on the declared default, applied to an override: a
+        # ticket in a project the catalog never pulls reads as unresolved on its own card.
+        raise HTTPException(
+            status_code=400,
+            detail=f"{config.id} does not sync project {project!r}, so a ticket created "
+            f"there could not be read back. Projects: {', '.join(config.projects)}",
+        )
+    issue_type = (payload.get("issue_type") or "").strip() or (
+        config.push.epic_type if epic else config.push.change_type
+    )
+    # A project must be backed by an epic-LEVEL ticket, the same rule _apply_epic_link
+    # enforces on a manual link. Checked here, BEFORE the create, because the check after
+    # it (push_project_epic) can only report an orphan it is too late to prevent: the
+    # ticket already exists in Jira and we never delete. Not at config-load time instead,
+    # for two reasons - config.py cannot import the type vocabulary from trackers.py
+    # without a cycle, and a load-time check would miss a per-push `issue_type` override,
+    # which is the same mistake by a different route.
+    if epic and canonical_type(issue_type) != TYPE_EPIC:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{issue_type!r} is not recognised as an epic-level issue type, and a "
+            "project must be backed by an epic. Nothing was created. Use the name your "
+            "instance gives that rung (Epic, Initiative, Theme...) in `epic_type` under "
+            "[trackers.push], or link the epic by hand from the board.",
+        )
+    return config, project, issue_type
+
+
+def _push_description(description: str, *, kind: str, product: str, local_id: str) -> str:
+    """What lands in the ticket's description: the plan as written here, plus one line
+    saying where it came from.
+
+    The provenance line is not decoration. A ticket that appears on a board with no
+    author and no context reads as noise to everyone who did not push it, and the id is
+    what lets someone here find the change again from the ticket. One line, at the end,
+    after the content the PM actually wrote - the mirror of the import stamp that opens
+    the description of a change created from a ticket.
+    """
+    stamp = f"Pushed from PM Studio - {product} {kind} {local_id}."
+    body = (description or "").strip()
+    return f"{body}\n\n{stamp}" if body else stamp
+
+
+def _push_and_report(
+    config: TrackerConfig,
+    *,
+    project: str,
+    issue_type: str,
+    summary: str,
+    description: str,
+    parent_key: str | None,
+) -> tuple[Ticket, bool]:
+    """The create call, with every failure turned into the HTTP error that says why."""
+    try:
+        return tracker_store.push_ticket(
+            config.id,
+            project=project,
+            issue_type=issue_type,
+            summary=summary,
+            description=description,
+            parent_key=parent_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TrackerError as exc:
+        # 502, like every other tracker-side failure here: this request was well-formed
+        # and the tracker refused it. The message is already scrubbed of the token, and it
+        # carries Jira's own body - which is what names an issue type the project does
+        # not have, or a required field nobody configured.
+        raise HTTPException(
+            status_code=502,
+            detail=f"{config.label} would not create the ticket: {exc}",
+        ) from exc
+
+
+def _parent_epic_for(item: RoadmapItem, tracker_id: str) -> str | None:
+    """The epic key a pushed change should hang under: the ticket its PROJECT is linked
+    to, when that link is in the tracker being pushed to.
+
+    This is the whole reason projects are pushable too. Push the project first and its
+    epic exists; every change pushed afterwards lands underneath it, so the tracker ends
+    up with the same shape the plan has here instead of a flat pile of orphan stories.
+    A change with no project, a project with no epic, or an epic in a DIFFERENT tracker
+    all answer None - cross-tracker parenting is not a thing Jira can express.
+    """
+    if not item.project_id:
+        return None
+    project = portfolio_store.get_project(item.project_id)
+    if project is None or project.tracker_id != tracker_id:
+        return None
+    return project.ticket_key or None
+
+
+@app.post("/roadmap/{product}/items/{item_id}/push")
+def push_roadmap_item(product: str, item_id: str, request: Request, payload: dict = Body(default={})) -> dict:
+    """Creates this change's ticket in the tracker and links it, in one call.
+
+    `tracker_id`, `project` and `issue_type` are all optional overrides of
+    `[trackers.push]`; an empty body is the ordinary one-click push.
+
+    A change that is ALREADY linked is refused rather than pushed again - that is the
+    duplicate this endpoint exists to prevent, and the 409 names the ticket it already
+    has. Unlink first if the intent really is a second ticket.
+    """
+    actor = _require(request, "manage_roadmap")
+    item = roadmap_store.get(item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Unknown roadmap item")
+    if item.product != product:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Item {item_id} belongs to product '{item.product}', not '{product}'",
+        )
+    if item.ticket_key:
+        raise HTTPException(
+            status_code=409,
+            detail=f"\"{item.title}\" is already linked to {item.ticket_key}. Unlink it "
+            "first if you meant to create a second ticket for this change.",
+        )
+
+    config, project, issue_type = _push_target(payload, epic=False)
+    parent_key = _parent_epic_for(item, config.id)
+    ticket, parent_set = _push_and_report(
+        config,
+        project=project,
+        issue_type=issue_type,
+        summary=item.title,
+        description=_push_description(
+            item.description, kind="change", product=item.product, local_id=item.id
+        ),
+        parent_key=parent_key,
+    )
+
+    # The ticket now EXISTS upstream, so from here on nothing may raise without saying
+    # its key: an error that loses the key strands a real ticket with nothing pointing at
+    # it, which is the one outcome worse than a failed push.
+    #
+    # The cross-store half of the 1:1 rule, same as _apply_ticket_link: each store
+    # enforces uniqueness among its own records, and one ticket backs one thing across
+    # both. A freshly created key should collide with nothing - but "should" is not the
+    # guarantee this rule is, and a Jira project deleted and recreated restarts its
+    # numbering, so a stale link can be pointing at the key we just got back.
+    holder = portfolio_store.project_for_ticket(config.id, ticket.key)
+    if holder is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Created {ticket.key} in {config.label}, but that key is already "
+            f"linked to the project \"{holder.title}\" (id {holder.id}), so it was not "
+            "linked to this change. The ticket exists - unlink the project first, or "
+            "delete the ticket in the tracker.",
+        )
+    try:
+        item = roadmap_store.link_ticket(item_id, config.id, ticket.key)
+    except (TicketAlreadyLinked, ValueError, KeyError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Created {ticket.key} in {config.label}, but could not link it here: "
+            f"{exc}. The ticket exists - link it by hand, or delete it in the tracker.",
+        ) from exc
+    _audit(actor, "roadmap.ticket_pushed", f"{product}/{item_id}", f"{config.id}/{ticket.key}")
+
+    return {
+        **_with_ticket(item.to_public_dict()),
+        # Reported, never silent: the parent is best-effort (see JiraClient.create_issue),
+        # and a story that quietly landed outside its epic is exactly the kind of thing a
+        # PM finds out about a week later from someone else's board.
+        "push": {
+            "key": ticket.key,
+            "url": ticket.url,
+            "parent_key": parent_key if parent_set else None,
+            "parent_skipped": bool(parent_key) and not parent_set,
+        },
+    }
+
+
+@app.post("/portfolio/projects/{project_id}/push")
+def push_project_epic(project_id: str, request: Request, payload: dict = Body(default={})) -> dict:
+    """Creates this project's epic in the tracker and links it - the project rung of
+    push_roadmap_item, and what closes the pending-upload gap the portfolio page reports.
+
+    Pushing the epic before the project's changes is what gives those changes a parent to
+    land under (see _parent_epic_for).
+    """
+    actor = _require(request, "manage_roadmap")
+    project = portfolio_store.get_project(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Unknown project")
+    if project.ticket_key:
+        raise HTTPException(
+            status_code=409,
+            detail=f"\"{project.title}\" is already tracked as {project.ticket_key}. "
+            "Unlink it first if you meant to create a second epic.",
+        )
+    if project.is_any_catch_all:
+        # Catch-alls are auto-created cost-attribution plumbing, not work anyone would
+        # file an epic for - the same exemption pending_upload_report makes.
+        raise HTTPException(
+            status_code=400,
+            detail="Catch-all projects are internal cost-attribution plumbing, not work "
+            "to file an epic for.",
+        )
+
+    config, tracker_project, issue_type = _push_target(payload, epic=True)
+    ticket, _ = _push_and_report(
+        config,
+        project=tracker_project,
+        issue_type=issue_type,
+        summary=project.title,
+        description=_push_description(
+            project.description, kind="project", product="portfolio", local_id=project.id
+        ),
+        parent_key=None,
+    )
+    # The epic-level check _apply_epic_link enforces on a manual link applies to a pushed
+    # one too: if the configured epic_type is not actually an epic rung in this instance,
+    # the honest outcome is to say so rather than let a Story stand in for a project.
+    if ticket.type != TYPE_EPIC:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Created {ticket.key}, but {config.label} made it a "
+            f"{ticket.raw_type} rather than an epic, so it was not linked as this "
+            "project's epic. Fix `epic_type` in [trackers.push] and delete "
+            f"{ticket.key}, or link it to a change instead.",
+        )
+
+    # The other direction of the cross-store rule above.
+    change_holder = roadmap_store.item_for_ticket(config.id, ticket.key)
+    if change_holder is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Created {ticket.key} in {config.label}, but that key is already "
+            f"linked to the change \"{change_holder.title}\" (id {change_holder.id}) on "
+            f"the {change_holder.product} board, so it was not linked to this project. "
+            "The ticket exists - unlink the change first, or delete the ticket.",
+        )
+    try:
+        project = portfolio_store.link_epic(project_id, config.id, ticket.key)
+    except (EpicAlreadyLinked, PortfolioError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Created {ticket.key} in {config.label}, but could not link it here: "
+            f"{exc}. The epic exists - link it by hand, or delete it in the tracker.",
+        ) from exc
+    _audit(actor, "portfolio.epic_pushed", project_id, f"{config.id}/{ticket.key}")
+    return {
+        **_with_ticket(project.to_public_dict()),
+        "push": {"key": ticket.key, "url": ticket.url},
+    }
 
 
 @app.delete("/roadmap/{product}/items/{item_id}")

@@ -1197,6 +1197,42 @@
   .picker-row .row-taken { font-size: 0.85em; color: var(--ink-muted); white-space: nowrap; }
   #picker-note { margin-top: 10px; font-size: 0.8em; color: var(--ink-muted); }
   #picker-note.error { color: var(--danger); }
+  /* The push section: visually a separate offer from the search results above it, since
+     it does something different in kind - creating a ticket rather than pointing at one. */
+  #picker-push {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
+  #picker-push .push-lead { font-size: 0.82em; color: var(--ink-muted); margin-bottom: 8px; }
+  #picker-push .push-fields { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }
+  #picker-push label { display: flex; flex-direction: column; gap: 3px; font-size: 0.74em; color: var(--ink-muted); }
+  #picker-push select,
+  #picker-push input[type="text"] {
+    font: inherit;
+    font-size: 0.86em;
+    padding: 5px 7px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--surface);
+    color: var(--ink);
+    min-width: 8em;
+    margin: 0;
+  }
+  #picker-push button {
+    font: inherit;
+    font-size: 0.86em;
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--ink);
+    cursor: pointer;
+  }
+  #picker-push button:hover:not(:disabled) { border-color: var(--ink-muted); }
+  #picker-push button:disabled { opacity: 0.55; cursor: default; }
+  #picker-push .push-parent { font-size: 0.78em; color: var(--ink-muted); margin-top: 8px; }
+
   #ticket-picker .sheet-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
   #ticket-picker .sheet-actions button {
     font: inherit;
@@ -1234,6 +1270,9 @@
     <input id="picker-input" type="text" autocomplete="off"
            placeholder="Search synced tickets, or paste a ticket URL / key" />
     <div id="picker-results"></div>
+    <!-- The create-it-instead half of this dialog. Hidden unless a tracker declares a
+         push target and the thing being linked has no ticket yet - see renderPushSection. -->
+    <div id="picker-push" class="hidden"></div>
     <div id="picker-note"></div>
     <div class="sheet-actions">
       <button type="button" class="ghost" id="picker-unlink">Unlink</button>
@@ -1731,9 +1770,11 @@
     }
     if (project.is_catch_all || project.catch_all_for_initiative) return null;
     const pending = chip("not in tracker", "warn");
-    pending.title =
-      "Created locally — pending upload to the tracker, which isn't available yet.\n" +
-      "If the epic already exists there, click to link it.";
+    pending.title = pushTrackers().length
+      ? "Only exists here so far. Click to create its epic in the tracker, or to link\n" +
+        "the one that already exists there."
+      : "Created locally — no tracker here is set up to create it.\n" +
+        "If the epic already exists there, click to link it.";
     pending.setAttribute("role", "button");
     pending.tabIndex = 0;
     const open = (event) => {
@@ -2024,6 +2065,19 @@
         : "Link this change to one Jira or Azure DevOps ticket";
       ticketBtn.addEventListener("click", () => openTicketPicker(item));
       row.appendChild(ticketBtn);
+
+      /* One-click push, for the common case this feature exists for: a change planned
+         here that has no ticket anywhere. Shown only when a tracker actually declares a
+         push target AND the change is unlinked - a linked change has nothing to create,
+         and the endpoint would 409. The picker's own push section (see openPicker) is
+         where a different project or issue type gets chosen. */
+      if (!item.ticket && pushTrackers().length) {
+        const pushBtn = el("button", null, "Push");
+        pushBtn.type = "button";
+        pushBtn.title = pushButtonTitle(item);
+        pushBtn.addEventListener("click", () => confirmAndPush(pushBtn, item));
+        row.appendChild(pushBtn);
+      }
     }
 
     const del = el("button", "del", "Delete");
@@ -3852,12 +3906,113 @@
     bar.appendChild(button);
   }
 
+  /* ---- push: creating the ticket for a change planned here ----
+
+     The inverse of linking. Linking says "this change is already that ticket"; pushing
+     says "this change has no ticket anywhere - make one". Everything below is gated on
+     `tracker.push` being present in GET /trackers, which the server only sets for a
+     tracker that declares a [trackers.push] target AND has a working credential. So on a
+     read-only deployment none of this renders at all, rather than rendering disabled. */
+
+  function pushTrackers() {
+    return (TRACKERS.trackers || []).filter((t) => t.push);
+  }
+
+  /* "a Story" but "an Epic". The issue type is operator-configured free text, so the
+     article has to be chosen rather than written into the sentence. */
+  const article = (word) => (/^[aeiou]/i.test(word || "") ? "an" : "a");
+
+  /* What one click will do, spelled out - the button is an outward-facing write, so the
+     tooltip names the board and the type before anyone presses it rather than after. */
+  function pushButtonTitle(item) {
+    const targets = pushTrackers();
+    if (targets.length !== 1) {
+      return "Create this change as a ticket — you'll choose which tracker";
+    }
+    const t = targets[0];
+    const parent = pushParentKey(item, t.id);
+    return (
+      `Create "${item.title}" in ${t.label} as ${article(t.push.change_type)} ` +
+      `${t.push.change_type} in ${t.push.project}, and link it here` +
+      (parent ? `\nIt will hang under ${parent}, its project's epic.` : "")
+    );
+  }
+
+  /* The epic a pushed change will land under, mirroring server._parent_epic_for so the
+     confirmation says the same thing the server will do. Empty unless the change's
+     project is linked to an epic IN THE TRACKER being pushed to. */
+  function pushParentKey(item, trackerId) {
+    const project = item.project_id ? PROJECTS_BY_ID[item.project_id] : null;
+    if (!project || !project.ticket || project.tracker_id !== trackerId) return "";
+    return project.ticket.key || "";
+  }
+
+  function confirmAndPush(button, item) {
+    const targets = pushTrackers();
+    if (targets.length !== 1) {
+      // Ambiguous target: the picker's push section is where the tracker gets chosen,
+      // and the server refuses a guess for the same reason.
+      openTicketPicker(item);
+      return;
+    }
+    const t = targets[0];
+    const parent = pushParentKey(item, t.id);
+    const ok = confirm(
+      `Create ${article(t.push.change_type)} ${t.push.change_type} in ${t.label} ` +
+      `(${t.push.project}) for:\n\n` +
+      `${item.title}\n\n` +
+      (parent ? `It will hang under ${parent}, its project's epic.\n` : "") +
+      "This creates a real ticket on that board and links it to this change."
+    );
+    if (!ok) return;
+    runPush(button, `/roadmap/${item.product}/items/${item.id}/push`, { tracker_id: t.id });
+  }
+
+  /* The one place a push is actually sent, shared by the row button and the picker.
+     `button` is disabled for the duration: a push is not idempotent, and a double-click
+     that created two tickets would be this feature's worst failure. */
+  function runPush(button, url, payload, onDone) {
+    const original = button ? button.textContent : "";
+    if (button) { button.disabled = true; button.textContent = "Pushing…"; }
+    const finish = (message, isError) => {
+      if (button) { button.disabled = false; button.textContent = original; }
+      if (onDone) onDone(message, isError);
+      else if (message) alert(message);
+    };
+    fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload || {}),
+    })
+      .then((r) => r.json().then((body) => ({ ok: r.ok, body })))
+      .then(({ ok, body }) => {
+        if (!ok) {
+          finish(body.detail || "Could not create the ticket.", true);
+          return;
+        }
+        // A parent Jira would not accept is surfaced, never swallowed: the ticket is
+        // real and correct, it just isn't under its epic, and only saying so lets
+        // someone go fix it (see JiraClient.create_issue on why this can happen).
+        const push = body.push || {};
+        finish(
+          push.parent_skipped
+            ? `Created ${push.key}, but this Jira would not accept a parent, so it is ` +
+              "not under its project's epic. Set the epic link in Jira."
+            : "",
+          false
+        );
+        // The card updates itself from the roadmap websocket's upsert event.
+      })
+      .catch(() => finish("Could not reach the server.", true));
+  }
+
   // ---- link picker ----
 
   const picker = document.getElementById("ticket-picker");
   const pickerInput = document.getElementById("picker-input");
   const pickerResults = document.getElementById("picker-results");
   const pickerNote = document.getElementById("picker-note");
+  const pickerPush = document.getElementById("picker-push");
   const pickerSub = document.getElementById("picker-sub");
   const pickerUnlink = document.getElementById("picker-unlink");
   const pickerLink = document.getElementById("picker-link");
@@ -3871,9 +4026,12 @@
     openPicker({
       kind: "item",
       title: item.title,
+      // Carried whole, not just its title: the push section needs project_id to say
+      // which epic the created ticket will hang under (see renderPushParent).
+      item,
       ticket: item.ticket,
       url: `/roadmap/${item.product}/items/${item.id}`,
-      heading: "Link a ticket",
+      heading: item.ticket ? "Link a ticket" : "Link or create a ticket",
       sub: item.ticket
         ? `"${item.title}" is linked to ${item.ticket.key}. Pick another ticket to move the link, or unlink it.`
         : `Link "${item.title}" to one ticket. A ticket can belong to one change only.`,
@@ -3881,19 +4039,24 @@
   }
 
   function openEpicPicker(project) {
+    const canPush = pushTrackers().length > 0;
     openPicker({
       kind: "project",
       title: project.title,
+      item: project,
       ticket: project.ticket,
       url: `/portfolio/projects/${project.id}`,
       // Only epic-level tickets are offered (and accepted server-side): a project is
       // what an epic is in the tracker's own hierarchy.
       type: "epic",
-      heading: "Link an epic",
+      heading: project.ticket ? "Link an epic" : "Link or create an epic",
       sub: project.ticket
         ? `"${project.title}" is tracked as ${project.ticket.key}. Pick another epic to move the link, or unlink it.`
-        : `"${project.title}" only exists locally so far — it is pending upload to the tracker, which isn't ` +
-          "available yet. If its epic already exists there, link it here.",
+        : canPush
+          ? `"${project.title}" only exists here so far. Create its epic in the tracker below, or link ` +
+            "the one that already exists there."
+          : `"${project.title}" only exists locally so far — it is pending upload to the tracker, which no ` +
+            "tracker here is set up for. If its epic already exists there, link it here.",
     });
   }
 
@@ -3905,15 +4068,130 @@
     document.getElementById("picker-title").textContent = target.heading;
     pickerSub.textContent = target.sub;
     pickerUnlink.classList.toggle("hidden", !target.ticket);
+    renderPushSection(target);
     picker.classList.add("open");
     pickerInput.focus();
     searchTickets("");
+  }
+
+  /* "It isn't in the tracker at all — create it." Offered only for something UNLINKED:
+     re-pointing an existing link is a link, not a push, and offering both at once would
+     invite a duplicate ticket for work that already has one.
+
+     This is where the config default gets overridden. The row's Push button is the
+     one-click path that takes [trackers.push] as-is; here the tracker, its project and
+     the issue type are all editable, because which project a given change belongs in is
+     a per-change fact that config can only guess at. */
+  function renderPushSection(target) {
+    const section = pickerPush;
+    section.textContent = "";
+    const targets = pushTrackers();
+    if (target.ticket || !targets.length) {
+      section.classList.add("hidden");
+      return;
+    }
+    section.classList.remove("hidden");
+
+    const isEpic = target.kind === "project";
+    section.appendChild(el("div", "push-lead",
+      isEpic
+        ? "Not in the tracker yet? Create the epic and link it in one step."
+        : "Not in the tracker yet? Create the ticket and link it in one step."));
+
+    const fields = el("div", "push-fields");
+    const trackerSelect = el("select");
+    for (const t of targets) {
+      const option = el("option", null, t.label);
+      option.value = t.id;
+      trackerSelect.appendChild(option);
+    }
+    const projectSelect = el("select");
+    const typeInput = el("input");
+    typeInput.type = "text";
+    // Free text, not a select: the issue types a project offers are per-instance and
+    // this page has never pulled them. A wrong one comes back as Jira's own error
+    // naming the types that exist, which is more useful than a list we guessed.
+    typeInput.setAttribute("aria-label", "Issue type");
+
+    /* The tracker choice drives the other two, so they are re-filled from its own
+       declared target rather than left showing the previous tracker's project. */
+    const syncToTracker = () => {
+      const t = targets.find((x) => x.id === trackerSelect.value) || targets[0];
+      projectSelect.textContent = "";
+      for (const key of t.push.projects) {
+        const option = el("option", null, key);
+        option.value = key;
+        projectSelect.appendChild(option);
+      }
+      projectSelect.value = t.push.project;
+      typeInput.value = isEpic ? t.push.epic_type : t.push.change_type;
+      renderPushParent(t.id);
+    };
+    trackerSelect.addEventListener("change", syncToTracker);
+
+    for (const [label, node] of [
+      ["Tracker", trackerSelect],
+      ["Project", projectSelect],
+      ["Issue type", typeInput],
+    ]) {
+      // One tracker is the common case and a select of one is noise, so its row is
+      // dropped - the lead text and the button already name the tracker.
+      if (node === trackerSelect && targets.length < 2) continue;
+      const wrap = el("label");
+      wrap.appendChild(el("span", null, label));
+      wrap.appendChild(node);
+      fields.appendChild(wrap);
+    }
+
+    const createBtn = el("button", null, "Create and link");
+    createBtn.type = "button";
+    createBtn.addEventListener("click", () => {
+      const type = typeInput.value.trim();
+      if (!type) {
+        pickerNote.textContent = "Name the issue type to create.";
+        pickerNote.classList.add("error");
+        return;
+      }
+      pickerNote.textContent = "";
+      pickerNote.classList.remove("error");
+      runPush(
+        createBtn,
+        `${target.url}/push`,
+        { tracker_id: trackerSelect.value, project: projectSelect.value, issue_type: type },
+        (message, isError) => {
+          if (isError) {
+            pickerNote.textContent = message;
+            pickerNote.classList.add("error");
+            return;
+          }
+          closeTicketPicker();
+          if (message) alert(message);
+        }
+      );
+    });
+    fields.appendChild(createBtn);
+    section.appendChild(fields);
+    // Where the new ticket will sit in the tracker's hierarchy, stated before the click.
+    section.appendChild(el("div", "push-parent"));
+    syncToTracker();
+  }
+
+  function renderPushParent(trackerId) {
+    const node = pickerPush.querySelector(".push-parent");
+    if (!node) return;
+    const item = pickerTarget && pickerTarget.item;
+    const parent = item ? pushParentKey(item, trackerId) : "";
+    node.textContent = parent
+      ? `It will hang under ${parent}, its project's epic.`
+      : "";
   }
 
   function closeTicketPicker() {
     picker.classList.remove("open");
     pickerTarget = null;
     pickerResults.textContent = "";
+    pickerPush.textContent = "";
+    pickerPush.classList.add("hidden");
   }
 
   function searchTickets(query) {

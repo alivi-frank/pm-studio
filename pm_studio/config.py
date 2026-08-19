@@ -137,6 +137,38 @@ class TrackerRoute:
     system: str = ""
 
 
+# Default issue types a push creates when the operator names none. "Story" is the
+# story-rung name in a stock Jira software project and "Epic" the rung above it; an
+# instance that renamed either says so in [trackers.push].
+DEFAULT_PUSH_CHANGE_TYPE = "Story"
+DEFAULT_PUSH_EPIC_TYPE = "Epic"
+
+
+@dataclass(frozen=True)
+class PushConfig:
+    """Where a PUSH creates tickets: the one project, and the type per rung.
+
+    Push is the write half of a tracker connection - a change planned here becomes a
+    real ticket there - and it is opt-in per tracker for two reasons. A sync token is
+    often deliberately read-only, so assuming write access would turn one button into a
+    confusing 403; and creating an issue on someone's board is an outward-facing act
+    that a deployment should have to declare, not inherit. With no [trackers.push]
+    table this is None on the TrackerConfig and every push affordance is absent - the
+    same all-or-nothing shape `imports` has.
+
+    `project` is required and must be one the tracker already syncs: a push into a
+    project the catalog never pulls would create a ticket that immediately reads as
+    unresolved on the card it was pushed from. It is the DEFAULT, not a cage - the push
+    dialog offers the tracker's other synced projects too (see server.py), because the
+    project a change belongs in is a per-change fact and config can only state the
+    common case.
+    """
+
+    project: str
+    change_type: str = DEFAULT_PUSH_CHANGE_TYPE
+    epic_type: str = DEFAULT_PUSH_EPIC_TYPE
+
+
 @dataclass(frozen=True)
 class TrackerConfig:
     """One external issue tracker PM Studio pulls ticket metadata from.
@@ -191,10 +223,21 @@ class TrackerConfig:
     # components of their own. Manual linking stays possible: exclusion governs what
     # the sync does on its own, never what a human does on purpose.
     exclude_components: tuple[str, ...] = ()
+    # PUSH: where this tracker creates tickets for work planned here. None (no
+    # [trackers.push] table) = read-only, the historical behavior, and every push
+    # affordance is absent rather than disabled. See PushConfig.
+    push: PushConfig | None = None
 
     @property
     def imports(self) -> bool:
         return bool(self.import_types and self.routes)
+
+    @property
+    def can_push(self) -> bool:
+        """Whether a push may be attempted. Both halves are required: a declared push
+        target is worthless without a credential and a base_url to send it to, and
+        answering True there would put a button on the board that can only fail."""
+        return self.push is not None and self.is_usable
 
     @property
     def is_usable(self) -> bool:
@@ -1053,6 +1096,45 @@ def _parse_trackers(
                 "silently would not"
             )
 
+        # PUSH target. Validated fatally for the same reason routes are: a push table
+        # naming a project this tracker does not sync, or sitting on a provider that
+        # cannot push, is a config that plainly says "you can create tickets here" and
+        # silently would not.
+        push_raw = entry.get("push")
+        push: PushConfig | None = None
+        if push_raw is not None:
+            if not isinstance(push_raw, dict):
+                _fatal(
+                    f"{config_path} {where} has `push` as a "
+                    f"{type(push_raw).__name__}; declare it as a [trackers.push] table"
+                )
+            if provider != "jira":
+                _fatal(
+                    f"{config_path} {where} declares [trackers.push], but pushing is "
+                    f"only implemented for Jira and this tracker is {provider!r}. "
+                    "Remove the table; syncing and manual linking still work."
+                )
+            push_project = str(push_raw.get("project", "")).strip()
+            if not push_project:
+                _fatal(
+                    f"{config_path} {where} [trackers.push] needs a `project` - the "
+                    "project key new tickets are created in"
+                )
+            if push_project not in project_keys:
+                _fatal(
+                    f"{config_path} {where} [trackers.push] pushes into project "
+                    f"{push_project!r}, which this tracker does not sync (projects: "
+                    f"{', '.join(project_keys) or 'none'}). A pushed ticket the catalog "
+                    "never pulls would read as unresolved on the card that created it."
+                )
+            push = PushConfig(
+                project=push_project,
+                change_type=str(push_raw.get("change_type", "")).strip()
+                or DEFAULT_PUSH_CHANGE_TYPE,
+                epic_type=str(push_raw.get("epic_type", "")).strip()
+                or DEFAULT_PUSH_EPIC_TYPE,
+            )
+
         excluded_set = {c.casefold() for c in exclude_components}
         for route in routes:
             if route.component and route.component.casefold() in excluded_set:
@@ -1079,6 +1161,7 @@ def _parse_trackers(
                 routes=tuple(routes),
                 since=since,
                 exclude_components=exclude_components,
+                push=push,
             )
         )
     return tuple(trackers)

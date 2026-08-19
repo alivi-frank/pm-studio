@@ -310,18 +310,39 @@ have one, say so and ask.
 synced automatically - they appear in your roadmap context block as \
 "[tracked as <Type> <KEY> (<state>)]". Treat them as read-only facts about the other system: \
 report them, plan around them, but never claim to have changed a ticket's type or status, \
-because nothing here writes back to Jira or ADO. Keep the PM Studio bucket/status current in \
-the usual way; the two are tracked independently on purpose.
+because nothing here ever UPDATES a ticket in Jira or ADO. Keep the PM Studio bucket/status \
+current in the usual way; the two are tracked independently on purpose.
 - PROJECTS carry the same link one rung up: a project is linked 1:1 to the EPIC it is tracked \
 as, and an initiative context block annotates each project heading accordingly. \
-"[tracked as Epic <KEY>]" means that epic IS this project in the tracker. \
+"[tracked as Epic <KEY>]" means that epic IS this project in the tracker.{push_guidance}
+"""
+
+# The two shapes the "project exists only here" paragraph takes, chosen on whether any
+# tracker declares a push target. Split rather than hedged because a PM that is vague
+# about this either promises an upload it cannot perform or refuses one the stakeholder
+# can do in a single click - and both cost the stakeholder a round trip.
+NO_PUSH_GUIDANCE = """ \
 "[local only - no epic in the tracker yet]" means the project was created here and is pending \
 upload - and uploading is NOT available: nothing in this system can create or update anything \
 in Jira or ADO. Never promise to file, sync or upload the epic. Linking is the stakeholder's \
 act, done from the roadmap or portfolio board (only epic-level tickets are accepted there); \
 your job is to report the state accurately and, when a stakeholder names an existing epic for \
-a local-only project, tell them to link it on the board.
-"""
+a local-only project, tell them to link it on the board."""
+
+# Push exists. Note what it does NOT change: this is a create-and-link, once, and never an
+# update - so the read-only sentence above stays true.
+PUSH_GUIDANCE = """ \
+"[local only - no epic in the tracker yet]" means the project was created here and nothing in \
+the tracker knows about it. This deployment CAN file it: the board has a "Push epic" control \
+that creates the epic in {push_summary} and links it in one step, and a change with no ticket \
+has the same "Push" control. So never tell a stakeholder that uploading is impossible - point \
+them at the control.
+- Pushing is the STAKEHOLDER's act, not yours. Do not push a change or a project yourself, \
+even though the roadmap endpoints are reachable to you: a push creates a real ticket on a \
+board other people work from, and which work is worth filing there - and when - is a product \
+decision. Recommend it, name the specific changes you think are ready, and let them click. \
+A push creates ONCE and never updates: it does not transition, retitle or close anything \
+afterwards, so a pushed ticket's state remains the tracker's own fact."""
 
 
 # Used instead of the above for a session with no pinned product (e.g. the default
@@ -835,6 +856,7 @@ class PMAgent:
                     ),
                 )
             if CONFIG.trackers:
+                pushable = [t for t in CONFIG.trackers if t.can_push]
                 roadmap_guidance += TRACKER_GUIDANCE_TEMPLATE.format(
                     product=home,
                     roadmap_base_url=ROADMAP_BASE_URL,
@@ -843,6 +865,18 @@ class PMAgent:
                         f"{t.label} — {t.provider}, projects "
                         + (", ".join(t.projects) or "none configured")
                         for t in CONFIG.trackers
+                    ),
+                    # Which of the two upload paragraphs the PM gets. With no pushable
+                    # tracker this is the pre-push paragraph verbatim, so a read-only
+                    # deployment's PM is told exactly what it was told before.
+                    push_guidance=(
+                        PUSH_GUIDANCE.format(
+                            push_summary=", ".join(
+                                f"{t.label} ({t.push.project})" for t in pushable
+                            )
+                        )
+                        if pushable
+                        else NO_PUSH_GUIDANCE
                     ),
                 )
         else:
