@@ -4209,9 +4209,10 @@
   }
 
   /* Every row here is a ticket you can actually pick: the server leaves out anything
-     already backing a change or a project. `hidden_linked` is why the list can be much
-     shorter than the catalog - said out loud, because a search that returns two rows out
-     of eleven matches otherwise reads as broken rather than as filtered. */
+     already backing a change or a project, and anything resolved won't-do. `hidden`
+     counts both by reason - said out loud, because a search that returns two rows out of
+     eleven matches otherwise reads as broken rather than as filtered, and "unlink it
+     there" and "it is not happening" are not the same problem. */
   function searchTickets(query) {
     const type = pickerTarget && pickerTarget.type ? `&type=${pickerTarget.type}` : "";
     // Only the newest request may paint. Debouncing keystrokes narrows the window but does
@@ -4221,20 +4222,33 @@
     const seq = ++searchSeq;
     fetch(`/trackers/tickets?q=${encodeURIComponent(query)}&limit=50${type}`)
       .then((r) => r.json())
-      .then(({ tickets, hidden_linked: hidden }) => {
+      .then(({ tickets, hidden }) => {
         if (seq !== searchSeq) return;
+        const linked = (hidden && hidden.linked) || 0;
+        const declined = (hidden && hidden.declined) || 0;
         pickerResults.textContent = "";
         if (!tickets.length) {
-          // Three different reasons for an empty list, and they need three different
-          // answers: everything matching is taken, nothing matches, or nothing is synced.
+          // Four reasons for an empty list, needing four different answers: everything
+          // matching is taken, everything matching is declined, nothing matches, or
+          // nothing is synced at all. "No match" and "all withheld" look identical on
+          // screen and have nothing in common as problems.
           const rung = pickerTarget && pickerTarget.type === "epic" ? "epic" : "ticket";
-          pickerResults.appendChild(el("div", "lens-empty",
-            hidden
-              ? `Every ${rung} matching that is already linked to something here ` +
-                `(${hidden} hidden). Unlink it there first, or create a new one.`
-              : TRACKERS.trackers.some((t) => t.ticket_count)
-                ? "No synced ticket matches that. You can still paste a full URL or key above."
-                : "Nothing synced yet — run a sync, or paste a ticket URL or key above."));
+          let message;
+          if (linked && declined) {
+            message = `Every ${rung} matching that is either already linked here ` +
+              `(${linked}) or resolved won't-do (${declined}), so none is offered.`;
+          } else if (linked) {
+            message = `Every ${rung} matching that is already linked to something here ` +
+              `(${linked} hidden). Unlink it there first, or create a new one.`;
+          } else if (declined) {
+            message = `Every ${rung} matching that is resolved won't-do (${declined} ` +
+              "hidden) — declined work is never offered. Create a new one instead.";
+          } else if (TRACKERS.trackers.some((t) => t.ticket_count)) {
+            message = "No synced ticket matches that. You can still paste a full URL or key above.";
+          } else {
+            message = "Nothing synced yet — run a sync, or paste a ticket URL or key above.";
+          }
+          pickerResults.appendChild(el("div", "lens-empty", message));
           return;
         }
         for (const ticket of tickets) {
@@ -4245,10 +4259,14 @@
           row.addEventListener("click", () => submitLink({ tracker_id: ticket.tracker_id, ticket_key: ticket.key }));
           pickerResults.appendChild(row);
         }
-        if (hidden) {
+        // Why the list is shorter than the catalog, by reason - the two are not the same
+        // problem, so they are not collapsed into one number.
+        const why = [];
+        if (linked) why.push(`${linked} already linked here`);
+        if (declined) why.push(`${declined} resolved won't-do`);
+        if (why.length) {
           pickerResults.appendChild(el("div", "picker-hidden",
-            `${hidden} more match but ${hidden === 1 ? "is" : "are"} already linked here, so ` +
-            `${hidden === 1 ? "it is" : "they are"} not shown.`));
+            `Not shown: ${why.join(", ")}.`));
         }
       })
       .catch(() => {});

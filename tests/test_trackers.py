@@ -556,8 +556,8 @@ class TrackerStoreSyncTest(_StoreCase):
         self.assertEqual([t["key"] for t in store.search("plat")[0]], ["PLAT-2"])
         self.assertEqual([t["key"] for t in store.search("portal")[0]], ["7"])
         self.assertEqual(len(store.search("")[0]), 3)
-        # Nothing excluded, so nothing hidden.
-        self.assertEqual(store.search("")[1], 0)
+        # Nothing excluded and nothing declined, so nothing hidden for either reason.
+        self.assertEqual(store.search("")[1], {"linked": 0, "declined": 0})
 
     def test_search_hides_excluded_tickets_and_counts_them(self) -> None:
         """Already-linked tickets are left out rather than offered: every row in the
@@ -567,7 +567,7 @@ class TrackerStoreSyncTest(_StoreCase):
             store.sync()
         tickets, hidden = store.search("", exclude=frozenset({("jira", "PLAT-2")}))
         self.assertEqual(sorted(t["key"] for t in tickets), ["7", "PROJ-1"])
-        self.assertEqual(hidden, 1)
+        self.assertEqual(hidden["linked"], 1)
 
     def test_exclusion_is_case_insensitive_for_jira(self) -> None:
         """The exclusion set is compared through normalize_key, or a link stored as
@@ -577,7 +577,7 @@ class TrackerStoreSyncTest(_StoreCase):
             store.sync()
         tickets, hidden = store.search("plat", exclude=frozenset({("jira", "plat-2".upper())}))
         self.assertEqual(tickets, [])
-        self.assertEqual(hidden, 1)
+        self.assertEqual(hidden["linked"], 1)
 
     def test_exclusion_is_applied_before_the_limit(self) -> None:
         """The whole point of filtering server-side. On a board where most of the catalog
@@ -591,7 +591,40 @@ class TrackerStoreSyncTest(_StoreCase):
             "", tracker_id="jira", limit=1, exclude=frozenset({("jira", "PLAT-2")})
         )
         self.assertEqual([t["key"] for t in tickets], ["PROJ-1"])
-        self.assertEqual(hidden, 1)
+        self.assertEqual(hidden["linked"], 1)
+
+    def test_declined_tickets_are_never_offered(self) -> None:
+        """A won't-do ticket is a decision NOT to build. The import passes already refuse
+        it; offering it for a human to link by hand would put declined work back on the
+        board through the other door."""
+        store = TrackerStore()
+        with _PatchRequest(self._handler):
+            store.sync()
+        with store._lock:
+            key = next(k for k, t in store._state.tickets.items() if t.key == "PROJ-1")
+            store._state.tickets[key] = dataclasses.replace(
+                store._state.tickets[key], state="Done", resolution="Won't Do"
+            )
+        tickets, hidden = store.search("")
+        self.assertNotIn("PROJ-1", [t["key"] for t in tickets])
+        self.assertEqual(hidden["declined"], 1)
+        # And it stays IN the catalog: the won't-do removal pass reads it there to notice a
+        # ticket declined after it was imported, and treats absence as unknown.
+        self.assertIsNotNone(store.lookup("jira", "PROJ-1"))
+
+    def test_a_declined_ticket_is_counted_apart_from_a_linked_one(self) -> None:
+        """Two reasons a candidate is withheld, two different fixes - unlink it there,
+        versus it is not happening at all - so the picker must not conflate them."""
+        store = TrackerStore()
+        with _PatchRequest(self._handler):
+            store.sync()
+        with store._lock:
+            key = next(k for k, t in store._state.tickets.items() if t.key == "PROJ-1")
+            store._state.tickets[key] = dataclasses.replace(
+                store._state.tickets[key], resolution="Wont-Do"
+            )
+        _, hidden = store.search("", exclude=frozenset({("jira", "PLAT-2")}))
+        self.assertEqual(hidden, {"linked": 1, "declined": 1})
 
     def test_ensure_ticket_fetches_one_outside_the_synced_projects(self) -> None:
         """Linking a ticket the catalog pull never covered must work, or it would render as

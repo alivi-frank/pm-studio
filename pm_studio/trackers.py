@@ -195,6 +195,26 @@ class Ticket:
     # for pre-existing caches, same as components.
     project: str = ""
 
+    @property
+    def is_wont_do(self) -> bool:
+        """Whether the tracker resolved this as not-happening.
+
+        Jira says it in the resolution ("Won't Do") and sometimes in a status of the same
+        name; both sit in the Done category, so nothing coarser can tell a declined ticket
+        from a shipped one. Spelled leniently - apostrophes, hyphens and case differ per
+        instance, because the name is workflow configuration, not a Jira constant.
+
+        A property on the ticket rather than a helper beside one caller: the import passes
+        refuse to import these, and the link picker refuses to offer them, and those two
+        must never disagree about what "declined" means.
+        """
+        for raw in (self.resolution, self.state):
+            text = (raw or "").replace("'", "").replace("\u2019", "")
+            text = text.replace("-", " ").replace("_", " ")
+            if " ".join(text.split()).casefold() == "wont do":
+                return True
+        return False
+
     def to_dict(self) -> dict:
         return asdict(self)
 
@@ -1135,23 +1155,33 @@ class TrackerStore:
         limit: int = 50,
         canonical: str = "",
         exclude: frozenset[tuple[str, str]] = frozenset(),
-    ) -> tuple[list[dict], int]:
-        """Candidate tickets for the link picker. Returns `(tickets, hidden)`.
+    ) -> tuple[list[dict], dict[str, int]]:
+        """Candidate tickets for the link picker. Returns `(tickets, hidden)`, where
+        `hidden` counts what was withheld, by reason: `{"linked": n, "declined": n}`.
 
         Substring match on key or title. `canonical` narrows to one canonical type slug
         (see CANONICAL_TYPES), applied before the limit so asking for epics cannot come
         back empty just because fifty stories sort ahead of them.
 
-        `exclude` is the set of `(tracker_id, normalized key)` already linked to something
-        in PM Studio; those are dropped rather than offered, and `hidden` counts how many
-        matched. Two things about that count matter:
+        Two kinds of ticket are withheld, both because they are not choices:
 
-        - It is applied BEFORE the limit, which is the whole point. On a mature board most
-          of the catalog is already linked - four in five is normal - so limiting first and
-          filtering after would spend a fifty-row page to show ten usable candidates.
-        - It is reported rather than swallowed, because a search that quietly returns two
-          rows out of eleven matches reads as a broken search. The picker says how many it
-          hid, so a short list is explained instead of suspicious.
+        - **Already linked** (`exclude`, the set of `(tracker_id, normalized key)` backing
+          a change or a project). One ticket backs one thing.
+        - **Resolved won't-do.** A decision NOT to build. The import passes already refuse
+          these; offering one for a human to link by hand would put declined work back on
+          the board through the other door. Deliberately NOT dropped from the catalog,
+          which stays the complete record: the removal pass reads it to notice a ticket
+          declined AFTER it was imported, and treats absence as unknown rather than
+          declined - purge them and that pass goes quietly blind.
+
+        Both filters run BEFORE the limit, which is the whole point. On a mature board most
+        of the catalog is already linked or resolved - four in five is normal - so limiting
+        first and filtering after would spend a fifty-row page to show ten real candidates.
+
+        Both counts are reported rather than swallowed, because a search that quietly
+        returns two rows out of eleven matches reads as a broken search. A caller that
+        wants a declined ticket anyway can still paste its key: this governs what is
+        OFFERED, never what a human may do on purpose.
         """
         needle = (query or "").strip().lower()
         with self._lock:
@@ -1164,7 +1194,11 @@ class TrackerStore:
             tickets = [
                 t for t in tickets if needle in t.key.lower() or needle in t.title.lower()
             ]
-        hidden = 0
+        hidden = {"linked": 0, "declined": 0}
+        declined = [t for t in tickets if t.is_wont_do]
+        if declined:
+            hidden["declined"] = len(declined)
+            tickets = [t for t in tickets if not t.is_wont_do]
         if exclude:
             # Last of the filters, so the per-ticket normalize_key runs over the narrowed
             # set rather than the whole catalog.
@@ -1173,7 +1207,7 @@ class TrackerStore:
                 for t in tickets
                 if (t.tracker_id, normalize_key(t.tracker_id, t.key)) not in exclude
             ]
-            hidden = len(tickets) - len(kept)
+            hidden["linked"] = len(tickets) - len(kept)
             tickets = kept
         # Key order, which is stable across syncs and across trackers. NOT recency: the
         # catalog carries no per-ticket updated timestamp yet, so there is nothing truer

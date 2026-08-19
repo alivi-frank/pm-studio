@@ -1761,8 +1761,10 @@ def search_tickets(q: str = "", tracker_id: str = "", limit: int = 50, type: str
     """Candidate tickets for the link picker, from the synced catalog only - this endpoint
     never calls out to a tracker, so typing in the picker cannot generate API traffic.
 
-    Every ticket returned is FREE to link: anything already backing a change or a project
-    is left out, and `hidden_linked` says how many matches that removed.
+    Every ticket returned is FREE to link and worth linking: anything already backing a
+    change or a project is left out, and so is anything resolved won't-do - a decision not
+    to build is not a candidate. `hidden` counts both, by reason. Pasting a key still
+    reaches either: this governs what is offered, not what a human may choose.
 
     `type` filters on the CANONICAL type slug (see trackers.CANONICAL_TYPES): the
     project picker asks for `type=epic` so it offers only the rung a project can link
@@ -1775,8 +1777,9 @@ def search_tickets(q: str = "", tracker_id: str = "", limit: int = 50, type: str
     #
     # Taken tickets are HIDDEN, not offered-and-refused. Every row in this list is meant to
     # be a choice, and on a mature board most of the catalog is already linked - so greying
-    # them out spent the page on rows nobody could pick. `hidden_linked` is what stops the
-    # short list that results from reading as a broken search.
+    # them out spent the page on rows nobody could pick. Won't-do tickets are withheld for
+    # the same reason, one rung further: not merely unavailable but not worth having. The
+    # per-reason `hidden` counts are what stop the short list from reading as a broken search.
     taken = frozenset(
         (tid, normalize_key(tid, key))
         for tid, key in (
@@ -1786,7 +1789,11 @@ def search_tickets(q: str = "", tracker_id: str = "", limit: int = 50, type: str
     tickets, hidden = tracker_store.search(
         q, tracker_id, max(1, min(limit, 200)), canonical=type, exclude=taken
     )
-    return {"tickets": tickets, "hidden_linked": hidden}
+    # `hidden` is per-reason (see TrackerStore.search): linked already backs something,
+    # declined is resolved won't-do. Both are stated so a short list is explained rather
+    # than suspicious, and they stay separate because the fixes differ - unlink it there,
+    # versus it is not happening at all.
+    return {"tickets": tickets, "hidden": hidden}
 
 
 @app.get("/trackers/releases")
@@ -2328,17 +2335,13 @@ def _remove_wont_do_imports() -> None:
 
 
 def _is_wont_do(ticket) -> bool:
-    """Whether the tracker resolved this ticket as not-happening. Jira says it in the
-    resolution ("Won't Do") or sometimes in a status of the same name; both sit in the
-    Done category, so without this check a declined ticket imports as a shipped-looking
-    "done". Spelled leniently (apostrophes, hyphens, case) because the name is
-    per-instance configuration, not a Jira constant."""
-    for raw in (ticket.resolution, ticket.state):
-        text = (raw or "").replace("'", "").replace("’", "")
-        text = text.replace("-", " ").replace("_", " ")
-        if " ".join(text.split()).casefold() == "wont do":
-            return True
-    return False
+    """Whether the tracker resolved this ticket as not-happening - see Ticket.is_wont_do,
+    which owns the spelling. Kept as a named helper because it reads as a rule at each of
+    its call sites, but it must not be a SECOND definition: the import passes refuse to
+    import a declined ticket and the link picker refuses to offer one, and the day those
+    two disagree is the day declined work reappears through whichever door still allows
+    it."""
+    return ticket.is_wont_do
 
 
 def _imported_status(ticket) -> str:
