@@ -1191,10 +1191,16 @@
     text-align: left;
     cursor: pointer;
   }
-  .picker-row:hover:not(:disabled) { border-color: var(--accent); }
-  .picker-row:disabled { opacity: 0.5; cursor: not-allowed; }
+  .picker-row:hover { border-color: var(--accent); }
   .picker-row .row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .picker-row .row-taken { font-size: 0.85em; color: var(--ink-muted); white-space: nowrap; }
+  /* Why the list is shorter than the catalog. A footnote, not a row: it is not pickable
+     and must not read as one. */
+  .picker-hidden {
+    padding: 6px 2px 0;
+    font-size: 0.78em;
+    color: var(--ink-muted);
+    font-style: italic;
+  }
   #picker-note { margin-top: 10px; font-size: 0.8em; color: var(--ink-muted); }
   #picker-note.error { color: var(--danger); }
   /* The push section: visually a separate offer from the search results above it, since
@@ -4010,6 +4016,8 @@
      search or paste, pick, PATCH - and only the target URL and the type filter differ. */
   let pickerTarget = null;
   let searchTimer = null;
+  // Monotonic id of the newest in-flight ticket search; see searchTickets.
+  let searchSeq = 0;
 
   function openTicketPicker(item) {
     // "Create or link" only where creating is actually possible - a read-only deployment
@@ -4200,17 +4208,33 @@
     pickerPush.classList.add("hidden");
   }
 
+  /* Every row here is a ticket you can actually pick: the server leaves out anything
+     already backing a change or a project. `hidden_linked` is why the list can be much
+     shorter than the catalog - said out loud, because a search that returns two rows out
+     of eleven matches otherwise reads as broken rather than as filtered. */
   function searchTickets(query) {
     const type = pickerTarget && pickerTarget.type ? `&type=${pickerTarget.type}` : "";
+    // Only the newest request may paint. Debouncing keystrokes narrows the window but does
+    // not close it: two requests in flight can come back in either order, and the slower
+    // older one would then leave the list showing results for a query nobody is typing
+    // any more - with a hidden-count footnote to make the wrong answer look authoritative.
+    const seq = ++searchSeq;
     fetch(`/trackers/tickets?q=${encodeURIComponent(query)}&limit=50${type}`)
       .then((r) => r.json())
-      .then(({ tickets }) => {
+      .then(({ tickets, hidden_linked: hidden }) => {
+        if (seq !== searchSeq) return;
         pickerResults.textContent = "";
         if (!tickets.length) {
+          // Three different reasons for an empty list, and they need three different
+          // answers: everything matching is taken, nothing matches, or nothing is synced.
+          const rung = pickerTarget && pickerTarget.type === "epic" ? "epic" : "ticket";
           pickerResults.appendChild(el("div", "lens-empty",
-            TRACKERS.trackers.some((t) => t.ticket_count)
-              ? "No synced ticket matches that. You can still paste a full URL or key above."
-              : "Nothing synced yet — run a sync, or paste a ticket URL or key above."));
+            hidden
+              ? `Every ${rung} matching that is already linked to something here ` +
+                `(${hidden} hidden). Unlink it there first, or create a new one.`
+              : TRACKERS.trackers.some((t) => t.ticket_count)
+                ? "No synced ticket matches that. You can still paste a full URL or key above."
+                : "Nothing synced yet — run a sync, or paste a ticket URL or key above."));
           return;
         }
         for (const ticket of tickets) {
@@ -4218,19 +4242,13 @@
           row.type = "button";
           row.appendChild(ticketBadge({ ...ticket, url: "" }, false));
           row.appendChild(el("span", "row-title", ticket.title || "(no title)"));
-          // Already-linked tickets are shown but unpickable: seeing that PROJ-12 is taken
-          // is more useful than it silently missing from the list.
-          const current = pickerTarget && pickerTarget.ticket;
-          const alreadyThis = current && current.key === ticket.key
-            && current.tracker_id === ticket.tracker_id;
-          if (ticket.linked && !alreadyThis) {
-            row.appendChild(el("span", "row-taken", "linked elsewhere"));
-            row.disabled = true;
-          } else if (alreadyThis) {
-            row.appendChild(el("span", "row-taken", "current"));
-          }
           row.addEventListener("click", () => submitLink({ tracker_id: ticket.tracker_id, ticket_key: ticket.key }));
           pickerResults.appendChild(row);
+        }
+        if (hidden) {
+          pickerResults.appendChild(el("div", "picker-hidden",
+            `${hidden} more match but ${hidden === 1 ? "is" : "are"} already linked here, so ` +
+            `${hidden === 1 ? "it is" : "they are"} not shown.`));
         }
       })
       .catch(() => {});

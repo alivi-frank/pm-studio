@@ -1761,27 +1761,32 @@ def search_tickets(q: str = "", tracker_id: str = "", limit: int = 50, type: str
     """Candidate tickets for the link picker, from the synced catalog only - this endpoint
     never calls out to a tracker, so typing in the picker cannot generate API traffic.
 
+    Every ticket returned is FREE to link: anything already backing a change or a project
+    is left out, and `hidden_linked` says how many matches that removed.
+
     `type` filters on the CANONICAL type slug (see trackers.CANONICAL_TYPES): the
     project picker asks for `type=epic` so it offers only the rung a project can link
     to, whatever the tracker's own name for that rung is.
     """
-    tickets = tracker_store.search(q, tracker_id, max(1, min(limit, 200)), canonical=type)
-    # Which candidates are already taken, so the picker can grey them out instead of
-    # letting someone choose one and only then be refused by the 1:1 check. A set of
-    # tuples rather than a joined string: how a catalog key is spelled is trackers.py's
-    # business, and duplicating that format here is what invites the two to drift apart.
-    # BOTH stores' links count as taken - one ticket backs one thing, change or project
-    # (see _apply_ticket_link / _apply_epic_link).
-    taken = {
+    # Which candidates are already taken. A set of tuples rather than a joined string:
+    # how a catalog key is spelled is trackers.py's business, and duplicating that format
+    # here is what invites the two to drift apart. BOTH stores' links count as taken - one
+    # ticket backs one thing, change or project (see _apply_ticket_link/_apply_epic_link).
+    #
+    # Taken tickets are HIDDEN, not offered-and-refused. Every row in this list is meant to
+    # be a choice, and on a mature board most of the catalog is already linked - so greying
+    # them out spent the page on rows nobody could pick. `hidden_linked` is what stops the
+    # short list that results from reading as a broken search.
+    taken = frozenset(
         (tid, normalize_key(tid, key))
         for tid, key in (
             roadmap_store.linked_ticket_refs() + portfolio_store.linked_ticket_refs()
         )
-    }
-    for ticket in tickets:
-        tid = ticket["tracker_id"]
-        ticket["linked"] = (tid, normalize_key(tid, ticket["key"])) in taken
-    return {"tickets": tickets}
+    )
+    tickets, hidden = tracker_store.search(
+        q, tracker_id, max(1, min(limit, 200)), canonical=type, exclude=taken
+    )
+    return {"tickets": tickets, "hidden_linked": hidden}
 
 
 @app.get("/trackers/releases")

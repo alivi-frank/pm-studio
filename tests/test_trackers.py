@@ -553,9 +553,45 @@ class TrackerStoreSyncTest(_StoreCase):
         store = TrackerStore()
         with _PatchRequest(self._handler):
             store.sync()
-        self.assertEqual([t["key"] for t in store.search("plat")], ["PLAT-2"])
-        self.assertEqual([t["key"] for t in store.search("portal")], ["7"])
-        self.assertEqual(len(store.search("")), 3)
+        self.assertEqual([t["key"] for t in store.search("plat")[0]], ["PLAT-2"])
+        self.assertEqual([t["key"] for t in store.search("portal")[0]], ["7"])
+        self.assertEqual(len(store.search("")[0]), 3)
+        # Nothing excluded, so nothing hidden.
+        self.assertEqual(store.search("")[1], 0)
+
+    def test_search_hides_excluded_tickets_and_counts_them(self) -> None:
+        """Already-linked tickets are left out rather than offered: every row in the
+        picker is meant to be a choice."""
+        store = TrackerStore()
+        with _PatchRequest(self._handler):
+            store.sync()
+        tickets, hidden = store.search("", exclude=frozenset({("jira", "PLAT-2")}))
+        self.assertEqual(sorted(t["key"] for t in tickets), ["7", "PROJ-1"])
+        self.assertEqual(hidden, 1)
+
+    def test_exclusion_is_case_insensitive_for_jira(self) -> None:
+        """The exclusion set is compared through normalize_key, or a link stored as
+        `plat-2` would fail to hide the catalog's `PLAT-2`."""
+        store = TrackerStore()
+        with _PatchRequest(self._handler):
+            store.sync()
+        tickets, hidden = store.search("plat", exclude=frozenset({("jira", "plat-2".upper())}))
+        self.assertEqual(tickets, [])
+        self.assertEqual(hidden, 1)
+
+    def test_exclusion_is_applied_before_the_limit(self) -> None:
+        """The whole point of filtering server-side. On a board where most of the catalog
+        is already linked, limiting first would spend the page on rows nobody can pick."""
+        store = TrackerStore()
+        with _PatchRequest(self._handler):
+            store.sync()
+        # Exclude the entry that sorts first, and ask for one row: the survivor must fill
+        # it rather than the page coming back empty.
+        tickets, hidden = store.search(
+            "", tracker_id="jira", limit=1, exclude=frozenset({("jira", "PLAT-2")})
+        )
+        self.assertEqual([t["key"] for t in tickets], ["PROJ-1"])
+        self.assertEqual(hidden, 1)
 
     def test_ensure_ticket_fetches_one_outside_the_synced_projects(self) -> None:
         """Linking a ticket the catalog pull never covered must work, or it would render as
