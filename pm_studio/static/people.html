@@ -137,6 +137,31 @@
     word-break: break-all;
   }
   .empty { color: var(--ink-muted); font-size: 0.88em; }
+  /* The directory's own rows. Deliberately the same table clothes as the roster above -
+     one page, one way a person is drawn. */
+  .identities { display: flex; flex-wrap: wrap; gap: 4px 6px; }
+  .identity {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 4px 2px 8px;
+    font-size: 0.78em;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    color: var(--ink-secondary);
+  }
+  .identity button {
+    padding: 0 4px;
+    font-size: 1em;
+    line-height: 1.3;
+    color: var(--ink-muted);
+    background: transparent;
+    border: 0;
+  }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .num.late { color: var(--error); }
+  .areas { color: var(--ink-secondary); font-size: 0.86em; }
+  .row-actions { display: flex; gap: 6px; justify-content: flex-end; }
 </style>
 </head>
 <body>
@@ -149,6 +174,22 @@
   <p class="ok" id="ok"></p>
 
   <section>
+    <h2>Who is doing the work</h2>
+    <p class="sub">
+      Filled in by the tracker sync from the assignees on your Jira and Azure DevOps
+      tickets — one entry per person, however many trackers know them. Assignment happens
+      on the <a href="/roadmap">roadmap board</a>, grouped by person; nothing here is ever
+      written back to a tracker.
+    </p>
+    <form class="invite" id="person-form">
+      <input id="person-name" type="text" placeholder="Add someone the trackers don't know — name" required />
+      <input id="person-email" type="email" placeholder="Email (optional)" />
+      <button type="submit">Add</button>
+    </form>
+    <div id="directory"></div>
+  </section>
+
+  <section id="roster-invite">
     <h2>Invite someone</h2>
     <p class="sub" id="invite-sub">Invites are sent by email when SMTP is configured; otherwise you get a link to share.</p>
     <form class="invite" id="invite-form">
@@ -162,7 +203,7 @@
     </div>
   </section>
 
-  <section>
+  <section id="roster-team">
     <h2>Team</h2>
     <p class="sub">Roles decide what someone can do. Only admins see this page or any cost data.</p>
     <table>
@@ -173,7 +214,7 @@
     </table>
   </section>
 
-  <section>
+  <section id="roster-invites">
     <h2>Open invites</h2>
     <p class="sub">Not yet accepted. Revoking one makes its link stop working.</p>
     <div id="invites"></div>
@@ -182,6 +223,9 @@
 <script>
   let me = null;
   let roles = {};
+  // What this session may do, from /auth/me. Empty in personal mode, where there is no
+  // identity and nothing is gated - see canWrite.
+  let myCaps = [];
 
   const errorBox = document.getElementById("error");
   const okBox = document.getElementById("ok");
@@ -214,6 +258,282 @@
     select.addEventListener("change", () => onChange(select.value));
     return select;
   }
+
+  /* ---- the people directory --------------------------------------------------------
+
+     Everybody the deployment knows is doing work, with their load beside them and their
+     tracker identities under their name. Three repairs live here, and each one exists
+     because reconciliation cannot always be right (see people.PeopleStore.reconcile):
+
+       merge   two entries that are one human - both trackers hid the email and the
+               display names differ, so nothing could have matched them automatically.
+       split   the opposite mistake: a name matched across trackers and they turned out
+               to be two different people.
+       retire  somebody who left. Inactive, never deleted: their name has to keep
+               resolving on every change they touched.
+
+     Names come from Jira and ADO, so they are untrusted text and every one of them
+     reaches the DOM through textContent - never a template string. */
+  let DIRECTORY = { people: [], workload: [], accounts: [] };
+
+  function loadFor(personId) {
+    return DIRECTORY.workload.find((row) => row.person_id === personId)
+      || { open: 0, now: 0, next: 0, later: 0, overdue: 0, shipped: 0, products: [], areas: [] };
+  }
+
+  function cell(row, text, className) {
+    const td = document.createElement("td");
+    if (className) td.className = className;
+    td.textContent = text;
+    row.appendChild(td);
+    return td;
+  }
+
+  function canWrite() {
+    // Repairing the directory is roadmap housekeeping, not access control - the server
+    // grants it to admin and pm (see server.py's directory endpoints). In personal mode
+    // there is no identity to check and everything is allowed, exactly as elsewhere.
+    if (!me) return true;
+    return myCaps.indexOf("manage_roadmap") !== -1;
+  }
+
+  function identityChips(person, writable) {
+    const wrap = document.createElement("div");
+    wrap.className = "identities";
+    (person.identities || []).forEach((identity) => {
+      const chip = document.createElement("span");
+      chip.className = "identity";
+      const label = document.createElement("span");
+      label.textContent = `${identity.tracker_id}: ${identity.display || identity.key}`;
+      chip.appendChild(label);
+      // Only offered when there is something to split away from - the server refuses a
+      // person's last identity, and a button that always errors is worse than no button.
+      if (writable && (person.identities || []).length > 1) {
+        const split = document.createElement("button");
+        split.type = "button";
+        split.textContent = "×";
+        split.title = "Not this person — split this identity into its own entry";
+        split.addEventListener("click", async () => {
+          try {
+            await api(`/people/directory/${person.id}/split`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ tracker_id: identity.tracker_id, key: identity.key }),
+            });
+            flash(okBox, `Split ${identity.display || identity.key} out of ${person.name}.`);
+          } catch (err) {
+            flash(errorBox, err.message);
+          }
+          refresh();
+        });
+        chip.appendChild(split);
+      }
+      wrap.appendChild(chip);
+    });
+    if (!(person.identities || []).length) {
+      const chip = document.createElement("span");
+      chip.className = "identity";
+      chip.textContent = "added here";
+      chip.title = "No tracker knows this person — they were added on this page";
+      wrap.appendChild(chip);
+    }
+    return wrap;
+  }
+
+  function mergeSelect(person, writable) {
+    const select = document.createElement("select");
+    const blank = document.createElement("option");
+    blank.value = "";
+    blank.textContent = "Merge in…";
+    select.appendChild(blank);
+    DIRECTORY.people.forEach((other) => {
+      if (other.id === person.id) return;
+      const option = document.createElement("option");
+      option.value = other.id;
+      option.textContent = other.name;
+      select.appendChild(option);
+    });
+    select.disabled = !writable || DIRECTORY.people.length < 2;
+    select.title = "Fold another entry into this one — they were the same person all along";
+    select.addEventListener("change", async () => {
+      const from = select.value;
+      if (!from) return;
+      const other = DIRECTORY.people.find((p) => p.id === from);
+      if (!confirm(`Fold ${other.name} into ${person.name}? Their tracker identities and `
+        + `any changes assigned to them move over, and ${other.name} disappears.`)) {
+        select.value = "";
+        return;
+      }
+      try {
+        const result = await api(`/people/directory/${person.id}/merge`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ from }),
+        });
+        flash(okBox, `Merged into ${person.name}`
+          + (result.changes_moved ? ` — ${result.changes_moved} change(s) moved.` : "."));
+      } catch (err) {
+        flash(errorBox, err.message);
+      }
+      refresh();
+    });
+    return select;
+  }
+
+  function accountSelect(person, writable) {
+    const select = document.createElement("select");
+    const blank = document.createElement("option");
+    blank.value = "";
+    blank.textContent = "Not signed in here";
+    select.appendChild(blank);
+    DIRECTORY.accounts.forEach((account) => {
+      const option = document.createElement("option");
+      option.value = account.id;
+      option.textContent = account.name || account.email;
+      if (account.id === person.account_id) option.selected = true;
+      select.appendChild(option);
+    });
+    select.disabled = !writable;
+    select.title = "The account this person signs in as — what lets their capacity and "
+      + "rate on the Time & cost page apply to the same human";
+    select.addEventListener("change", async () => {
+      try {
+        await api(`/people/directory/${person.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ account_id: select.value }),
+        });
+      } catch (err) {
+        flash(errorBox, err.message);
+      }
+      refresh();
+    });
+    return select;
+  }
+
+  function renderDirectory() {
+    const container = document.getElementById("directory");
+    container.innerHTML = "";
+    const writable = canWrite();
+    if (!DIRECTORY.people.length) {
+      const note = document.createElement("p");
+      note.className = "empty";
+      note.textContent = "Nobody yet. A tracker sync fills this in from the assignees on "
+        + "your tickets; until then, add anyone you want to assign work to.";
+      container.appendChild(note);
+      return;
+    }
+    const table = document.createElement("table");
+    const thead = document.createElement("thead");
+    const hrow = document.createElement("tr");
+    [["Name", ""], ["Known as", "How each tracker spells this person"],
+     ["Open", "Open changes assigned to them"], ["Now", "Of those, in the Now horizon"],
+     ["Late", "Past their target date"],
+     ["Areas", "Where their open work sits — the tracker's own components or area paths"],
+     ["Signs in as", ""], [""]].forEach(([label, hint]) => {
+      const th = document.createElement("th");
+      th.textContent = label;
+      if (hint) th.title = hint;
+      hrow.appendChild(th);
+    });
+    thead.appendChild(hrow);
+    table.appendChild(thead);
+    const body = document.createElement("tbody");
+    DIRECTORY.people.forEach((person) => {
+      const load = loadFor(person.id);
+      const row = document.createElement("tr");
+
+      const name = document.createElement("td");
+      const label = document.createElement("span");
+      label.textContent = person.name;
+      name.appendChild(label);
+      if (person.status !== "active") {
+        const badge = document.createElement("span");
+        badge.className = "badge disabled";
+        badge.textContent = "inactive";
+        badge.style.marginLeft = "8px";
+        name.appendChild(badge);
+      }
+      if (person.email) {
+        const mail = document.createElement("div");
+        mail.className = "email";
+        mail.textContent = person.email;
+        name.appendChild(mail);
+      }
+      row.appendChild(name);
+
+      const known = document.createElement("td");
+      known.appendChild(identityChips(person, writable));
+      row.appendChild(known);
+
+      cell(row, String(load.open), "num");
+      cell(row, String(load.now), "num");
+      cell(row, String(load.overdue), "num" + (load.overdue ? " late" : ""));
+      // The tracker's areas, then the products, capped - the same hint the board's load
+      // table gives, in the same order: coarse before fine.
+      const areas = (load.areas || []).slice(0, 3).map((a) => a.id);
+      cell(row, areas.length ? areas.join(", ") : "—", "areas");
+
+      const account = document.createElement("td");
+      // Only where there are accounts to pick from: in personal mode there are none, and
+      // an empty picker would suggest a feature that is off.
+      if (DIRECTORY.accounts.length) account.appendChild(accountSelect(person, writable));
+      else account.textContent = "—";
+      row.appendChild(account);
+
+      const actions = document.createElement("td");
+      const wrap = document.createElement("div");
+      wrap.className = "row-actions";
+      wrap.appendChild(mergeSelect(person, writable));
+      const retire = document.createElement("button");
+      retire.className = "ghost";
+      retire.disabled = !writable;
+      const active = person.status === "active";
+      retire.textContent = active ? "Retire" : "Reactivate";
+      retire.title = active
+        ? "Stop offering them for new work. Their name keeps resolving on everything they "
+          + "have already done."
+        : "Offer them for new work again.";
+      retire.addEventListener("click", async () => {
+        try {
+          await api(`/people/directory/${person.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: active ? "inactive" : "active" }),
+          });
+        } catch (err) {
+          flash(errorBox, err.message);
+        }
+        refresh();
+      });
+      wrap.appendChild(retire);
+      actions.appendChild(wrap);
+      row.appendChild(actions);
+
+      body.appendChild(row);
+    });
+    table.appendChild(body);
+    container.appendChild(table);
+  }
+
+  document.getElementById("person-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const name = document.getElementById("person-name");
+    const email = document.getElementById("person-email");
+    try {
+      await api("/people/directory", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name.value, email: email.value }),
+      });
+      flash(okBox, `${name.value.trim()} added.`);
+      name.value = "";
+      email.value = "";
+    } catch (err) {
+      flash(errorBox, err.message);
+    }
+    refresh();
+  });
 
   async function renderUsers() {
     const users = await api("/users");
@@ -361,11 +681,22 @@
 
   async function refresh() {
     try {
-      await renderUsers();
-      await renderInvites();
+      DIRECTORY = await api("/people/directory");
+      renderDirectory();
+      // The roster is enterprise-only and admin-only; the directory above is neither.
+      // Skipped rather than attempted, so a personal instance or a PM does not collect a
+      // 404 banner for a section that is correctly not on their page.
+      if (rosterVisible()) {
+        await renderUsers();
+        await renderInvites();
+      }
     } catch (err) {
       flash(errorBox, err.message);
     }
+  }
+
+  function rosterVisible() {
+    return myCaps.indexOf("manage_users") !== -1;
   }
 
   async function init() {
@@ -374,6 +705,7 @@
     const info = (await PMNav.auth) || {};
     me = info.user;
     roles = info.roles || {};
+    myCaps = info.capabilities || [];
     const select = document.getElementById("invite-role");
     Object.entries(roles).forEach(([value, label]) => {
       const option = document.createElement("option");
@@ -386,7 +718,14 @@
       document.getElementById("invite-sub").textContent =
         "No mail server is configured, so each invite gives you a link to share instead.";
     }
-    refresh();
+    // The capabilities the nav already fetched decide whether the roster half of this page
+    // exists at all. Hidden, not disabled: a viewer has no business reading a list of
+    // invite tokens, and the server refuses those endpoints independently.
+    const roster = rosterVisible();
+    for (const id of ["roster-invite", "roster-team", "roster-invites"]) {
+      document.getElementById(id).style.display = roster ? "" : "none";
+    }
+    await refresh();
   }
 
   init();

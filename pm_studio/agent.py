@@ -54,6 +54,10 @@ _EXTENSION_BY_MIME = {
 }
 
 ROADMAP_BASE_URL = f"{CONFIG.base_url}/roadmap"
+# The people directory (see people.py) - read-only for a PM, and the only place person ids
+# come from. Granted on the Bash allowlist alongside the roadmap write curls, since knowing
+# who to assign to is only useful to a session that can assign.
+PEOPLE_DIRECTORY_URL = f"{CONFIG.base_url}/people/directory"
 
 
 def agent_auth_header() -> str:
@@ -134,6 +138,27 @@ PATCH `"owner": ""` to clear it if this system takes the work over). An item wit
 EXTERNAL: keep its bucket/status current as the stakeholder reports progress, factor it into \
 plans and avoid building anything that duplicates or collides with it, but NEVER dispatch a \
 dev task for it - it is someone else's work, tracked here for visibility.
+- Each change also says WHO IS ON IT, where anybody is: your roadmap block marks it \
+`[assigned to <name>]`. That comes from one of two places - the tracker's own assignee on \
+a linked ticket, or an assignment made here - and for reading it you do not need to know \
+which. Use it: when the stakeholder asks who is working on something, answer from this \
+rather than guessing, and when you propose who should take the next slice of work, weigh \
+what each person is already carrying and which areas their current work sits in.
+  You can assign work yourself, which is worth doing the moment the stakeholder tells you \
+who is taking something:
+  curl -s {people_directory_url}{auth_header}
+  curl -s -X PATCH {roadmap_base_url}/{product}/items/<item_id>{auth_header} -H "Content-Type: application/json" \
+-d '{{"assignee": "<person_id>"}}'
+  The first lists everybody with their current load; assign by the `id` it gives, never by \
+typing a name - an id the directory does not know is rejected with a 400 rather than \
+stored. PATCH `"assignee": ""` to unassign, which on a linked change hands the answer back \
+to whoever the ticket says is on it.
+  Two things this is NOT. It is not `owner`: an assignee is who is doing a piece of work, \
+while an owner means the work is built somewhere else entirely and must never be dispatched \
+from here. And it never reaches Jira or Azure DevOps - nothing in this system writes an \
+assignee back to a tracker. So when you assign something here that the tracker disagrees \
+with, say so plainly: somebody still has to change it on their side. Never tell the \
+stakeholder a person has been notified or that a ticket has been updated.
 """
 
 # Appended for a PM pinned to a product that has anything BELOW it - children,
@@ -810,6 +835,7 @@ class PMAgent:
                     for pid in PRODUCTS
                 ),
                 roadmap_base_url=ROADMAP_BASE_URL,
+                people_directory_url=PEOPLE_DIRECTORY_URL,
                 auth_header=agent_auth_header(),
             )
             # Everything below the home product, not just its direct children: the
@@ -909,9 +935,16 @@ class PMAgent:
         # the same owned_products, so the two cannot disagree about what is writable.
         roadmap_tools = ""
         if owned_products or self.initiative_id:
-            roadmap_tools = f"Bash(curl -s -X POST {ROADMAP_BASE_URL}/*) " + "".join(
-                f"Bash(curl -s -X PATCH {ROADMAP_BASE_URL}/{owned}/*) "
-                for owned in owned_products
+            roadmap_tools = (
+                f"Bash(curl -s -X POST {ROADMAP_BASE_URL}/*) "
+                # Read-only, and granted with the write curls rather than separately: the
+                # directory's only use to a PM is turning a name into the id an assignment
+                # needs, so a session that cannot PATCH has nothing to do with it.
+                f"Bash(curl -s {PEOPLE_DIRECTORY_URL}*) "
+                + "".join(
+                    f"Bash(curl -s -X PATCH {ROADMAP_BASE_URL}/{owned}/*) "
+                    for owned in owned_products
+                )
             )
 
         # The mode slots: research swaps the mission/operating-model paragraphs and the

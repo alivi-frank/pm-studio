@@ -470,6 +470,63 @@ The cache at `workspace/trackers.json` is in `SENSITIVE_WORKSPACE_FILES`: it hol
 credential of ours but caches another system's ticket titles, and never committing it costs
 exactly one re-sync.
 
+## 3d. `people.py` — who is doing the work
+
+The directory of people, the load view derived from it, and the read-time join that puts an
+assignee on every change. Data at `workspace/people.json`.
+
+**Two fields on the ticket, one person in the directory.** A synced `Ticket` carries
+`assignee` (the display name), `assignee_key` (Jira `accountId`, ADO `uniqueName`, falling
+back to the name when an instance discloses neither) and `assignee_email` where one is
+disclosed — all additive, so a catalog written before they existed loads and reports nobody.
+`PeopleStore.reconcile` folds every distinct identity a sync saw into one `Person` per human,
+matching most-certain-first: the identity already recorded, then the same email, then the
+same normalized display name **from a different tracker**. Never within one tracker — two
+accounts on one Jira sharing a display name are two people, and merging them would attribute
+one person's work to the other. Nobody is ever removed: an assignee who drops out of the sync
+window has left the query, not the history. The pass runs first in `_run_tracker_sync`, so a
+change the import creates can name its assignee the same cycle.
+
+**A person is not an account.** Most assignees never sign in. `Person.account_id` optionally
+links one to an `accounts.User`, which is what lets the costing roster's capacity and rate
+apply to the same human; without it a person is simply a name to attribute work to. This is
+why the People page and `GET /people/directory` work in personal mode, where the roster half
+of that page does not exist.
+
+**Two possible assignees, one answer, both reported.** A change's own `assignee` (a person
+id) is this deployment's decision; a linked ticket's assignee is the tracker's.
+`effective_assignee` resolves them at read time — local wins, and a disagreement comes back
+as `conflict: true` rather than being hidden, because a local reassignment the tracker has
+not been told about is the thing somebody has to go and say out loud. `server._with_ticket`
+applies it, so the two joins a card needs cannot come apart. Clearing `assignee` on a linked
+change hands the answer back to the ticket rather than to nobody.
+
+**Nothing here writes to a tracker.** Assignment is local planning only — the single write
+pm_studio makes to Jira/ADO is still `push_ticket`. The PM prompt says so and is told never
+to claim a person has been notified.
+
+**Load is derived, never stored.** `workload()` counts *open* changes per person, split by
+horizon, with overdue/in-flight counts and the products, systems and tracker areas the work
+sits in — because "who has room" and "who knows this area" are two questions and an
+assignment needs both. Shipped work is reported separately, never as load. Unassigned work
+comes back as its own row (`UNASSIGNED`), which on most boards is the largest one. The
+board's own load table is computed client-side from the sections it is already drawing, so an
+optimistic assignment cannot leave a stale figure sitting above the card that just moved;
+`GET /people/directory` serves the server-side version for the People page.
+
+`workspace/people.json` is in `SENSITIVE_WORKSPACE_FILES`, and is the sharper case of why
+that list exists: `trackers.json` caches other people's work, this holds their identity —
+real names and email addresses reconciled out of another organisation's tracker. Unstaged
+from every snapshot unconditionally, and listed in the scaffolded `.gitignore` as well.
+
+**Repairs.** Reconciliation cannot always be right, so `merge` (two entries, one human) and
+`split_identity` (one entry, two humans) exist, both on the People page and both needing
+`manage_roadmap` — this is roadmap housekeeping, not access control. A merge re-points local
+assignments **before** folding the entries, so a failure between the steps leaves changes
+naming the survivor rather than an id that no longer exists. Deleting is refused for anyone a
+tracker knows (they return next sync) or anyone still holding work; `inactive` is the honest
+retirement, and keeps their name resolving on everything they did.
+
 ## 4. `tasks.py` — dev-task registry (one per session)
 
 ```python
@@ -821,9 +878,12 @@ background-thread → websocket hops via `loop.call_soon_threadsafe(asyncio.crea
 | `POST /chat/{id}/reset` | archive + clear |
 | `POST /tasks/{id}` `{"task": "...", "system": "..."}` | dispatch dev task (immediate return); `system` required once `[systems]` is declared — it routes the system's `gitflow` rules into the dev agent's prompt — and refused when it isn't (400 naming the valid ids either way) |
 | `GET /tasks/{id}`, `GET /tasks/{id}/{tid}` | list / one |
-| `GET /roadmap/data` | `{products, product_parents, systems, product_systems, unattributed, items-by-product}` |
+| `GET /roadmap/data` | `{products, product_parents, systems, product_systems, unattributed, items-by-product, people}`. Every change (and project) carries `assigned` — who is on it, from the local assignment or the linked ticket, with `conflict` when they disagree. The load table is NOT in this payload: the board derives it from the sections it draws, so an optimistic assignment cannot leave a stale figure above the card that just moved |
+| `GET /people/directory` | the directory, the server-side load table, and (enterprise only) the accounts a person can be linked to. Open to any reader, in both modes |
+| `POST /people/directory`, `PATCH /people/directory/{id}`, `DELETE /people/directory/{id}` | add somebody the trackers do not know, rename/retire/link them to an account, remove a local entry. `manage_roadmap` |
+| `POST /people/directory/{id}/merge` `{"from"}`, `POST /people/directory/{id}/split` `{"tracker_id","key"}` | the two reconciliation repairs (see §3d). Merge re-points local assignments first and reports `changes_moved` |
 | `GET /systems`, `GET /systems/data` | the system catalogue page and its dataset: one row per declared system (label, path, repo, guidance, gitflow, pipelines, the products touching it, its change counts, whether it is mid-reclassification), plus the restructure gap. `{"declared": false}` when no `[systems]` table exists |
-| `GET/POST /roadmap/{product}/items`, `PATCH/DELETE /roadmap/{product}/items/{item_id}` | board CRUD; PATCH/DELETE verify the URL product OWNS the item (this is what makes own-product-scoped allowlists safe); PATCH with `move_to_product` triggers the move flow; `start_at`/`target_at` accept `"YYYY-MM-DD"` or `""` to clear, and a malformed or inverted pair is a 400 naming the reason with nothing applied |
+| `GET/POST /roadmap/{product}/items`, `PATCH/DELETE /roadmap/{product}/items/{item_id}` | board CRUD; PATCH/DELETE verify the URL product OWNS the item (this is what makes own-product-scoped allowlists safe); PATCH with `move_to_product` triggers the move flow; `start_at`/`target_at` accept `"YYYY-MM-DD"` or `""` to clear, and a malformed or inverted pair is a 400 naming the reason with nothing applied; `assignee` takes a person id, `""` unassigns, and an id the directory does not know is a 400 rather than a card that reads "assigned to somebody unknown" forever |
 | `POST /roadmap/{product}/items/{item_id}/push`, `POST /portfolio/projects/{id}/push` | create the ticket/epic for work planned here and link it, in one call. Optional `tracker_id`/`project`/`issue_type` override `[trackers.push]`; an empty body is the one-click path. 409 if already linked (naming the ticket) or if a created ticket could not be linked (naming its key); 400 if no tracker can push or the target is ambiguous; 502 carrying the tracker's own refusal. Response adds `push: {key, url, parent_key, parent_skipped}` |
 | WS `/ws/chat/{id}`, `/ws/tasks/{id}`, `/ws/sessions`, `/ws/roadmap` | push channels |
 
@@ -902,10 +962,11 @@ stylesheet and a **non-deferred** `<script>` in `<head>`, plus one element in th
    greyscale. The arrows between the first three *are* the work model — intent narrowing
    into work — drawn where the links already are. On the right, in enterprise mode, the
    acting user, their role and **Sign out** — on every page, not just the sessions list.
-   `Time & cost` and `People` are filtered by capability (`view_cost`) and role
-   (`admin`); in personal mode `People` is hidden entirely, since its endpoints are
-   enterprise-only and the tab would lead to nothing but an error. Hiding a tab is
-   orientation, never protection — §7 enforces every capability.
+   `Time & cost` is filtered by capability (`view_cost`). `People` is shown to everyone,
+   in both modes: it carries the directory of who is doing the work, which a tracker sync
+   fills in whether or not anybody can sign in — the page hides its enterprise-only roster
+   half rather than the tab hiding the page. Hiding a tab is orientation, never protection
+   — §7 enforces every capability.
 2. **The context row** — what the page you are on *holds*, plus a slot it fills itself.
    An ordinary page gets a label (not a link): its name and one-line descriptor. The
    pages nested inside a session (`chat`, `dashboard`) get a breadcrumb —
@@ -995,18 +1056,35 @@ vertical space on a board that wants it.
   `localStorage` and both mounted into the nav's controls slot rather than a page header
   of their own (the page has no `<h1>`; the lit tab and the context row already say what
   it is):
-  - *Group by* — `product` (one section per product board) or `initiative` (one section
-    per initiative, computed client-side to mirror `portfolio.group_changes_by_initiative`
-    so it re-groups on a websocket event instead of refetching). Either way a group is
-    `{key, title, flags, changes, omit, addTo}`, and both views render the same shape.
+  - *Group by* — `product` (one section per product board), `initiative` (one section per
+    initiative, computed client-side to mirror `portfolio.group_changes_by_initiative` so it
+    re-groups on a websocket event instead of refetching), or `person` (one section per
+    person, heaviest open load first, with unassigned work trailing as its own section
+    whatever its size). Any of them yields a group of the same shape —
+    `{key, title, flags, changes, omit, addTo}` — and every view renders it.
     `addTo` is null when a section has no unambiguous board to add to — an initiative
     spanning two products shows no "+" rather than guessing one.
+
+    The person lens only draws people who hold work: the directory holds everybody either
+    tracker ever mentioned, and a board of mostly empty headings answers nothing. Who has
+    *room* is the **load table** above it — open counts by horizon, overdue, and the
+    products and tracker areas each person's work sits in, with zero-load active people
+    added back because they are the answer to that question. It is derived from the very
+    sections below it (`loadRows`), never fetched, so an optimistic assignment cannot leave
+    a stale number above the card that just moved, and it narrows with the search filter
+    like every other count on the page.
   - *View* — `board` (Now/Next/Later lanes) or `timeline` (a Gantt).
 
   A card is **one line collapsed**: a status dot, the title, and a middot-separated meta
-  line (product / project / external owner / ticket badge). Clicking it reveals the
-  description and every control — status, horizon, move-to-product, owner, ticket link,
-  delete. Those controls used to be on every card at all times, four selects and three
+  line (product / project / external owner / assignee / ticket badge). The assignee chip
+  says which source knows — a bare name for a local assignment, "(from tracker)" when
+  nobody here overrode the ticket, and the warning treatment naming both when they
+  disagree — and is omitted inside a person section, which the heading already is.
+  Clicking the card reveals the description and every control — status, horizon,
+  move-to-product, assignee, owner, ticket link, delete. Assignment is a picker over the
+  directory rather than free text, because a typed name would be an id nothing resolves;
+  display names come from Jira/ADO, so they reach the DOM through `textContent` only,
+  never a template string. Those controls used to be on every card at all times, four selects and three
   buttons deep, which is what made the old board ~140 px per change. Open-card state
   lives in a JS `Set`, not the DOM, because a websocket event re-renders everything.
 
@@ -1035,6 +1113,12 @@ vertical space on a board that wants it.
   Cross-product suggestions still surface as an untriaged strip with accept/dismiss, and
   done items still collapse into a "recently shipped" disclosure. Live via `/ws/roadmap`;
   a stakeholder can add and edit items directly.
+- **people.html** (`/people`) — two sections, gated separately. **Who is doing the work**:
+  the directory with each person's load beside them and their tracker identities under their
+  name, plus the merge/split repairs and the optional link to a sign-in account. Reachable in
+  both modes by any reader; the writes need `manage_roadmap`. **The roster** (invite, team,
+  open invites) is enterprise-only and shown only to `manage_users`, hidden rather than
+  disabled — a viewer has no business reading a list of invite tokens.
 
 ## 10. Concurrency model (summary)
 
@@ -1044,6 +1128,7 @@ vertical space on a board that wants it.
 | per-session `pm_lock` | PM turn execution + history append (manual vs auto-continue) |
 | `SessionManager._registry_lock` | registry mutations (create/cleanup/delete/meta/model/archive) |
 | `RoadmapStore._lock` | item mutations |
+| `PeopleStore._lock` | directory mutations (reconcile, merge, split, status) |
 | per-chat-ws asyncio send lock | concurrent sends on one websocket |
 
 Threads: dev tasks, merge/sync/terminate, and auto-continue each run on daemon threads;

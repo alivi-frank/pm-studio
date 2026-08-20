@@ -204,6 +204,7 @@ GITIGNORE_ENTRIES: tuple[str, ...] = (
     "{workspace_rel}/audit.jsonl",
     "{workspace_rel}/activity.jsonl",
     "{workspace_rel}/trackers.json",
+    "{workspace_rel}/people.json",
     # The stores write `<name>.tmp` then atomically replace; a snapshot landing inside
     # that window would otherwise catch one.
     "{workspace_rel}/*.tmp",
@@ -222,7 +223,8 @@ GITIGNORE_SENSITIVE_NOTE = (
     "# Keep these ignored: .env holds the API tokens config.toml names via token_env,\n"
     "# accounts.json holds password hashes and live login tokens,\n"
     "# costing.json holds pay rates, audit/activity name who did what, and\n"
-    "# trackers.json caches ticket titles pulled from your Jira/ADO."
+    "# trackers.json caches ticket titles pulled from your Jira/ADO, and\n"
+    "# people.json holds the names and addresses of whoever those tickets are assigned to."
 )
 
 

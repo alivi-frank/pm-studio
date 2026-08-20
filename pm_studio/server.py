@@ -40,6 +40,13 @@ from .costing import (
     current_week,
 )
 from .models import list_models
+from .people import (
+    UNASSIGNED,
+    PeopleError,
+    PeopleStore,
+    effective_assignee,
+    workload,
+)
 from .portfolio import (
     DEFAULT_CATCH_ALL_PROJECT,
     DEFAULT_MAINTENANCE_GOAL,
@@ -107,6 +114,11 @@ portfolio_store = PortfolioStore()
 # configured it holds nothing and every ticket join below resolves to None, so the board
 # behaves exactly as it did before the feature existed.
 tracker_store = TrackerStore()
+# Who is doing the work. Populated by the tracker sync rather than by hand (see
+# _reconcile_people); on a deployment with no trackers it holds only whoever was added
+# locally, and every assignee join below resolves to nobody - which renders as an
+# unassigned board, exactly as it did before this existed.
+people_store = PeopleStore()
 # Constructed in both modes (it is empty and untouched in personal mode) so nothing
 # has to branch on mode just to reach the store.
 account_store = AccountStore()
@@ -146,6 +158,14 @@ def _lookup_ticket(tracker_id: str, key: str) -> dict | None:
     return ticket.to_dict() if ticket is not None else None
 
 
+def _lookup_person(person_id: str) -> str:
+    """A person id to the name a PM should read. Empty for an id nothing resolves, which
+    reads on the context line as no assignee at all - the honest answer, since a stale id
+    names nobody."""
+    person = people_store.get(person_id)
+    return person.name if person else ""
+
+
 def _with_ticket(item: dict) -> dict:
     """Joins a roadmap change - or a project, which carries the same two link fields -
     to its linked ticket for the wire.
@@ -158,11 +178,11 @@ def _with_ticket(item: dict) -> dict:
     """
     tracker_id, key = item.get("tracker_id"), item.get("ticket_key")
     if not tracker_id or not key:
-        return {**item, "ticket": None}
+        return _with_assignee({**item, "ticket": None})
     ticket = tracker_store.lookup(tracker_id, key)
     if ticket is None:
         config = CONFIG.tracker(tracker_id)
-        return {
+        return _with_assignee({
             **item,
             "ticket": {
                 "tracker_id": tracker_id,
@@ -176,16 +196,29 @@ def _with_ticket(item: dict) -> dict:
                 "url": "",
                 "unresolved": True,
             },
-        }
+        })
     config = CONFIG.tracker(tracker_id)
-    return {
+    return _with_assignee({
         **item,
         "ticket": {
             **ticket.to_dict(),
             "tracker_label": config.label if config else tracker_id,
             "unresolved": False,
         },
-    }
+    })
+
+
+def _with_assignee(item: dict) -> dict:
+    """Adds `assigned` - who is on this change and on whose authority.
+
+    Applied inside `_with_ticket` rather than beside it, so the two joins a card needs
+    cannot come apart: the tracker's assignee is only knowable once the ticket has been
+    resolved, and an endpoint that remembered one join and forgot the other would render a
+    board that quietly disagrees with the next one. Projects go through the same function
+    and get the epic's assignee, which is the right answer for "who is on this epic" and
+    costs nothing on a project with no link.
+    """
+    return {**item, "assigned": effective_assignee(item, item.get("ticket"), people_store)}
 
 
 def _initiative_context(initiative_id: str) -> tuple[str, list[str]] | None:
@@ -287,7 +320,12 @@ def _initiative_context(initiative_id: str) -> tuple[str, list[str]] | None:
         if change["status"] != "done"
     ]
     return (
-        roadmap_store.describe_initiative(heading, groups, ticket_lookup=_lookup_ticket),
+        roadmap_store.describe_initiative(
+            heading,
+            groups,
+            ticket_lookup=_lookup_ticket,
+            person_lookup=_lookup_person,
+        ),
         shown,
     )
 
@@ -324,7 +362,9 @@ def _roadmap_context_for(session_id: str) -> str:
     # under its own heading and again under its parent's.
     for root in [p for p in owned if parent_of(p) not in owned]:
         blocks.append(
-            roadmap_store.describe_own_product(root, ticket_lookup=_lookup_ticket)
+            roadmap_store.describe_own_product(
+                root, ticket_lookup=_lookup_ticket, person_lookup=_lookup_person
+            )
         )
 
     others = roadmap_store.describe_other_products(owned or "", exclude_item_ids=shown_ids)
@@ -895,8 +935,147 @@ def read_audit(request: Request, limit: int = 200) -> list[dict]:
 
 @app.get("/people")
 def people_page() -> FileResponse:
-    """The admin roster screen: users, roles, invites."""
+    """Who is doing the work - the people directory - plus, for an admin on an enterprise
+    instance, the roster: users, roles, invites. The page hides the half you cannot use."""
     return _app_asset("people.html")
+
+
+# ---- the people directory -------------------------------------------------------------
+#
+# Deliberately NOT behind _require_enterprise, unlike the roster endpoints above. The
+# directory is not an access-control list - it is who is doing the work, discovered from the
+# trackers - and a one-person deployment syncing a shared Jira has exactly the same need to
+# see who else is on what. Writes take `manage_roadmap` (admin + pm) rather than
+# `manage_users`: repairing a name match or adding a designer nobody invited is roadmap
+# housekeeping, not handing out access.
+
+
+@app.get("/people/directory")
+def list_directory() -> dict:
+    """Everybody the deployment knows about, plus the load table.
+
+    Reads are open, like every other read here (see authz.py) - hence no `request` to
+    authorize. The load rides along so the people page can show it without duplicating the
+    board's join.
+    """
+    changes = [
+        _with_ticket(item)
+        for items in roadmap_store.list_all().values()
+        for item in items
+    ]
+    return {
+        "people": people_store.list_people(),
+        "workload": workload(changes),
+        "unassigned_key": UNASSIGNED,
+        # So the page can offer "this person signs in as ..." without a second request.
+        # Empty in personal mode, where there are no accounts at all.
+        "accounts": account_store.list_users() if CONFIG.is_enterprise else [],
+    }
+
+
+@app.post("/people/directory")
+def create_person(request: Request, payload: dict = Body(...)) -> dict:
+    """Somebody the trackers have never seen: a designer, a partner team's lead, whoever a
+    locally-planned change is for before a ticket exists."""
+    actor = _require(request, "manage_roadmap")
+    try:
+        person = people_store.create_local(
+            name=payload.get("name") or "", email=payload.get("email") or ""
+        )
+    except PeopleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit(actor, "people.created", person.id, person.name)
+    return person.to_public_dict()
+
+
+@app.patch("/people/directory/{person_id}")
+def update_person(person_id: str, request: Request, payload: dict = Body(default={})) -> dict:
+    actor = _require(request, "manage_roadmap")
+    if "account_id" in payload:
+        account_id = (payload.get("account_id") or "").strip()
+        if account_id and account_store.get(account_id) is None:
+            raise HTTPException(status_code=400, detail=f"Unknown account: {account_id}")
+    try:
+        person = people_store.update(
+            person_id,
+            name=payload.get("name"),
+            email=payload.get("email"),
+            status=payload.get("status"),
+            # "" unlinks the sign-in account, same convention as the roadmap fields.
+            account_id=payload.get("account_id"),
+        )
+    except PeopleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit(actor, "people.updated", person.id, person.name)
+    return person.to_public_dict()
+
+
+@app.post("/people/directory/{person_id}/merge")
+def merge_person(person_id: str, request: Request, payload: dict = Body(...)) -> dict:
+    """Fold `from` into `person_id`: they were one human all along.
+
+    The repair for the reconciliation that could not know - both trackers hid the email and
+    the display names differ, so nothing could have matched them automatically.
+
+    Local assignments are re-pointed BEFORE the merge, deliberately. Done the other way, a
+    failure between the two steps would leave changes naming an id that no longer exists;
+    done this way, the worst case is changes correctly naming the survivor while the
+    absorbed entry lingers, which the next attempt simply finishes.
+    """
+    actor = _require(request, "manage_roadmap")
+    from_id = (payload.get("from") or "").strip()
+    if people_store.get(person_id) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown person: {person_id}")
+    if people_store.get(from_id) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown person: {from_id}")
+    moved = 0
+    for item in roadmap_store.items_assigned_to(from_id):
+        roadmap_store.update(item["id"], assignee=person_id)
+        moved += 1
+    try:
+        person = people_store.merge(person_id, from_id)
+    except PeopleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit(actor, "people.merged", person.id, f"absorbed {from_id}, {moved} change(s) moved")
+    return {**person.to_public_dict(), "changes_moved": moved}
+
+
+@app.post("/people/directory/{person_id}/split")
+def split_person_identity(person_id: str, request: Request, payload: dict = Body(...)) -> dict:
+    """Pull one tracker identity back out into its own entry: the name match was wrong, and
+    these are two different people."""
+    actor = _require(request, "manage_roadmap")
+    try:
+        split = people_store.split_identity(
+            person_id,
+            tracker_id=(payload.get("tracker_id") or "").strip(),
+            key=(payload.get("key") or "").strip(),
+        )
+    except PeopleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit(actor, "people.split", split.id, f"split out of {person_id}")
+    return split.to_public_dict()
+
+
+@app.delete("/people/directory/{person_id}")
+def delete_person(person_id: str, request: Request) -> dict:
+    """Only ever a local entry no tracker knows about - anybody else returns on the next
+    sync, so `inactive` is the honest way to retire them. Refused while any change still
+    names them, because deleting one silently unassigns real work."""
+    actor = _require(request, "manage_roadmap")
+    assigned = roadmap_store.items_assigned_to(person_id)
+    if assigned:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{len(assigned)} change(s) are still assigned to this person. "
+            "Reassign them first, or set the person inactive to keep the history.",
+        )
+    try:
+        people_store.delete(person_id)
+    except PeopleError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _audit(actor, "people.deleted", person_id)
+    return {"ok": True}
 
 
 # ---- session picker / lifecycle ----
@@ -1864,8 +2043,9 @@ def _run_tracker_sync(tracker_id: str | None) -> None:
     tracker's failure in its own status entry, and this wrapper is the last backstop so a
     bug here cannot kill the thread silently.
 
-    Pass order matters. Epics become projects FIRST, so that by the time the change
-    import runs, an epic-level ticket is already project-held and cannot be imported as
+    Pass order matters. The people directory is folded first, so a change the import
+    creates can name whoever the ticket is assigned to straight away. Epics become
+    projects next, so that by the time the change import runs, an epic-level ticket is already project-held and cannot be imported as
     a change; the assignment pass runs after, so changes the import just created land in
     their epic's project in the same cycle instead of waiting for the next one. The
     won't-do removal runs LAST and changes-before-projects internally, so a declined
@@ -1882,6 +2062,9 @@ def _run_tracker_sync(tracker_id: str | None) -> None:
         tracker_store.refresh_missing(
             roadmap_store.linked_ticket_refs() + portfolio_store.linked_ticket_refs()
         )
+        # Before any import pass: a change the import is about to create should be able
+        # to name its assignee the moment it lands, not one sync later.
+        _reconcile_people()
         _sync_epic_projects()
         _import_routed_tickets()
         _assign_changes_to_epic_projects()
@@ -1890,6 +2073,39 @@ def _run_tracker_sync(tracker_id: str | None) -> None:
     except Exception as exc:  # noqa: BLE001
         print(f"[trackers] sync failed: {exc}")
     _on_roadmap_update({"type": "trackers_synced", "trackers": _described_trackers()})
+
+
+def _reconcile_people() -> None:
+    """The sync step that keeps the people directory current.
+
+    Every distinct assignee in the catalog is folded into the directory: a name no identity
+    claims yet becomes a person, a name a second tracker spells differently attaches to the
+    person already there (see PeopleStore.reconcile for the matching order). Nobody is ever
+    removed - an assignee who drops out of the sync window has left the query, not the
+    history of the work they did.
+
+    Counted and printed like the import passes, and for the same reason: a directory that
+    silently gained forty entries because two trackers disagree about somebody's name is a
+    thing you want to see in the log rather than discover in the load table.
+    """
+    seen: dict[tuple[str, str], tuple[str, str, str, str]] = {}
+    for config in CONFIG.trackers:
+        for ticket in tracker_store.tickets_of(config.id):
+            key = ticket.assignee_key or ticket.assignee
+            if not key:
+                continue
+            seen.setdefault(
+                (config.id, key),
+                (config.id, key, ticket.assignee, ticket.assignee_email),
+            )
+    if not seen:
+        return
+    report = people_store.reconcile(seen.values())
+    if report["created"] or report["attached"]:
+        print(
+            f"[trackers] people -> {report['created']} new, "
+            f"{report['attached']} identity(ies) attached to someone already known"
+        )
 
 
 # Per-tracker outcome of the last import pass, additive on GET /trackers: how many
@@ -2659,6 +2875,10 @@ def roadmap_data() -> dict:
     board render its system chips and its restructure banner without a second request,
     and show neither when the layer is dormant.
     """
+    items = {
+        product: [_with_ticket(item) for item in items]
+        for product, items in roadmap_store.list_all().items()
+    }
     return {
         "products": PRODUCTS,
         "product_parents": PRODUCT_PARENTS,
@@ -2668,10 +2888,13 @@ def roadmap_data() -> dict:
         "systems": {s: spec.label for s, spec in SYSTEMS.items()},
         "product_systems": {p: list(s) for p, s in PRODUCT_SYSTEMS.items()},
         "unattributed": roadmap_store.unattributed_report(),
-        "items": {
-            product: [_with_ticket(item) for item in items]
-            for product, items in roadmap_store.list_all().items()
-        },
+        "items": items,
+        # The directory, so the board's person lens and its assignment picker need no
+        # second request - same reason `trackers` rides along below. Deliberately NOT the
+        # load table: the board derives that from the very sections it draws (see
+        # roadmap.html's loadRows), which is what keeps it right after an optimistic
+        # assignment instead of stale until the next fetch.
+        "people": people_store.list_people(),
         "portfolio": {
             "initiatives": portfolio_store.list_initiatives(),
             # Joined to their epic tickets like the items above: the initiative lens
@@ -2745,6 +2968,7 @@ def create_roadmap_item(product: str, request: Request, payload: dict = Body(...
             status=payload.get("status") or "pending",
             origin_product=(payload.get("origin_product") or "").strip() or None,
             owner=(payload.get("owner") or "").strip() or None,
+            assignee=_validated_assignee(payload.get("assignee")) or None,
             project_id=_resolve_project_id(payload),
             start_at=payload.get("start_at"),
             target_at=payload.get("target_at"),
@@ -2813,6 +3037,9 @@ def update_roadmap_item(product: str, item_id: str, request: Request, payload: d
             description=payload.get("description"),
             # None = no change; "" = clear external ownership (see RoadmapStore.update).
             owner=payload.get("owner"),
+            # Same convention, and "" on a LINKED change hands the answer back to the
+            # tracker's own assignee rather than to nobody (see people.effective_assignee).
+            assignee=_validated_assignee(payload.get("assignee")),
             # Same convention: "" detaches the change from its project.
             project_id=_validated_project_id(payload.get("project_id")),
             # And again for the schedule: "" clears a date, a malformed one or a start
@@ -2833,6 +3060,29 @@ def update_roadmap_item(product: str, item_id: str, request: Request, payload: d
         item = _apply_ticket_link(actor, item_id, payload)
     _audit(actor, "roadmap.item_updated", f"{product}/{item_id}")
     return _with_ticket(item.to_public_dict())
+
+
+def _validated_assignee(value) -> str | None:
+    """The `assignee` half of a roadmap payload, checked against the directory.
+
+    Same three-state convention as `owner` and `project_id`: None leaves it alone, "" clears
+    it, anything else must be a person the directory actually knows. Refused rather than
+    stored blindly, because an id nothing resolves renders as "assigned to somebody
+    unknown" on every card forever, which looks exactly like a bug in the join.
+    """
+    if value is None:
+        return None
+    person_id = str(value).strip()
+    if not person_id:
+        return ""
+    if people_store.get(person_id) is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown person: {person_id}. Assign by person id - GET "
+            "/people/directory lists them, or POST one to add somebody the trackers "
+            "have never seen.",
+        )
+    return person_id
 
 
 def _is_unlink(payload: dict) -> bool:

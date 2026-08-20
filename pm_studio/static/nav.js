@@ -43,18 +43,20 @@
     },
   ];
 
-  // The two that sit behind a role. `personal` says whether the page is reachable when
-  // there is no identity at all: Time & cost is (it reports on "this machine"); People
-  // is not - the roster endpoints are enterprise-only, so linking it from a personal
-  // instance would offer a tab whose only content is an error.
+  // The last group in the bar. `personal` says whether the page is reachable when there
+  // is no identity at all - both of these are: Time & cost reports on "this machine", and
+  // People carries the directory of who is doing the work, which a tracker sync fills in
+  // whether or not anybody can sign in. The roster half of that page IS enterprise-only,
+  // and the page hides it rather than the tab hiding the page: a personal instance still
+  // has people working on its tickets.
   var ADMIN_TABS = [
     {
       page: "costing", href: "/costing", label: "Time & cost", capability: "view_cost", personal: true,
       what: "each person's session activity, rolled up onto the projects",
     },
     {
-      page: "people", href: "/people", label: "People", role: "admin", personal: false,
-      what: "who may see and change everything else",
+      page: "people", href: "/people", label: "People", personal: true,
+      what: "who is doing the work — and who may see and change it",
     },
   ];
 

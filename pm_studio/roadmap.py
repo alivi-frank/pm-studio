@@ -405,6 +405,20 @@ class RoadmapItem:
     # An externally-owned item is tracked on the board - the PM keeps its status
     # current from stakeholder reports but never dispatches dev work for it.
     owner: str | None = None
+    # Who is doing this work, as a `people.Person` id. THIS deployment's own decision and
+    # nothing else: it is never written back to any tracker (see people.py).
+    #
+    # Deliberately not `owner` above, which it would be tempting to reuse. `owner` says the
+    # work is built somewhere else and must never be dispatched here; an assignee says who
+    # is on it, which a change this system's own dev agents build still has. Conflating
+    # them would mean naming the person responsible for a change silently stopped the PM
+    # from ever dispatching it.
+    #
+    # A linked change with nothing here reads its assignee off the ticket instead (see
+    # people.effective_assignee), so this is only ever set when somebody here decided
+    # something the tracker has not been told. None = nobody has, which is a first-class
+    # state, and additive so existing boards keep loading.
+    assignee: str | None = None
     # The single parent Project in the work model (see portfolio.py). A change has
     # exactly one, which is what keeps cost attribution unambiguous. None means the
     # change predates the work model or the deployment isn't using it - so existing
@@ -658,6 +672,18 @@ class RoadmapStore:
             if i.tracker_id and i.ticket_key
         ]
 
+    def items_assigned_to(self, person_id: str) -> list[dict]:
+        """Every change carrying this person id LOCALLY. Not the same question the board's
+        person pivot answers - that one counts a linked change's tracker assignee too - and
+        deliberately so: this is what a directory merge has to re-point, and a tracker's
+        assignee is not ours to rewrite."""
+        with self._lock:
+            return [
+                i.to_public_dict()
+                for i in self._items.values()
+                if i.assignee == person_id
+            ]
+
     def unassigned_items(self) -> list[dict]:
         """Changes with no parent project. Reported, not blocked: alignment is a
         practice the board surfaces rather than a validation that stops work."""
@@ -677,6 +703,7 @@ class RoadmapStore:
         status: Status = "pending",
         origin_product: str | None = None,
         owner: str | None = None,
+        assignee: str | None = None,
         project_id: str | None = None,
         start_at: str | None = None,
         target_at: str | None = None,
@@ -716,6 +743,7 @@ class RoadmapStore:
             updated_at=now,
             shipped_at=now if status == "done" else None,
             owner=(owner or "").strip() or None,
+            assignee=(assignee or "").strip() or None,
             project_id=(project_id or "").strip() or None,
             start_at=start,
             target_at=target,
@@ -736,6 +764,7 @@ class RoadmapStore:
         title: str | None = None,
         description: str | None = None,
         owner: str | None = None,
+        assignee: str | None = None,
         project_id: str | None = None,
         start_at: str | None = None,
         target_at: str | None = None,
@@ -776,6 +805,10 @@ class RoadmapStore:
                 # "" (an explicit empty string) clears external ownership back to
                 # "built here"; None means "no change", like every other field.
                 item.owner = owner.strip() or None
+            if assignee is not None:
+                # Same convention again: "" unassigns, which for a LINKED change means it
+                # falls back to whoever the tracker says is on it rather than to nobody.
+                item.assignee = assignee.strip() or None
             if project_id is not None:
                 # Same convention: "" detaches the change from its project (making it
                 # unaligned), None leaves it alone.
@@ -912,6 +945,7 @@ class RoadmapStore:
         owning_product: str,
         ticket_lookup: Callable[[str, str], dict | None] | None = None,
         show_product: bool = False,
+        person_lookup: Callable[[str], str] | None = None,
     ) -> str:
         """One change, at full depth, as its owning PM reads it.
 
@@ -946,6 +980,7 @@ class RoadmapStore:
         elif requires_system(item["product"]):
             flag += " [NO SYSTEM - attribute it when you next touch this change]"
         flag += _schedule_note(item)
+        ticket = None
         if item.get("ticket_key"):
             ticket = (
                 ticket_lookup(item["tracker_id"], item["ticket_key"])
@@ -959,6 +994,19 @@ class RoadmapStore:
                 )
             else:
                 flag += f' [linked to {item["ticket_key"]} in {item["tracker_id"]}]'
+        # Who is on it, from whichever source knows: the local assignment if somebody made
+        # one here, otherwise the tracker's own assignee. Named on the line rather than
+        # left to be asked about, because a PM asked to spread the next slice of work
+        # across people cannot do it from a board that never says who is already on what.
+        # `person_lookup` resolves a person id to a name, injected for the same reason
+        # `ticket_lookup` is - this store stays ignorant of the directory.
+        assigned = (
+            (person_lookup(item["assignee"]) if person_lookup and item.get("assignee") else "")
+            or (ticket or {}).get("assignee")
+            or ""
+        )
+        if assigned:
+            flag += f" [assigned to {assigned}]"
         return (
             f'- id {item["id"]} [{item["bucket"]}/{item["status"]}] {item["title"]}{flag}\n'
             f'  {item["description"]}'
@@ -968,6 +1016,7 @@ class RoadmapStore:
         self,
         product: str,
         ticket_lookup: Callable[[str, str], dict | None] | None = None,
+        person_lookup: Callable[[str], str] | None = None,
     ) -> str:
         """Full-depth view of one product's roadmap - every item, every bucket/status,
         full description - for injection into that product's own PM session. Flags any
@@ -1000,7 +1049,9 @@ class RoadmapStore:
         if len(family) == 1:
             lines = [f"{product_label(product)} roadmap (full detail):"]
             for i in open_items[product]:
-                lines.append(self._describe_item(i, product, ticket_lookup))
+                lines.append(
+                    self._describe_item(i, product, ticket_lookup, person_lookup=person_lookup)
+                )
             return "\n".join(lines)
 
         lines = [
@@ -1026,7 +1077,9 @@ class RoadmapStore:
                 continue
             lines.append(f"\n{heading}:")
             for i in items:
-                lines.append(self._describe_item(i, owned, ticket_lookup))
+                lines.append(
+                    self._describe_item(i, owned, ticket_lookup, person_lookup=person_lookup)
+                )
         return "\n".join(lines)
 
     def describe_other_products(
@@ -1093,6 +1146,7 @@ class RoadmapStore:
         heading: str,
         groups: list[tuple[str, list[dict]]],
         ticket_lookup: Callable[[str, str], dict | None] | None = None,
+        person_lookup: Callable[[str], str] | None = None,
     ) -> str:
         """Full-depth view of one initiative's work, grouped Project -> Change, for
         injection into an initiative-scoped session (see sessions.Session.initiative_id).
@@ -1119,7 +1173,11 @@ class RoadmapStore:
             for item in open_items:
                 lines.append(
                     self._describe_item(
-                        item, item["product"], ticket_lookup, show_product=True
+                        item,
+                        item["product"],
+                        ticket_lookup,
+                        show_product=True,
+                        person_lookup=person_lookup,
                     )
                 )
         return "\n".join(lines)
