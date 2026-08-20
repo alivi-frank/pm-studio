@@ -607,5 +607,111 @@ class WontDoRemovalTest(_EpicHarness):
         )
 
 
+class StaleExclusionReportTest(_EpicHarness):
+    """_report_stale_excluded_imports: a component added in the tracker AFTER something
+    was imported does not remove it - the mismatch is named on the import report and the
+    deletion stays a human call. This is the case seen live on NDT: seven CapAdmin epics
+    were already projects, filed under an initiative, when the component was set."""
+
+    def _cycle(self, tickets):
+        """One sync cycle exactly as _run_tracker_sync orders the passes."""
+        server_module.tracker_store = _StubTrackerStore(tickets)
+        server_module._sync_epic_projects()
+        server_module._import_routed_tickets()
+        server_module._assign_changes_to_epic_projects()
+        server_module._remove_wont_do_imports()
+        server_module._report_stale_excluded_imports()
+
+    def _exclude(self, *components: str) -> None:
+        tracker = dataclasses.replace(self.TRACKER, exclude_components=components)
+        server_module.CONFIG = dataclasses.replace(
+            server_module.CONFIG, trackers=(tracker,)
+        )
+
+    def _stale(self):
+        return server_module._import_report["jira"]["stale_excluded"]
+
+    def test_a_project_excluded_after_import_is_reported_not_removed(self) -> None:
+        self._cycle([_ticket("PROJ-1", "Epic", title="Claims revamp")])
+        self.assertEqual(len(self._projects()), 1)
+        epic = _ticket("PROJ-1", "Epic", title="Claims revamp")
+        epic.components = ["CapAdmin"]
+        self._exclude("CapAdmin")
+        self._cycle([epic])
+        self.assertEqual(len(self._projects()), 1, "the project must survive")
+        stale = self._stale()
+        self.assertEqual(stale["total"], 1)
+        self.assertEqual(stale["changes"], [])
+        self.assertEqual(
+            [(p["ticket_key"], p["title"]) for p in stale["projects"]],
+            [("PROJ-1", "Claims revamp")],
+        )
+
+    def test_a_change_excluded_after_import_is_reported_not_removed(self) -> None:
+        self._cycle([_ticket("PROJ-2", "Story", title="A story")])
+        item = server_module.roadmap_store.item_for_ticket("jira", "PROJ-2")
+        self.assertIsNotNone(item)
+        story = _ticket("PROJ-2", "Story", title="A story")
+        story.components = ["CapAdmin"]
+        self._exclude("CapAdmin")
+        self._cycle([story])
+        self.assertIsNotNone(server_module.roadmap_store.get(item.id))
+        stale = self._stale()
+        self.assertEqual(stale["total"], 1)
+        self.assertEqual(stale["projects"], [])
+        self.assertEqual(stale["changes"][0]["ticket_key"], "PROJ-2")
+
+    def test_a_project_filed_under_an_initiative_is_still_only_reported(self) -> None:
+        """The live shape, and the reason this pass reports rather than removes: a human
+        filed it under an initiative. Nothing about an added component may undo that."""
+        self._cycle([_ticket("PROJ-1", "Epic", title="Filed epic")])
+        project = self._projects()[0]
+        initiative = server_module.portfolio_store.create_initiative("Claims & RCM")
+        server_module.portfolio_store.update_project(
+            project["id"], initiative_id=initiative.id
+        )
+        epic = _ticket("PROJ-1", "Epic", title="Filed epic")
+        epic.components = ["CapAdmin"]
+        self._exclude("CapAdmin")
+        self._cycle([epic])
+        kept = self._projects()
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["initiative_id"], initiative.id)
+        self.assertEqual(self._stale()["total"], 1)
+
+    def test_exclusion_by_parent_chain_is_reported_too(self) -> None:
+        """The story carries no component of its own - it is stale because the epic
+        above it is, the same fixpoint walk the import gate uses."""
+        self._cycle([
+            _ticket("PROJ-1", "Epic", title="The epic"),
+            _ticket("PROJ-2", "Story", parent="PROJ-1", parent_type="Epic"),
+        ])
+        epic = _ticket("PROJ-1", "Epic", title="The epic")
+        epic.components = ["CapAdmin"]
+        self._exclude("CapAdmin")
+        self._cycle([
+            epic,
+            _ticket("PROJ-2", "Story", parent="PROJ-1", parent_type="Epic"),
+        ])
+        stale = self._stale()
+        self.assertEqual(stale["total"], 2)
+        self.assertEqual([c["ticket_key"] for c in stale["changes"]], ["PROJ-2"])
+        self.assertEqual([p["ticket_key"] for p in stale["projects"]], ["PROJ-1"])
+
+    def test_nothing_excluded_reports_an_empty_shape(self) -> None:
+        """The key is always present, so a consumer never has to guess whether the pass
+        ran or simply found nothing."""
+        self._cycle([_ticket("PROJ-1", "Epic", title="The epic")])
+        self.assertEqual(self._stale(), {"changes": [], "projects": [], "total": 0})
+
+    def test_a_ticket_missing_from_the_catalog_is_not_reported(self) -> None:
+        """Aged out of the sync window is unknown, not excluded - same posture as the
+        won't-do pass takes on absence."""
+        self._cycle([_ticket("PROJ-1", "Epic", title="The epic")])
+        self._exclude("CapAdmin")
+        self._cycle([])
+        self.assertEqual(self._stale()["total"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

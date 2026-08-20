@@ -1856,7 +1856,9 @@ def _run_tracker_sync(tracker_id: str | None) -> None:
     their epic's project in the same cycle instead of waiting for the next one. The
     won't-do removal runs LAST and changes-before-projects internally, so a declined
     epic's declined changes are gone by the time its project's emptiness is judged -
-    the whole subtree can leave in one cycle.
+    the whole subtree can leave in one cycle. The stale-exclusion report runs after
+    all of them, so it reads the board as this cycle left it and never names something
+    another pass was about to remove anyway.
     """
     try:
         tracker_store.sync(tracker_id)
@@ -1870,6 +1872,7 @@ def _run_tracker_sync(tracker_id: str | None) -> None:
         _import_routed_tickets()
         _assign_changes_to_epic_projects()
         _remove_wont_do_imports()
+        _report_stale_excluded_imports()
     except Exception as exc:  # noqa: BLE001
         print(f"[trackers] sync failed: {exc}")
     _on_roadmap_update({"type": "trackers_synced", "trackers": _described_trackers()})
@@ -1878,7 +1881,10 @@ def _run_tracker_sync(tracker_id: str | None) -> None:
 # Per-tracker outcome of the last import pass, additive on GET /trackers: how many
 # changes the last cycle created, and which components had importable tickets but no
 # route. The unrouted side is the report half of "reported, never guessed" - no
-# catch-all product is invented for a component nobody has routed.
+# catch-all product is invented for a component nobody has routed. `stale_excluded`
+# is the same posture for the other direction: what is still linked to a ticket the
+# deployment has since excluded (see _report_stale_excluded_imports), named rather
+# than deleted.
 _import_report: dict[str, dict] = {}
 
 # Per-tracker outcome of the last EPIC pass (see _sync_epic_projects): projects linked
@@ -2331,6 +2337,80 @@ def _remove_wont_do_imports() -> None:
             print(
                 f"[trackers] {config.id}: won't-do -> removed {removed} change(s), "
                 f"{projects_removed} project(s)"
+            )
+
+
+def _report_stale_excluded_imports() -> None:
+    """Names every change and project still linked to a ticket the deployment has since
+    declared excluded - reported, never removed.
+
+    The exclusion in `_excluded_keys` is a gate on the automatic passes: nothing is
+    created, linked or assigned for an excluded ticket. It is not retroactive, and it
+    deliberately is not. A component is one dropdown in the tracker, and by the time
+    someone sets it the local side may hold a project a human filed under an initiative,
+    renamed, and planned around - deleting that on a tracker edit would let a one-field
+    change in Jira erase local planning work. So the mismatch is surfaced and the call
+    stays with the PM. Contrast `_remove_wont_do_imports`, which does remove: a won't-do
+    resolution is a decision not to build the thing at all, and an untouched import of it
+    has no defensible reading.
+
+    Both halves land on the import report rather than splitting change-side from
+    project-side, because "this slice lives in another tracker now" is ONE fact about
+    one component and reads as one line on the board.
+
+    A linked ticket absent from the catalog is not reported: `_excluded_keys` only knows
+    the tickets this sync pulled, so an aged-out link is simply unknown, the same posture
+    the won't-do pass takes."""
+    for config in CONFIG.trackers:
+        if not config.imports:
+            continue
+        report = _import_report.get(config.id)
+        if report is None:
+            continue
+        report["stale_excluded"] = stale = {"changes": [], "projects": [], "total": 0}
+        by_key = {
+            normalize_key(config.id, t.key): t for t in tracker_store.tickets_of(config.id)
+        }
+        excluded = _excluded_keys(config, by_key)
+        if not excluded:
+            continue
+
+        for items in roadmap_store.list_all().values():
+            for change in items:
+                if change.get("tracker_id") != config.id or not change.get("ticket_key"):
+                    continue
+                if normalize_key(config.id, change["ticket_key"]) not in excluded:
+                    continue
+                stale["changes"].append(
+                    {
+                        "id": change["id"],
+                        "ticket_key": change["ticket_key"],
+                        "title": change["title"],
+                    }
+                )
+
+        for project in portfolio_store.list_projects():
+            if project["tracker_id"] != config.id or not project["ticket_key"]:
+                continue
+            if normalize_key(config.id, project["ticket_key"]) not in excluded:
+                continue
+            stale["projects"].append(
+                {
+                    "id": project["id"],
+                    "ticket_key": project["ticket_key"],
+                    "title": project["title"],
+                }
+            )
+
+        stale["total"] = len(stale["changes"]) + len(stale["projects"])
+        if stale["total"]:
+            keys = ", ".join(
+                item["ticket_key"] for item in stale["changes"] + stale["projects"]
+            )
+            print(
+                f"[trackers] {config.id}: {len(stale['changes'])} change(s) and "
+                f"{len(stale['projects'])} project(s) are still linked to excluded "
+                f"tickets - not removed: {keys}"
             )
 
 

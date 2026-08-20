@@ -3909,6 +3909,18 @@
           c.title = Object.entries(imp.unrouted).map(([k, n]) => `${k}: ${n}`).join("\n");
           bar.appendChild(c);
         }
+        // Linked BEFORE the deployment excluded the slice, so the exclusion gate never
+        // saw them. Reported, never removed - the sync will not delete a project a human
+        // may have filed and planned around, so this chip is where that call is asked
+        // for. Its tooltip names every one, because "go find them" is not a report.
+        const stale = imp.stale_excluded;
+        if (stale && stale.total) {
+          const c = el("span", "tracker-chip never",
+            `↳ ${stale.total} still linked to excluded ticket${stale.total === 1 ? "" : "s"}`);
+          c.title = [...stale.projects.map((s) => `project ${s.ticket_key} — ${s.title}`),
+                     ...stale.changes.map((s) => `change ${s.ticket_key} — ${s.title}`)].join("\n");
+          bar.appendChild(c);
+        }
       }
     }
 
