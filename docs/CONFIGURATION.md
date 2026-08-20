@@ -638,9 +638,10 @@ board, nothing.
 >   vendor instance you run and how your work is organised. If your repo is public, that is
 >   published.
 > - A sync writes `<workspace>/trackers.json` — a cache of ticket titles from the synced
->   instance — into whichever checkout the server runs from. It is git-ignored and unstaged
->   from every snapshot, but do not run a sync from a checkout that is not yours to fill
->   with that data.
+>   instance — and `<workspace>/people.json`, the directory of whoever those tickets are
+>   assigned to, by real name and email address. Both land in whichever checkout the server
+>   runs from. Both are git-ignored and unstaged from every snapshot, but do not run a sync
+>   from a checkout that is not yours to fill with that data.
 >
 > `tests/test_no_deployment_data.py` enforces both halves of this for the package itself:
 > no tracked file may name a real tracker host, the dogfood config may declare no tracker,
@@ -702,6 +703,15 @@ cache at `<workspace>/trackers.json` holds ticket titles from your tracker, so i
 treated like the other credential-bearing state: gitignored *and* unstaged from every
 snapshot unconditionally (see `gitsnapshot.SENSITIVE_WORKSPACE_FILES`). Deleting it
 costs one sync.
+
+`<workspace>/people.json` is on that same list and is the sharper case: a sync reads each
+ticket's **assignee** and keeps one entry per person — display name, email where the
+instance discloses one, and the identity each tracker knows them by — so that "what is Dana
+working on" is one question across Jira and ADO rather than one per tool. Deleting it costs
+one sync too, but unlike the catalog it also loses any assignment made in PM Studio, since
+those name a person by id. Nothing in PM Studio ever writes an assignee back to a tracker:
+assigning here is local planning, and where it disagrees with the ticket the board says so
+on the card rather than quietly overriding either answer.
 
 ## Pushing tickets to a tracker
 

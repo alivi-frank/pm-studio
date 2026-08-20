@@ -36,6 +36,10 @@ SENSITIVE_WORKSPACE_FILES = (
     "audit.jsonl",
     "activity.jsonl",
     "trackers.json",
+    # The people directory: real names and email addresses, reconciled out of the
+    # assignees on another organisation's tickets. Same category as trackers.json and a
+    # sharper case of it - a ticket title is their work, this is their identity.
+    "people.json",
 )
 
 

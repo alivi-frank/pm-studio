@@ -37,6 +37,9 @@
     --kind-product: #4a63d0;
     --kind-initiative: #7a4fc0;
     --kind-project: #1f8a7c;
+    /* A person is not a container, so it gets a hue of its own rather than borrowing one
+       of the three above - the glyph beside it is the only non-container shape here. */
+    --kind-person: #b06a2c;
     /* The vertical guide a section drops through everything it contains. Heavier than
        --hairline: it is the one thing carrying the nesting. */
     --rail: rgba(11, 11, 11, 0.14);
@@ -67,6 +70,7 @@
       --kind-product: #7d94f5;
       --kind-initiative: #b087e8;
       --kind-project: #35b3a1;
+      --kind-person: #d99a5b;
       --rail: rgba(255, 255, 255, 0.17);
     }
   }
@@ -224,6 +228,10 @@
   .kind-initiative { --kind-ink: var(--kind-initiative); }
   .kind-project { --kind-ink: var(--kind-project); width: 12.5px; height: 12.5px; }
   .kind-loose { --kind-ink: var(--ink-muted); width: 12.5px; height: 12.5px; }
+  .kind-person { --kind-ink: var(--kind-person); }
+  /* Nobody: the same shape, drawn in the muted ink the other "leftovers" row uses, so
+     the pile of unassigned work reads as a slot rather than as a person. */
+  .kind-nobody { --kind-ink: var(--ink-muted); }
 
   /* ---- the activity glyphs ---------------------------------------------------------
      One per section heading, right after the title: is this board being worked, done
@@ -527,6 +535,58 @@
   }
   .chip.ideation::after { content: none; }
   .chip.owner { color: var(--ink-secondary); }
+  /* Who is on it. Tinted with the person hue so a card scanned in the product lens says
+     "somebody" at a glance; the conflict variant borrows the warning clothes, because a
+     local assignment the tracker disagrees with is a thing to go and resolve. */
+  .chip.assignee { color: var(--kind-person); }
+  .chip.assignee.conflict {
+    padding: 0 5px;
+    border-radius: 4px;
+    color: var(--suggestion-border);
+    background: var(--suggestion-bg);
+  }
+  .chip.assignee.conflict::after { content: none; }
+
+  /* ---- the load table --------------------------------------------------------------
+     Above the board in the person lens. Deliberately plain: it is a table of numbers to
+     compare down a column, and anything decorative here competes with the one thing it
+     is read for. */
+  .load {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px 6px;
+    margin-bottom: 18px;
+  }
+  .load-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+  .load-head h2 { font-size: 0.95em; margin: 0; }
+  .load-note { font-size: 0.8em; color: var(--ink-secondary); }
+  .load-table { width: 100%; border-collapse: collapse; font-size: 0.82em; }
+  .load-table th {
+    text-align: left;
+    font-weight: 500;
+    color: var(--ink-muted);
+    padding: 4px 8px 6px 0;
+    border-bottom: 1px solid var(--hairline);
+    white-space: nowrap;
+  }
+  .load-table td { padding: 5px 8px 5px 0; border-bottom: 1px solid var(--hairline); }
+  .load-table tr:last-child td { border-bottom: none; }
+  .load-table td.num { text-align: right; font-variant-numeric: tabular-nums; width: 1px; }
+  .load-table td.num.late { color: var(--danger); }
+  /* Somebody carrying nothing: dimmed, and still there - they are the answer to "who has
+     room", which is half of what this table is for. */
+  .load-table tr.idle td { color: var(--ink-muted); }
+  .load-name { display: flex; align-items: baseline; gap: 8px; }
+  .load-shipped { font-size: 0.85em; color: var(--ink-muted); }
+  .load-areas { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+  .load-more { font-size: 0.85em; color: var(--ink-muted); }
 
   .card-body {
     display: none;
@@ -1380,13 +1440,54 @@
   // External trackers (see trackers.py). `configured: false` on a deployment with no
   // [[trackers]] block, which hides every ticket control on this page.
   let TRACKERS = { configured: false, syncing: false, trackers: [], last_sync_at: null };
+  /* Who is doing the work (see people.py). The directory arrives with the board itself,
+     so the person lens and the assignment picker need no second request.
+
+     The LOAD TABLE is not fetched - it is derived from the sections this board already
+     built (see loadRows). That is deliberate: assigning a change re-renders optimistically
+     from local state, and a load figure that came down with the last fetch would sit there
+     contradicting the card somebody just moved. Derived, the two cannot disagree, and the
+     table narrows with the search filter like every other count on the page.
+
+     Empty on a deployment with no trackers and nobody added by hand; the lens is still
+     offered there, and reads as one "Nobody assigned" section - which is the truth. */
+  let PEOPLE = [];
+  let PEOPLE_BY_ID = {};
+  // The sentinel the server parks unassigned work under (people.UNASSIGNED). Mirrored
+  // rather than hardcoded twice, so the two files cannot drift.
+  const UNASSIGNED_KEY = "__unassigned__";
+  /* A tracker id to the label the operator gave it, falling back to the id - which is
+     what shows on a deployment whose config dropped a tracker the catalog still
+     remembers, and is more useful there than an empty string. */
+  function trackerLabel(trackerId) {
+    const config = (TRACKERS.trackers || []).find((t) => t.id === trackerId);
+    return config ? config.label : trackerId;
+  }
+  function personName(id) {
+    const person = PEOPLE_BY_ID[id];
+    return person ? person.name : "";
+  }
+  /* Who a card shows as its assignee. Read off the server's join rather than recomputed
+     here: `assigned` already resolved a linked change's tracker assignee against the
+     directory, and a second implementation of that rule on the client is a second
+     answer waiting to differ from the PM's context block. */
+  function assignedTo(item) {
+    return item.assigned || { person_id: null, name: "", source: null, conflict: false };
+  }
 
   /* Two independent axes, not one four-way switch:
        groupBy - what the sections are (product | initiative)
        view    - how the changes inside a section are drawn (board | timeline)
      Every combination is valid and both are persisted, so the board comes back the way
      you left it. */
-  let groupBy = localStorage.getItem("roadmapGroupBy") === "initiative" ? "initiative" : "product";
+  const GROUP_BY_VALUES = ["product", "initiative", "person"];
+  // What a section IS under each lens - plural for counting, singular for the one-line
+  // note that says what the filter is hiding.
+  const GROUP_NOUN = { product: "products", initiative: "initiatives", person: "people" };
+  const GROUP_KIND_WORD = { product: "product", initiative: "initiative", person: "person" };
+  let groupBy = GROUP_BY_VALUES.includes(localStorage.getItem("roadmapGroupBy"))
+    ? localStorage.getItem("roadmapGroupBy")
+    : "product";
   let view = localStorage.getItem("roadmapView") === "timeline" ? "timeline" : "board";
 
   /* Which sections are folded, which projects are opened out, and which cards are open.
@@ -1593,8 +1694,8 @@
       allCollapsed = keys.length > 0 && keys.every((k) => isCollapsed(k));
       button.textContent = allCollapsed ? "Expand all" : "Collapse all";
       button.title = allCollapsed
-        ? `Open all ${keys.length} ${groupBy === "initiative" ? "initiatives" : "products"}`
-        : `Fold all ${keys.length} ${groupBy === "initiative" ? "initiatives" : "products"} down to their headings`;
+        ? `Open all ${keys.length} ${GROUP_NOUN[groupBy]}`
+        : `Fold all ${keys.length} ${GROUP_NOUN[groupBy]} down to their headings`;
     };
     relabel();
     collapseControl = relabel;
@@ -1696,6 +1797,7 @@
     slot.appendChild(segmented("Group changes by", [
       ["product", "Product", "One section per product board"],
       ["initiative", "Initiative", "One section per initiative — an initiative can span products"],
+      ["person", "Person", "One section per person, heaviest load first — who is on what, and what nobody is on"],
     ], groupBy, (value) => {
       groupBy = value;
       localStorage.setItem("roadmapGroupBy", value);
@@ -1844,6 +1946,8 @@
     initiative: '<path d="M4 14.2V2.2"/><path d="M4 2.9h8L10.2 5.8 12 8.7H4z"/>',
     // A folder: a project holds changes.
     project: '<path d="M1.9 12.3V4.3a.5.5 0 0 1 .5-.5h3.3l1.5 1.8h6.4a.5.5 0 0 1 .5.5v6.2a.5.5 0 0 1-.5.5H2.4a.5.5 0 0 1-.5-.5z"/>',
+    // Head and shoulders: a person, the only section kind that is not a container.
+    person: '<path d="M8 8.4a3.1 3.1 0 1 0 0-6.2 3.1 3.1 0 0 0 0 6.2z"/><path d="M2.6 14.1a5.4 5.4 0 0 1 10.8 0"/>',
   };
   const KIND_LABELS = {
     product: "Product",
@@ -1851,18 +1955,25 @@
     initiative: "Initiative",
     project: "Project",
     loose: "Changes with no project",
+    person: "Person",
+    nobody: "Work nobody is on",
   };
   function kindIcon(kind) {
     // A sub-product is a product and the "No project" bucket is a project-shaped slot,
     // so they reuse those shapes rather than inventing a fifth thing to learn.
-    const shape = kind === "subproduct" ? "product" : kind === "loose" ? "project" : kind;
+    const shape = kind === "subproduct" ? "product"
+      : kind === "loose" ? "project"
+      // Unassigned work is a person-shaped slot with nobody in it, drawn dashed below
+      // for the same reason the "no project" row is.
+      : kind === "nobody" ? "person"
+      : kind;
     const node = el("span", `kind kind-${kind}`);
     node.title = KIND_LABELS[kind] || kind;
     node.innerHTML =
       '<svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor"'
       + ' stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"'
       // Dashed: nothing declared this row, it is where the leftovers went.
-      + (kind === "loose" ? ' stroke-dasharray="2.4 2"' : "")
+      + (kind === "loose" || kind === "nobody" ? ' stroke-dasharray="2.4 2"' : "")
       + `>${KIND_SHAPES[shape]}</svg>`;
     return node;
   }
@@ -1873,6 +1984,10 @@
      group. */
   function groupKind(group, depth) {
     if (group.kind === "initiative") return "initiative";
+    // A person section never nests either, so like an initiative it is read off the
+    // group rather than the depth. `nobody` is its own glyph: the pile of work with
+    // no name on it should not look like somebody called "Nobody assigned".
+    if (group.kind === "person") return group.key === "person:none" ? "nobody" : "person";
     return depth ? "subproduct" : "product";
   }
 
@@ -1954,6 +2069,27 @@
       else chips.push(chip("unaligned", "warn"));
     }
     if (item.owner) chips.push(chip(`External — ${item.owner}`, "owner"));
+    /* Who is on it. Not repeated inside a person section, which is the whole heading.
+       Three shapes, because the three states are genuinely different things:
+         - a local assignment somebody made here (plain);
+         - the tracker's own assignee, nobody here has overridden (suffixed with the
+           tracker's word, so it is clear nothing was decided on this board);
+         - the two disagreeing, which is flagged - a local reassignment the tracker has
+           not been told about is exactly the thing somebody has to go and say out loud.
+       An id that resolves to nobody still says so, rather than reading as unassigned. */
+    if (!omit.person) {
+      const assigned = assignedTo(item);
+      if (assigned.conflict) {
+        chips.push(chip(
+          `${assigned.name} — ${assigned.tracker_name} in the tracker`, "assignee conflict"));
+      } else if (assigned.name) {
+        chips.push(chip(
+          assigned.source === "tracker" ? `${assigned.name} (from tracker)` : assigned.name,
+          "assignee" + (assigned.status === "inactive" ? " warn" : "")));
+      } else if (assigned.assignee_id) {
+        chips.push(chip("assigned to someone no longer in the directory", "warn"));
+      }
+    }
     // The schedule, in whatever shape it has. `is_overdue` is computed server-side
     // (roadmap.py) so the board and the PM's context block never disagree about what
     // "late" means on a machine whose clock or timezone differs.
@@ -2081,6 +2217,35 @@
       wrap.appendChild(input);
       row.appendChild(wrap);
     }
+
+    /* Assignment: a picker, not a prompt(), because the directory already knows every
+       name and a typo here would be an id nothing resolves. Local only - nothing on this
+       board writes to Jira or ADO (see people.py) - so the label says whose decision it
+       is, and unassigning a LINKED change hands the answer back to the tracker rather
+       than to nobody. */
+    const assigned = assignedTo(item);
+    const assignSelect = el("select", "mini");
+    assignSelect.title = item.ticket
+      ? "Assign locally. The tracker is never written to — clear this to fall back to "
+        + "whoever the ticket says is on it."
+      : "Assign locally. This change has no ticket, so this is the only record of who is on it.";
+    const noneOpt = el("option", null, item.ticket && assigned.source === "tracker" && assigned.name
+      ? `From tracker — ${assigned.name}`
+      : "Unassigned");
+    noneOpt.value = "";
+    noneOpt.selected = !item.assignee;
+    assignSelect.appendChild(noneOpt);
+    // Inactive people are not offered - but somebody already holding this change stays
+    // listed, or the select would silently misreport who is on it.
+    for (const person of PEOPLE) {
+      if (person.status !== "active" && person.id !== item.assignee) continue;
+      const opt = el("option", null, person.name);
+      opt.value = person.id;
+      opt.selected = person.id === item.assignee;
+      assignSelect.appendChild(opt);
+    }
+    assignSelect.addEventListener("change", () => patchItem(item, { assignee: assignSelect.value }));
+    row.appendChild(assignSelect);
 
     const ownerBtn = el("button", null, "Owner…");
     ownerBtn.type = "button";
@@ -2230,6 +2395,20 @@
     // Required, not optional: a change is contained within exactly one system, so the
     // picker has no blank option and the server refuses a create without one. Absent
     // entirely on a board that is not in scope, where the server requires nothing.
+    /* Assigning at creation, when there is anybody to assign to. Only active people are
+       offered, and "Unassigned" stays the default: raising a change and deciding who does
+       it are two decisions, and forcing the second one here would put a name on work that
+       has not been handed to anybody yet. Absent entirely on an empty directory. */
+    const assignable = PEOPLE.filter((person) => person.status === "active");
+    // The shell only - the names are appended as DOM nodes below, never interpolated into
+    // this template. A display name comes from Jira or ADO, so it is untrusted text; every
+    // other name on this page reaches the DOM through el()'s textContent for the same
+    // reason, and the markup here is limited to constants.
+    const assigneeField = assignable.length
+      ? `<label class="date-field"><span>Assign</span>
+           <select class="mini assignee"><option value="">Unassigned</option></select>
+         </label>`
+      : "";
     const systemField = requiresSystem(product)
       ? `<label class="date-field"><span>System</span>
            <select class="mini system" required>${systemOptions(product)}</select>
@@ -2239,6 +2418,7 @@
       <input type="text" placeholder="Title" class="title" required />
       <textarea placeholder="Description (optional)" class="desc" rows="2"></textarea>
       <input type="text" placeholder="External owner (optional)" class="owner" />
+      ${assigneeField}
       ${systemField}
       <label class="date-field"><span>Target</span><input type="date" class="mini target" /></label>
       <div class="buttons">
@@ -2246,6 +2426,14 @@
         <button type="submit" class="primary">Add</button>
       </div>
     `;
+    const assigneeSelect = form.querySelector(".assignee");
+    if (assigneeSelect) {
+      for (const person of assignable) {
+        const option = el("option", null, person.name);
+        option.value = person.id;
+        assigneeSelect.appendChild(option);
+      }
+    }
     form.querySelector(".cancel").addEventListener("click", () => form.classList.remove("open"));
     form.addEventListener("submit", (e) => {
       e.preventDefault();
@@ -2264,6 +2452,8 @@
       };
       const systemField = form.querySelector(".system");
       if (systemField) payload.system = systemField.value;
+      const assigneeField = form.querySelector(".assignee");
+      if (assigneeField && assigneeField.value) payload.assignee = assigneeField.value;
       // Adding from inside an initiative section means the change belongs to that
       // initiative's work - so it lands on its project rather than unaligned.
       if (projectId) payload.project_id = projectId;
@@ -2320,6 +2510,9 @@
       project && project.title,
       project && project.ticket && project.ticket.key,
       initiative && initiative.title,
+      // A person's name is one of the things people type into this box, and it works in
+      // every lens rather than only the one grouped by person.
+      assignedTo(change).name,
     ].filter(Boolean).join(" · "));
   }
 
@@ -2501,7 +2694,7 @@
       .filter((s) => counts[s])
       .map((s) => `${counts[s]} ${STATE_META[s].label.toLowerCase()}`);
     if (!parts.length) return null;
-    const kind = groupBy === "initiative" ? "initiative" : "product";
+    const kind = GROUP_KIND_WORD[groupBy];
     const total = STATE_VALUES.reduce((n, s) => n + counts[s], 0);
     return el("div", className,
       `${parts.join(", ")} ${total === 1 ? kind : kind + "s"} hidden — ` +
@@ -2605,6 +2798,101 @@
     return groups;
   }
 
+  /* ---- the person lens ------------------------------------------------------------
+
+     One section per person who is on something, in load order - heaviest first, so the
+     top of the board is whoever is carrying the most. Work nobody is on trails at the
+     end as its own section, whatever its size: it is a pile to hand out rather than
+     somebody's load, and on most boards it is the largest thing here.
+
+     A person with NO changes gets no section. The directory holds everybody either
+     tracker ever mentioned - hundreds, on a real instance - and a board that listed them
+     all would be mostly empty headings. Who has room is the load table's question (see
+     loadRows, which does show the zeroes) rather than the board's.
+
+     No `projectIds`: a person does not own projects, so the rows under a person section
+     are derived from the changes actually there - the same rule a product section uses. */
+  function groupsByPerson() {
+    const buckets = new Map();
+    for (const change of searchFilter(allChanges())) {
+      const id = assignedTo(change).person_id || null;
+      if (!buckets.has(id)) buckets.set(id, []);
+      buckets.get(id).push(change);
+    }
+
+    const groups = [];
+    for (const person of PEOPLE) {
+      const changes = buckets.get(person.id);
+      if (!changes || !changes.length) continue;
+      const flags = [];
+      // Retired, but still holding work - which is exactly the thing worth flagging: it
+      // has to go somewhere. See people.PERSON_STATUSES.
+      if (person.status !== "active") flags.push(["inactive", true]);
+      const products = new Set(changes.map((c) => c.product));
+      // The spread is what a per-product board structurally cannot show for a person:
+      // somebody with six open changes across four boards is stretched in a way six on
+      // one board is not.
+      if (products.size > 1) flags.push([`${products.size} products`, false]);
+      const overdue = changes.filter((c) => c.status !== "done" && c.is_overdue).length;
+      if (overdue) flags.push([`${overdue} overdue`, true]);
+      groups.push({
+        key: `person:${person.id}`,
+        kind: "person",
+        title: person.name,
+        // The heading's ⓘ - where they are known, since a name shared by two trackers
+        // is the thing somebody will want to check before reassigning anything.
+        description: personIdentityNote(person),
+        flags,
+        changes,
+        // A person spans products and projects, so the cards keep both chips - but not
+        // the person chip, which the heading already is.
+        omit: { person: true },
+        product: products.size === 1 ? [...products][0] : null,
+        projectIds: null,
+      });
+    }
+    // Heaviest first. Open changes, not all of them: a person whose entire load shipped
+    // last quarter is not the busiest person on the board.
+    groups.sort((a, b) => {
+      const open = (g) => g.changes.filter((c) => c.status !== "done").length;
+      return open(b) - open(a) || a.title.localeCompare(b.title);
+    });
+
+    const nobody = buckets.get(null) || [];
+    // Shown even when empty on an otherwise empty board, for the same reason the
+    // initiative lens keeps its trailing group: a board with no sections at all reads
+    // as broken rather than as a board with nothing on it.
+    if (nobody.length || !groups.length) {
+      groups.push({
+        key: "person:none",
+        kind: "person",
+        title: "Nobody assigned",
+        flags: [["unassigned", true]],
+        changes: nobody,
+        omit: {},
+        product: null,
+        projectIds: null,
+      });
+    }
+    return groups;
+  }
+
+  /* Where a person is known, for the heading's ⓘ. Says which trackers spell them which
+     way, because a wrongly merged pair of identities is invisible until somebody reads
+     exactly this - and the fix (split them apart) lives on the People page. */
+  function personIdentityNote(person) {
+    const parts = [];
+    if (person.email) parts.push(person.email);
+    for (const identity of person.identities || []) {
+      const label = trackerLabel(identity.tracker_id);
+      parts.push(`${label}: ${identity.display || identity.key}`);
+    }
+    if (person.source === "local" && !(person.identities || []).length) {
+      parts.push("added here — no tracker knows this person");
+    }
+    return parts.join(" · ");
+  }
+
   /* What is moving first, then what is parked, then what is finished - the same order
      at every depth, so the top of any list is always the work being run right now.
      Within one state, whatever is CLOSED sinks below what is still open: two parked
@@ -2642,7 +2930,11 @@
 
   function currentGroups() {
     if (!groupsCache) {
-      groupsCache = sortGroupsByState(groupBy === "initiative" ? groupsByInitiative() : groupsByProduct());
+      // The person lens brings its own order (heaviest load first), which the
+      // by-activity sort would overwrite - so it is the one lens that keeps it.
+      groupsCache = groupBy === "person"
+        ? groupsByPerson()
+        : sortGroupsByState(groupBy === "initiative" ? groupsByInitiative() : groupsByProduct());
     }
     return groupsCache;
   }
@@ -3801,6 +4093,140 @@
     bar.appendChild(link);
   }
 
+  /* ---- the load table -------------------------------------------------------------
+
+     The assignment decision, in one table: how much each person is carrying, how much of
+     it is imminent, how much is late, and WHERE it is - because "who has room" and "who
+     knows this area" are two questions and handing somebody work needs both answers.
+
+     Derived from the person sections rather than fetched, so it cannot contradict the
+     cards below it - see the PEOPLE comment at the top. Zero-load active people are added
+     back afterwards: they have no section (nothing to draw) and they are the single most
+     useful row here. */
+  function loadRows(groups) {
+    const rows = groups
+      .filter((g) => g.key !== "person:none")
+      .map((group) => {
+        const open = group.changes.filter((c) => c.status !== "done");
+        const spread = (pick) => {
+          const counts = new Map();
+          for (const change of open) {
+            for (const value of pick(change)) {
+              if (value) counts.set(value, (counts.get(value) || 0) + 1);
+            }
+          }
+          return [...counts.entries()].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(b[0]));
+        };
+        return {
+          id: group.key.slice("person:".length),
+          name: group.title,
+          open: open.length,
+          now: open.filter((c) => c.bucket === "now").length,
+          next: open.filter((c) => c.bucket === "next").length,
+          later: open.filter((c) => c.bucket === "later").length,
+          live: open.filter((c) => c.status === "in_progress").length,
+          overdue: open.filter((c) => c.is_overdue).length,
+          shipped: group.changes.length - open.length,
+          products: spread((c) => [c.product]),
+          // The tracker's own taxonomy - Jira components, ADO area paths. This is the
+          // "area of work" half of the decision, and it is the tracker's word for it
+          // rather than one invented here.
+          areas: spread((c) => (c.ticket && c.ticket.components) || []),
+        };
+      });
+    const seen = new Set(rows.map((r) => r.id));
+    for (const person of PEOPLE) {
+      if (seen.has(person.id) || person.status !== "active") continue;
+      rows.push({
+        id: person.id, name: person.name, open: 0, now: 0, next: 0, later: 0,
+        live: 0, overdue: 0, shipped: 0, products: [], areas: [],
+      });
+    }
+    // Same order as the sections - heaviest first - with the free people at the bottom,
+    // which is where somebody scanning for capacity ends up looking.
+    rows.sort((a, b) => b.open - a.open || b.now - a.now || a.name.localeCompare(b.name));
+    return rows;
+  }
+
+  function renderLoadTable(groups) {
+    const rows = loadRows(groups);
+    const wrap = el("section", "load");
+    const head = el("div", "load-head");
+    head.appendChild(el("h2", null, "Load"));
+    const nobody = groups.find((g) => g.key === "person:none");
+    const unassigned = nobody ? nobody.changes.filter((c) => c.status !== "done") : [];
+    // Stated up front rather than left to be noticed at the bottom of the board: work
+    // nobody is on is the pile this table exists to help empty.
+    head.appendChild(el("span", "load-note", unassigned.length
+      ? `${unassigned.length} open change${unassigned.length === 1 ? "" : "s"} nobody is on`
+      + (unassigned.filter((c) => c.bucket === "now").length
+        ? ` — ${unassigned.filter((c) => c.bucket === "now").length} of them in Now`
+        : "")
+      : "Everything open has somebody on it."));
+    wrap.appendChild(head);
+    if (!rows.length) {
+      wrap.appendChild(el("p", "lens-empty", TRACKERS.configured
+        ? "Nobody is in the directory yet — the next tracker sync fills it in from the "
+          + "assignees on your tickets."
+        : "Nobody is in the directory yet — add people on the People page, then assign "
+          + "changes from their cards."));
+      return wrap;
+    }
+    const table = el("table", "load-table");
+    const thead = el("thead");
+    const hrow = el("tr");
+    for (const [label, hint] of [
+      ["Person", ""],
+      ["Open", "Open changes assigned to them"],
+      ["Now", "Open changes in the Now horizon — what they are meant to be on"],
+      ["Next", "Queued behind Now"],
+      ["Later", "Parked"],
+      ["In progress", "Open changes they have actually started"],
+      ["Late", "Past their target date"],
+      ["Areas", "Where the work sits — products, and the components or area paths the tracker puts it in"],
+    ]) {
+      const cell = el("th", null, label);
+      if (hint) cell.title = hint;
+      hrow.appendChild(cell);
+    }
+    thead.appendChild(hrow);
+    table.appendChild(thead);
+    const body = el("tbody");
+    for (const row of rows) {
+      const tr = el("tr", row.open ? null : "idle");
+      const name = el("td", "load-name");
+      name.appendChild(el("span", null, row.name));
+      if (row.shipped) {
+        const shipped = el("span", "load-shipped", `${row.shipped} shipped`);
+        shipped.title = "Already done — counted separately, because finished work is not load";
+        name.appendChild(shipped);
+      }
+      tr.appendChild(name);
+      for (const value of [row.open, row.now, row.next, row.later, row.live]) {
+        tr.appendChild(el("td", "num", String(value)));
+      }
+      tr.appendChild(el("td", "num" + (row.overdue ? " late" : ""), String(row.overdue)));
+      const areas = el("td", "load-areas");
+      // Products first, then the tracker's areas - the coarse answer before the fine one.
+      // Capped at four, with the rest counted: this column is a hint about where somebody
+      // works, and twelve chips would push the numbers off the screen.
+      const labels = [
+        ...row.products.map(([id, n]) => [productPathLabel(id), n]),
+        ...row.areas.map(([id, n]) => [id, n]),
+      ];
+      for (const [label, n] of labels.slice(0, 4)) {
+        areas.appendChild(chip(n > 1 ? `${label} ${n}` : label));
+      }
+      if (labels.length > 4) areas.appendChild(el("span", "load-more", `+${labels.length - 4}`));
+      if (!labels.length) areas.appendChild(el("span", "load-more", "—"));
+      tr.appendChild(areas);
+      body.appendChild(tr);
+    }
+    table.appendChild(body);
+    wrap.appendChild(table);
+    return wrap;
+  }
+
   function renderAll() {
     board.textContent = "";
     // The one place the data behind the sections can have moved (see currentGroups).
@@ -3821,6 +4247,9 @@
       board.appendChild(empty);
       return;
     }
+    // Above the board, in the person lens only: it is the assignment decision, and the
+    // sections below it are the evidence. Built from the same groups the board draws.
+    if (groupBy === "person") board.appendChild(renderLoadTable(currentGroups()));
     if (view === "timeline") renderTimeline(); else renderBoard();
   }
 
@@ -3851,6 +4280,8 @@
         itemsByProduct = data.items;
         PORTFOLIO = data.portfolio || PORTFOLIO;
         TRACKERS = data.trackers || TRACKERS;
+        PEOPLE = data.people || [];
+        PEOPLE_BY_ID = Object.fromEntries(PEOPLE.map((p) => [p.id, p]));
         indexProjects();
         renderTrackerBar();
         renderAll();

@@ -194,6 +194,19 @@ class Ticket:
     # the work item was queried from (its numeric id says nothing). Additive default
     # for pre-existing caches, same as components.
     project: str = ""
+    # Who the tracker says is on this ticket, as of the last sync. Two fields because they
+    # answer two questions: the display name is what a human recognises on a card, the key
+    # is what survives somebody being renamed - Jira's `accountId`, ADO's `uniqueName`.
+    # Empty on an unassigned ticket, which is a first-class state and the most useful thing
+    # a load table can tell you. Additive defaults, so a catalog written before assignees
+    # were synced still loads and simply reports nobody until the next sync.
+    assignee: str = ""
+    assignee_key: str = ""
+    # The assignee's email where the tracker discloses one - Jira Cloud hides it behind an
+    # instance privacy setting, ADO's uniqueName usually IS one. Carried for exactly one
+    # purpose: recognising the same human across two trackers (see
+    # people.PeopleStore.reconcile), which is the only handle they genuinely share.
+    assignee_email: str = ""
 
     @property
     def is_wont_do(self) -> bool:
@@ -227,6 +240,8 @@ class Ticket:
         known["components"] = list(known.get("components") or [])
         known["project"] = str(known.get("project") or "")
         known["resolution"] = str(known.get("resolution") or "")
+        for assignee_field in ("assignee", "assignee_key", "assignee_email"):
+            known[assignee_field] = str(known.get(assignee_field) or "")
         return cls(**known)  # type: ignore[arg-type]
 
 
@@ -382,6 +397,18 @@ def _basic_auth(username: str, token: str) -> str:
     return "Basic " + base64.b64encode(raw).decode()
 
 
+def _parse_identity_string(raw: str) -> tuple[str, str]:
+    """Splits ADO's legacy `"Dana Reyes <dana@example.com>"` identity into
+    `(display, unique)`. A string with no angle brackets is all display name and no
+    handle, which is a perfectly ordinary answer - the name then carries the identity on
+    its own, exactly as it does for a Jira instance with private profiles."""
+    text = (raw or "").strip()
+    if text.endswith(">") and "<" in text:
+        display, _, unique = text.rpartition("<")
+        return display.strip(), unique[:-1].strip()
+    return text, ""
+
+
 # ---- providers -------------------------------------------------------------------
 
 
@@ -394,7 +421,7 @@ class JiraClient:
     A 404/410 on the first is the documented signal that an instance does not have it.
     """
 
-    JQL_FIELDS = "summary,issuetype,status,resolution,parent,components"
+    JQL_FIELDS = "summary,issuetype,status,resolution,parent,components,assignee"
 
     def __init__(self, config: TrackerConfig) -> None:
         self.config = config
@@ -427,6 +454,10 @@ class JiraClient:
         # too - no second round trip per issue just to learn whether it is an Epic.
         parent = fields.get("parent") or {}
         parent_fields = parent.get("fields") or {}
+        # None on an unassigned issue, and a dict with no `emailAddress` when the instance
+        # hides addresses - so `or {}` and per-key defaults rather than one lookup that
+        # would raise on the common case.
+        assignee = fields.get("assignee") or {}
         return Ticket(
             tracker_id=self.config.id,
             provider="jira",
@@ -451,6 +482,15 @@ class JiraClient:
             # "PROJ-123" belongs to project "PROJ" - the key encodes it, no extra field
             # needed from the API.
             project=key.rsplit("-", 1)[0] if "-" in key else "",
+            assignee=str(assignee.get("displayName") or "").strip(),
+            # accountId is the stable handle; an instance that predates it (Server/DC) or
+            # hides profiles gives an address or nothing, and the name has to carry the
+            # identity on its own. Reconciliation handles a name-only identity - see
+            # PeopleStore.identity.
+            assignee_key=str(
+                assignee.get("accountId") or assignee.get("emailAddress") or ""
+            ).strip(),
+            assignee_email=str(assignee.get("emailAddress") or "").strip(),
         )
 
     def fetch_catalog(self) -> tuple[list[Ticket], bool]:
@@ -750,6 +790,8 @@ class AdoClient:
         "System.Parent",
         # The area path is ADO's component taxonomy - what import routes match on.
         "System.AreaPath",
+        # Who is on it. An identity object, not a string - see _ticket.
+        "System.AssignedTo",
     )
 
     def __init__(self, config: TrackerConfig) -> None:
@@ -775,6 +817,16 @@ class AdoClient:
         fields = item.get("fields") or {}
         raw_type = str(fields.get("System.WorkItemType") or "").strip()
         parent = fields.get("System.Parent")
+        # An identity object on any current API version, but a bare "Name <email>" string
+        # on older on-premises collections - both are accepted rather than assuming the
+        # shape, because getting it wrong loses the assignee silently.
+        assigned_to = fields.get("System.AssignedTo")
+        if isinstance(assigned_to, str):
+            display, unique = _parse_identity_string(assigned_to)
+        else:
+            identity = assigned_to or {}
+            display = str(identity.get("displayName") or "").strip()
+            unique = str(identity.get("uniqueName") or "").strip()
         return Ticket(
             tracker_id=self.config.id,
             provider="ado",
@@ -798,6 +850,12 @@ class AdoClient:
             # An ADO work item's numeric id says nothing about its project, so the
             # project it was queried from travels with the ticket.
             project=project,
+            assignee=display,
+            # uniqueName is ADO's stable handle and is almost always the address, so it
+            # serves as both key and email. `descriptor`/`id` exist too but are opaque and
+            # differ per API surface, so they would not match anything a human sees.
+            assignee_key=unique or display,
+            assignee_email=unique if "@" in unique else "",
         )
 
     def fetch_catalog(self) -> tuple[list[Ticket], bool]:
