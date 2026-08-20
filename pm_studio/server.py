@@ -81,6 +81,20 @@ STATIC_DIR = Path(__file__).parent / "static"
 # an arbitrary time - and concurrent `send_text` calls on one websocket aren't safe, so
 # every send (both paths) goes through this lock.
 chat_ws_clients: dict[str, dict[WebSocket, asyncio.Lock]] = {}
+# Stakeholder messages waiting for their PM turn, per session. The chat websocket's
+# receive loop only ever enqueues here, so a stakeholder can keep typing and keep
+# sending while the PM is mid-turn instead of being locked out until the reply lands.
+# One worker per session drains its queue strictly in order (see _drain_pm_queue), so
+# turns still run one at a time - the queue is where the waiting happens now, not in
+# the receive loop.
+_chat_queues: dict[str, asyncio.Queue] = {}
+_chat_workers: dict[str, asyncio.Task] = {}
+_chat_inflight: set[str] = set()  # sessions whose queued turn is running right now
+# Ids of the queue records currently held in memory, per session. The durable copy of
+# the queue lives in the session's pending_messages.json; this is what tells a
+# reconnecting page which of those records are already being handled here and which are
+# leftovers from a previous process that nothing will ever run - see _resume_pending.
+_chat_queued_ids: dict[str, set[str]] = {}
 task_ws_clients: dict[str, set[WebSocket]] = {}
 session_ws_clients: set[WebSocket] = set()
 roadmap_ws_clients: set[WebSocket] = set()
@@ -3319,6 +3333,14 @@ def history(session_id: str) -> list[dict]:
     return _get_runtime(session_id).pm_agent.load_history()
 
 
+@app.get("/chat/{session_id}/pending")
+def pending_messages(session_id: str) -> list[dict]:
+    """The messages this session has accepted but not started yet. The chat page merges
+    these into the bottom of the timeline on load, which is what makes a message typed
+    while the PM was thinking survive a reload."""
+    return _get_runtime(session_id).pm_agent.load_pending()
+
+
 @app.get("/chat/{session_id}/uploads/{filename}")
 def get_attachment(session_id: str, filename: str) -> FileResponse:
     path = _get_runtime(session_id).pm_agent.uploads_dir / Path(filename).name
@@ -3333,6 +3355,10 @@ def reset_chat(session_id: str, request: Request) -> dict:
     pointer so the next turn starts a brand-new conversation. PROJECT_STATUS.md,
     PROJECT_INDEX.md, and docs/ are untouched."""
     actor = _require(request, "run_session")
+    # Anything still parked belongs to the conversation being cleared - running it
+    # afterwards would land it in the fresh one, which is the opposite of a reset. The
+    # turn already in flight can't be recalled; only what hasn't started.
+    _discard_queued_turns(session_id)
     _get_runtime(session_id).pm_agent.reset()
     _audit(actor, "chat.reset", session_id)
     return {"status": "reset"}
@@ -3408,6 +3434,148 @@ async def tasks_ws(websocket: WebSocket, session_id: str) -> None:
     await _run_tasks_ws(websocket, session_id)
 
 
+def _enqueue_pm_turn(session_id: str, item: dict) -> int:
+    """Parks one stakeholder message on the session's PM queue and makes sure a worker
+    is draining it. Returns how many messages are ahead of this one: 0 means it starts
+    right away, anything higher means the PM is still busy with an earlier message."""
+    queue = _chat_queues.setdefault(session_id, asyncio.Queue())
+    ahead = queue.qsize() + (1 if session_id in _chat_inflight else 0)
+    queue.put_nowait(item)
+    _chat_queued_ids.setdefault(session_id, set()).add(item["pending"]["id"])
+    if session_id not in _chat_workers:
+        _chat_workers[session_id] = asyncio.create_task(_drain_pm_queue(session_id))
+    return ahead
+
+
+def _discard_queued_turns(session_id: str) -> None:
+    """Throws away every message a session has queued but not started. Hops onto the
+    event loop first: the only caller is the reset endpoint, which FastAPI runs on a
+    worker thread, and these registries belong to the loop."""
+
+    def drop() -> None:
+        queue = _chat_queues.get(session_id)
+        ids = _chat_queued_ids.get(session_id, set())
+        while queue is not None:
+            try:
+                item = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            ids.discard(item["pending"]["id"])
+
+    if _main_loop is not None:
+        _main_loop.call_soon_threadsafe(drop)
+    else:  # no loop running (tests, or a call before startup) - nothing else can race
+        drop()
+
+
+async def _drain_pm_queue(session_id: str) -> None:
+    """Runs a session's queued PM turns one at a time, in the order they were sent, and
+    stops as soon as the queue runs dry. Nothing awaits between the empty check and
+    deregistering the worker, so _enqueue_pm_turn can never hand work to a worker that
+    is already on its way out - it starts a fresh one instead."""
+    loop = asyncio.get_event_loop()
+    queue = _chat_queues[session_id]
+    try:
+        while True:
+            try:
+                item = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            _chat_inflight.add(session_id)
+            try:
+                await _run_queued_pm_turn(session_id, item, loop)
+            finally:
+                _chat_inflight.discard(session_id)
+                _chat_queued_ids.get(session_id, set()).discard(item["pending"]["id"])
+    finally:
+        _chat_workers.pop(session_id, None)
+        if queue.empty():
+            _chat_queues.pop(session_id, None)
+        if not _chat_queued_ids.get(session_id):
+            _chat_queued_ids.pop(session_id, None)
+
+
+async def _run_queued_pm_turn(
+    session_id: str, item: dict, loop: asyncio.AbstractEventLoop
+) -> None:
+    """One dequeued message -> one PM turn, with its events streamed back to the
+    connection that sent it. A sender that has since disconnected simply loses them:
+    the turn still runs and is still written to the transcript, so the message is never
+    silently dropped just because its tab closed."""
+    runtime = sessions.get_runtime(session_id)
+    if runtime is None:
+        return
+    pending = item["pending"]
+    events: asyncio.Queue = asyncio.Queue()
+
+    def produce() -> None:
+        try:
+            other_ctx = sessions.describe_other_active_sessions(session_id)
+            roadmap_ctx = _roadmap_context_for(session_id)
+            for event in runtime.pm_agent.handle_user_message(
+                pending["text"],
+                pending.get("attachments") or [],
+                other_ctx,
+                roadmap_ctx,
+                pending_id=pending["id"],
+            ):
+                loop.call_soon_threadsafe(events.put_nowait, event)
+        except Exception as exc:  # surface dev/PM errors to the chat instead of dying silently
+            loop.call_soon_threadsafe(events.put_nowait, {"type": "error", "message": str(exc)})
+        finally:
+            loop.call_soon_threadsafe(events.put_nowait, None)
+
+    future = loop.run_in_executor(None, produce)
+    websocket, send_lock = item["websocket"], item["send_lock"]
+    while True:
+        event = await events.get()
+        if event is None:
+            break
+        # One signal per completed turn, carrying that turn's measured token spend. A
+        # turn the stakeholder actually took, so it counts toward their week - unlike an
+        # auto-continuation (see _auto_continue_pm).
+        if event.get("agent_usage") is not None:
+            _record_signal(item["user"], KIND_PM_TURN, session_id, usage=event["agent_usage"])
+        if event["type"] == "pm_working":
+            # Names the queue record this turn came from, so a page showing it as a
+            # queued bubble (hydrated after a reload) can promote it to a sent one.
+            event = {**event, "queued_id": pending["id"]}
+        try:
+            async with send_lock:
+                await websocket.send_text(json.dumps(event))
+        except Exception:
+            pass  # sender's connection is gone; keep draining the rest of the turn
+    await future
+
+
+def _resume_pending(
+    session_id: str,
+    runtime,
+    websocket: WebSocket,
+    send_lock: asyncio.Lock,
+    ws_user,
+) -> None:
+    """Re-queues any message left in the session's queue file that no live worker is
+    handling. Those are the ones a restart stranded: written when they arrived, never
+    run, and otherwise stuck reading "queued" on the chat page forever. Records already
+    in memory (a plain page reload, where the worker kept going the whole time) are
+    skipped by id, so nothing runs twice. Deliberately on connect rather than at
+    startup: the turn runs when someone is there to read it, not unattended at boot."""
+    live = _chat_queued_ids.get(session_id, set())
+    for record in runtime.pm_agent.load_pending():
+        if record.get("id") in live:
+            continue
+        _enqueue_pm_turn(
+            session_id,
+            {
+                "pending": record,
+                "websocket": websocket,
+                "send_lock": send_lock,
+                "user": ws_user,
+            },
+        )
+
+
 async def _run_chat_ws(websocket: WebSocket, session_id: str) -> None:
     # Driving a PM conversation is `run_session`, not `view`.
     if await _ws_reject(websocket, "run_session"):
@@ -3429,13 +3597,13 @@ async def _run_chat_ws(websocket: WebSocket, session_id: str) -> None:
         else None
     )
 
-    loop = asyncio.get_event_loop()
     # Registered so a dev-task completion firing while this connection is just sitting
     # idle on receive_text() can still push the PM's auto-continuation reply here - see
     # _broadcast_chat_event. The lock is shared with that path so the two never send
     # concurrently on the same websocket.
     send_lock = asyncio.Lock()
     chat_ws_clients.setdefault(session_id, {})[websocket] = send_lock
+    _resume_pending(session_id, runtime, websocket, send_lock, ws_user)
     try:
         while True:
             raw = await websocket.receive_text()
@@ -3445,38 +3613,33 @@ async def _run_chat_ws(websocket: WebSocket, session_id: str) -> None:
             if not text and not attachments:
                 continue
 
-            queue: asyncio.Queue = asyncio.Queue()
-
-            def produce(user_text: str = text, user_attachments: list = attachments) -> None:
-                try:
-                    other_ctx = sessions.describe_other_active_sessions(session_id)
-                    roadmap_ctx = _roadmap_context_for(session_id)
-                    for event in runtime.pm_agent.handle_user_message(
-                        user_text, user_attachments, other_ctx, roadmap_ctx
-                    ):
-                        loop.call_soon_threadsafe(queue.put_nowait, event)
-                except Exception as exc:  # surface dev/PM errors to the chat instead of dying silently
-                    loop.call_soon_threadsafe(
-                        queue.put_nowait, {"type": "error", "message": str(exc)}
-                    )
-                finally:
-                    loop.call_soon_threadsafe(queue.put_nowait, None)
-
-            future = loop.run_in_executor(None, produce)
-            while True:
-                event = await queue.get()
-                if event is None:
-                    break
-                # One signal per completed turn, carrying that turn's measured token
-                # spend. A turn the stakeholder actually took, so it counts toward
-                # their week - unlike an auto-continuation (see _auto_continue_pm).
-                if event.get("agent_usage") is not None:
-                    _record_signal(
-                        ws_user, KIND_PM_TURN, session_id, usage=event["agent_usage"]
-                    )
-                async with send_lock:
-                    await websocket.send_text(json.dumps(event))
-            await future
+            # Write the message (and decode its images) to the session's queue file
+            # before anything else - in an executor, since that touches disk. From here
+            # on the message exists independently of this connection: a reload, a crash
+            # or a closed tab can't lose it.
+            pending = await asyncio.get_event_loop().run_in_executor(
+                None, runtime.pm_agent.enqueue_pending, text, attachments
+            )
+            # Then hand it to the queue and go straight back to receiving. Nothing here
+            # waits on the turn, so the stakeholder can send again (and again) while the
+            # PM is still working on an earlier message.
+            ahead = _enqueue_pm_turn(
+                session_id,
+                {
+                    "pending": pending,
+                    "websocket": websocket,
+                    "send_lock": send_lock,
+                    "user": ws_user,
+                },
+            )
+            # Acknowledge every accepted message with the id it was filed under, so the
+            # page can label its own bubble - `ahead` says whether it is parked behind
+            # earlier messages (> 0) or starting now (0). Sent for both, because the
+            # page needs the id either way to promote the bubble when its turn starts.
+            async with send_lock:
+                await websocket.send_text(
+                    json.dumps({"type": "pm_queued", "ahead": ahead, "id": pending["id"]})
+                )
     except WebSocketDisconnect:
         pass
     finally:

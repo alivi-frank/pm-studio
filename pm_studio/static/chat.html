@@ -138,6 +138,19 @@
   }
   .row.user .bubble { background: var(--bubble-user); color: var(--bubble-user-fg); }
   .row.pm .bubble { background: var(--bubble-pm); color: var(--bubble-pm-fg); }
+  /* A message the session has accepted but not started yet: still the stakeholder's
+     own bubble, dimmed and tagged so it reads as "sent, waiting its turn" rather than
+     as one the PM has already seen. */
+  .row.user.queued .bubble { opacity: 0.65; }
+  .row.user.queued .bubble::after {
+    content: "Queued";
+    display: block;
+    margin-top: 4px;
+    font-size: 0.72em;
+    font-style: italic;
+    letter-spacing: 0.02em;
+    opacity: 0.85;
+  }
   .row.status .bubble {
     background: transparent;
     color: var(--muted);
@@ -1062,12 +1075,20 @@
     });
   }
 
-  function setBusy(busy) {
-    sendBtn.disabled = busy;
-    input.disabled = busy;
+  // The composer is NOT disabled while the PM is thinking - you can keep typing and
+  // keep sending, and the server queues each message onto the session to run in order
+  // (see _enqueue_pm_turn). This locks the composer only when there is nothing left to
+  // talk to: a session the server says is gone.
+  function setLocked(locked) {
+    sendBtn.disabled = locked;
+    input.disabled = locked;
   }
 
   let sessionGone = false; // set when the server tells us this session no longer exists
+  // Bubbles this tab has drawn for messages it sent, waiting on the session's receipt
+  // (pm_queued) to learn the id they were filed under. FIFO: the server acks in the
+  // order it receives.
+  let awaitingAck = [];
 
   function connectChat() {
     chatSocket = new WebSocket(`ws://${location.host}/ws/chat/${sessionId}`);
@@ -1075,30 +1096,44 @@
     chatSocket.onclose = () => {
       if (sessionGone) return; // don't loop forever reconnecting to a session that's archived/gone
       addRow("status", "Disconnected - reconnecting...");
-      setBusy(false);
+      awaitingAck = []; // receipts for anything in flight died with the connection
       setTimeout(connectChat, RECONNECT_DELAY_MS);
     };
     chatSocket.onmessage = (msg) => {
       const event = JSON.parse(msg.data);
       // event.auto marks a turn the PM ran on its own after a dev task finished, not one
-      // this tab asked for - it must never touch setBusy, which tracks whether THIS tab's
-      // own in-flight request (if any) is still running.
+      // this tab asked for.
       switch (event.type) {
+        case "pm_queued": {
+          // The session's receipt for a message this tab just sent: it is filed under
+          // event.id, and event.ahead says how many messages are still in front of it.
+          // Acks arrive in send order, so they pair off with the bubbles awaiting one.
+          const row = awaitingAck.shift();
+          if (row) {
+            row.dataset.queuedId = event.id;
+            if (event.ahead > 0) row.classList.add("queued");
+          }
+          break;
+        }
         case "pm_working":
+          // A turn starting on a message this page drew as queued (hydrated after a
+          // reload): it is a plain sent message now.
+          if (event.queued_id) {
+            const queued = log.querySelector(`.row.queued[data-queued-id="${event.queued_id}"]`);
+            if (queued) queued.classList.remove("queued");
+          }
           addRow("status", event.auto ? "PM is checking a finished task..." : "PM is thinking...");
           break;
         case "pm_reply":
           addRow("pm", event.text);
-          if (!event.auto) setBusy(false);
           break;
         case "pm_error":
           addRow("status", `Error: ${event.message}`);
-          if (!event.auto) setBusy(false);
           break;
         case "error":
           sessionGone = true;
           addRow("status", `${event.message} - this session may have been merged and cleaned up.`);
-          setBusy(true);
+          setLocked(true);
           break;
       }
     };
@@ -1167,14 +1202,37 @@
     }
   }
 
+  // Queued messages, appended after the transcript: everything in the timeline above
+  // has already had its turn, and these are what happens next. A record whose turn
+  // started between the two fetches is in BOTH responses (the transcript entry carries
+  // the same id) - drawing it once, from the transcript, is what the id is for.
+  function renderPendingMessages(entries, pending) {
+    const transcribed = new Set(entries.map((entry) => entry.id).filter(Boolean));
+    for (const record of pending) {
+      if (transcribed.has(record.id)) continue;
+      const imageSrcs = (record.attachments || []).map(
+        (filename) => `/chat/${sessionId}/uploads/${filename}`
+      );
+      const row = buildRow("user", record.text, imageSrcs);
+      row.classList.add("queued");
+      row.dataset.queuedId = record.id;
+      tagItemTs(row, record.ts);
+      log.appendChild(row);
+    }
+  }
+
   function hydrate() {
     return Promise.all([
       fetch(`/history/${sessionId}`).then((r) => r.json()).catch(() => []),
       fetch(`/tasks/${sessionId}`).then((r) => r.json()).catch(() => []),
       // Live activity so a mid-turn reload can tell the PM turn is still in flight.
       fetch(`/sessions/${sessionId}`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
-    ]).then(([entries, tasks, session]) => {
+      // Messages accepted while the PM was thinking and not started yet - they are on
+      // the session, not in this tab, so a reload has to ask for them.
+      fetch(`/chat/${sessionId}/pending`).then((r) => (r.ok ? r.json() : [])).catch(() => []),
+    ]).then(([entries, tasks, session, pending]) => {
       hydrateTimeline(entries || [], tasks || []);
+      renderPendingMessages(entries || [], pending || []);
       // First visit (no stored watermark): treat everything present as read, so no
       // divider appears. On later visits, keep the stored watermark so unread that
       // arrived while away is surfaced (divider + count) below.
@@ -1226,7 +1284,8 @@
     e.preventDefault();
     const text = input.value.trim();
     if ((!text && !pendingAttachments.length) || !chatSocket || chatSocket.readyState !== WebSocket.OPEN) return;
-    addRow("user", text, pendingAttachments.map((a) => a.dataUrl));
+    const bubble = addRow("user", text, pendingAttachments.map((a) => a.dataUrl));
+    awaitingAck.push(bubble.closest(".row"));
     chatSocket.send(JSON.stringify({
       text,
       attachments: pendingAttachments.map(({ filename, mime, data }) => ({ filename, mime, data })),
@@ -1234,7 +1293,6 @@
     input.value = "";
     pendingAttachments = [];
     renderPendingPreviews();
-    setBusy(true);
   });
 
   input.addEventListener("keydown", (e) => {

@@ -559,8 +559,9 @@ Constants: `PM_TIMEOUT_SECONDS = 1800`, `MAX_AUTO_CONTINUE_STREAK = 6`,
 ### Paths (per session)
 - `repo_root` = the session's worktree path.
 - `workspace_dir` = `<repo_root>/<workspace_root>/workspace/current/`; inside it: `SPEC.md`,
-  `chat_history.json`, `pm_session_id.txt` (the resumable Claude CLI session id —
-  distinct from the app-level session id), `uploads/`.
+  `chat_history.json`, `pending_messages.json` (the durable chat queue — see below),
+  `pm_session_id.txt` (the resumable Claude CLI session id — distinct from the app-level
+  session id), `uploads/`.
 - `archive_dir` = `<repo_root>/<workspace_root>/workspace/archive/<session_id>/`.
 - `PROJECT_STATUS.md` and `PROJECT_INDEX.md` at the **repo root** — deliberately outside
   `workspace/current/` so a reset can never wipe them; root-level so the stakeholder
@@ -628,13 +629,30 @@ compatible: legacy entries without it must still load, treated as untimestamped.
 `last_message_role()` normalizes pm/error → "assistant" for the waiting-state
 computation.
 
+### Pending queue
+`pending_messages.json` — a list of `{id, text, attachments[], ts}`: messages accepted
+but not yet run. `enqueue_pending(text, attachments)` writes one the moment it arrives,
+**decoding its images to `uploads/` there** rather than when the turn starts, so a queued
+attachment survives a restart like its text does; `handle_user_message` therefore takes
+attachment *filenames*, not base64. `drop_pending(id)` removes it as its turn begins.
+Guarded by `pending_lock`, not `pm_lock`: it is written from the event loop thread
+(message arriving) and a worker thread (turn starting).
+
+**A message is in exactly one of the two files**, with one deliberate exception: `_run_turn`
+writes the transcript entry *first*, stamped with the queue record's `id`, and drops the
+queue record *second*. A reader caught between them sees it twice and dedupes on that id —
+the alternative ordering would show it zero times, which is the failure that actually loses
+a message. `reset()` clears the queue file along with the transcript: a message that never
+ran belongs to the conversation being cleared.
+
 ### Two entry points
-- `handle_user_message(text, attachments, other_sessions_context, roadmap_context)` —
-  resets `_auto_continue_streak = 0`; saves attachments (base64 → files under
-  `uploads/`, skipping bad/oversized ones silently) and appends a
-  "[The stakeholder attached N image(s)… use your Read tool…]" block with the file
-  paths; prepends the two context blocks (see PROMPTS.md §4 — the blocks go only into
-  the prompt, never into persisted history: per-turn plumbing, not conversation).
+- `handle_user_message(text, attachments, other_sessions_context, roadmap_context,
+  pending_id)` — resets `_auto_continue_streak = 0`; `attachments` are filenames already
+  written under `uploads/` by `enqueue_pending` (base64 → files, skipping bad/oversized
+  ones silently), pointed at from a "[The stakeholder attached N image(s)… use your Read
+  tool…]" block; prepends the two context blocks (see PROMPTS.md §4 — the blocks go only
+  into the prompt, never into persisted history: per-turn plumbing, not conversation);
+  `pending_id` is the queue record this turn came from.
 - `handle_task_completion(task, ...)` — increments the streak; builds the auto-continue
   prompt (normal or at-cap variant, PROMPTS.md §3); history entry is a **system** role
   label `Dev task <id> finished (<status>): <description[:100]>`.
@@ -642,8 +660,8 @@ computation.
 ### Reset & archive
 - `archive_current(reason)` — copy (never delete) SPEC.md, chat_history.json, uploads/
   into `archive/<session_id>/<UTC yyyymmddThhmmssZ>_<reason>/`.
-- `reset()` — under `git_lock`: archive with reason "reset", delete SPEC/chat/session
-  pointer/uploads, `claude_session_id = None`, snapshot ("PM session <id> reset (prior
+- `reset()` — under `git_lock`: archive with reason "reset", delete SPEC/chat/pending
+  queue/session pointer/uploads, `claude_session_id = None`, snapshot ("PM session <id> reset (prior
   spec/chat archived)"). PROJECT_STATUS/INDEX/docs untouched by construction.
 - `_ensure_project_status_seed()` on init — create PROJECT_STATUS.md with an honest
   "No project history yet… proceed to discovery." if missing, so the system prompt's
@@ -798,6 +816,7 @@ background-thread → websocket hops via `loop.call_soon_threadsafe(asyncio.crea
 | `POST /sessions/{id}/merge` / `/sync` / `/terminate` / `/cleanup` / `/archive` / `/unarchive`, `DELETE /sessions/{id}` | lifecycle (background threads for merge/sync/terminate) |
 | `GET /chat/{id}`, `GET /dashboard/{id}`, `GET /roadmap` | static pages |
 | `GET /history/{id}` | chat_history.json |
+| `GET /chat/{id}/pending` | messages accepted but not yet started — the chat page appends these below the transcript on load, deduped against it by `id` |
 | `GET /chat/{id}/uploads/{filename}` | attachment files (basename-sanitized) |
 | `POST /chat/{id}/reset` | archive + clear |
 | `POST /tasks/{id}` `{"task": "...", "system": "..."}` | dispatch dev task (immediate return); `system` required once `[systems]` is declared — it routes the system's `gitflow` rules into the dev agent's prompt — and refused when it isn't (400 naming the valid ids either way) |
@@ -812,15 +831,39 @@ Optional: zero-segment aliases to the default session (`/tasks`, `/history`, `/w
 `/ws/tasks`, `/dashboard`) for backward compat.
 
 ### Chat websocket flow
-On message `{text, attachments[]}`: build `other_ctx =
+On message `{text, attachments[]}`: the receive loop **only enqueues** — it never waits
+on the turn, so the stakeholder can keep typing and keep sending while the PM is
+thinking. First `pm_agent.enqueue_pending(...)` (in an executor — it touches disk) writes
+the message to the session's `pending_messages.json`, so from that instant it outlives
+this connection; then `_enqueue_pm_turn` parks `{pending, websocket, send_lock, user}` on
+the in-memory `_chat_queues[id]` and starts `_drain_pm_queue(id)` if no worker is running.
+**Every** accepted message is acked with `{"type":"pm_queued","id":…,"ahead":n}` — `ahead`
+> 0 means it is parked behind earlier ones, and the page needs the `id` either way to
+label its own bubble. `pm_working` carries `queued_id` so the page can promote a queued
+bubble when its turn starts. One worker per session drains the queue **in order, one turn
+at a time** (it exits the moment the queue is dry, with no `await`
+between the empty check and deregistering, so an enqueue can never hand work to a worker
+on its way out — it starts a fresh one). Per turn: build `other_ctx =
 describe_other_active_sessions(id)` and `roadmap_ctx = _roadmap_context_for(id)` — own
 product deep + others digest for pinned sessions; digest-of-all for unpinned; and for an
 initiative-scoped session the **initiative first** at full depth (its changes cut across
 boards, so leading with one product's roadmap would bury the actual scope), then one
 full-depth block per owned root, then the digest of everything not already shown — run
-`handle_user_message` in an executor, stream events back through an asyncio queue.
-**Per-connection send lock**: two producers can push to one socket (the normal turn
-loop, and an auto-continuation broadcast firing at an arbitrary time) and concurrent
+`handle_user_message` in an executor, stream events back through an asyncio queue to the
+connection that sent the message. A sender that disconnected mid-queue just loses the
+events; the turn still runs and is still written to the transcript.
+
+`_chat_queued_ids[id]` tracks which queue records this process is holding. On **connect**,
+`_resume_pending` re-queues every record in the session's queue file that is *not* in that
+set: those are leftovers a restart stranded, which nothing would otherwise ever run. A
+plain page reload skips them all (the worker never stopped), so nothing runs twice.
+Deliberately on connect, not at startup — a stranded turn runs when someone is there to
+read it, not unattended at boot. `POST /chat/{id}/reset` calls `_discard_queued_turns`
+first (hopping onto the loop, since the endpoint runs on a worker thread): a message that
+hasn't started belongs to the conversation being cleared, not the fresh one.
+
+**Per-connection send lock**: two producers can push to one socket (the queue worker,
+and an auto-continuation broadcast firing at an arbitrary time) and concurrent
 `send_text` isn't safe — every send on both paths takes the lock.
 
 ### Task completion fan-out
@@ -938,7 +981,13 @@ vertical space on a board that wants it.
   live via `/ws/sessions`, expanded state surviving re-renders) — they are
   session-level, not per-task, so they don't belong in the stream. Composer with image
   attach (base64), "PM is working…" indicator on `pm_working`, reset button (confirm
-  first); auto-continuation events arrive marked `auto:true`. Markdown-ish rendering
+  first); auto-continuation events arrive marked `auto:true`. The composer is **never
+  disabled while the PM is thinking** — sending is always allowed and the server queues
+  the message onto the session; it locks only when the server reports the session is
+  gone. A message still waiting is the stakeholder's own bubble, dimmed and tagged
+  "Queued": drawn from `GET /chat/{id}/pending` on load, or marked live when its
+  `pm_queued` ack reports `ahead > 0` (acks pair off with sent bubbles in order), and
+  un-tagged on the `pm_working` carrying its `queued_id`. Markdown-ish rendering
   of PM replies is nice-to-have.
 - **dashboard.html** (`/dashboard/{id}`) — the session's task list with statuses,
   durations, results; live via `/ws/tasks/{id}`.

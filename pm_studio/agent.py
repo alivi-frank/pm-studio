@@ -697,6 +697,11 @@ class PMAgent:
         self.spec_path = self.workspace_dir / "SPEC.md"
         self.session_state_path = self.workspace_dir / "pm_session_id.txt"
         self.history_path = self.workspace_dir / "chat_history.json"
+        # Stakeholder messages accepted but not yet run - the durable half of the chat
+        # queue (server.py's _chat_queues is the in-memory half). Written the moment a
+        # message arrives and dropped the instant its turn starts, so a message is
+        # always in exactly one of the two files and never in neither.
+        self.pending_path = self.workspace_dir / "pending_messages.json"
         self.uploads_dir = self.workspace_dir / "uploads"
         # Where a reset (or a terminate, called externally via _archive_current) copies
         # SPEC.md/chat_history.json before they're cleared - see gitsnapshot.ARCHIVE_PATH.
@@ -744,6 +749,10 @@ class PMAgent:
         # auto - blocks on this, so they queue up and run one at a time instead of
         # corrupting each other. Separate from git_lock, which guards commits, not turns.
         self.pm_lock = threading.Lock()
+        # Guards pending_messages.json: it is written from the event loop thread (a
+        # message arriving) and from a turn's worker thread (that message starting), so
+        # unlike the transcript it is not covered by pm_lock.
+        self.pending_lock = threading.Lock()
         # Consecutive auto-triggered turns with no real stakeholder message between them -
         # see MAX_AUTO_CONTINUE_STREAK. Reset on every genuine handle_user_message call.
         self._auto_continue_streak = 0
@@ -1079,7 +1088,12 @@ class PMAgent:
         touched - they live outside workspace/current for exactly this reason."""
         with self.git_lock:
             self.archive_current("reset")
-            for path in (self.spec_path, self.history_path, self.session_state_path):
+            for path in (
+                self.spec_path,
+                self.history_path,
+                self.session_state_path,
+                self.pending_path,
+            ):
                 if path.exists():
                     path.unlink()
             if self.uploads_dir.exists():
@@ -1089,11 +1103,58 @@ class PMAgent:
                 f"PM session {self.session_id} reset (prior spec/chat archived)", self.repo_root
             )
 
+    # ---- pending queue (messages accepted, not yet run) ----
+
+    def load_pending(self) -> list[dict]:
+        """The stakeholder messages waiting for their turn, oldest first. Each is
+        `{id, text, attachments, ts}` - the same shape a transcript entry takes, so the
+        chat page can render one exactly like the other."""
+        with self.pending_lock:
+            return self._read_pending()
+
+    def _read_pending(self) -> list[dict]:
+        if self.pending_path.exists():
+            try:
+                return json.loads(self.pending_path.read_text())
+            except json.JSONDecodeError:
+                return []
+        return []
+
+    def _write_pending(self, pending: list[dict]) -> None:
+        self.workspace_dir.mkdir(parents=True, exist_ok=True)
+        self.pending_path.write_text(json.dumps(pending, indent=2))
+
+    def enqueue_pending(self, text: str, attachments: list[dict] | None = None) -> dict:
+        """Records one just-arrived message, attachments and all, BEFORE anything runs
+        it - so a reload (or a restart) while it waits still finds it. Returns the
+        record; its `id` is what carries through to the transcript entry the turn
+        writes, which is how the chat page tells a message that has since started from
+        one still waiting."""
+        saved = [path.name for path in self._save_attachments(attachments or [])]
+        record = {"id": uuid.uuid4().hex, "text": text, "attachments": saved, "ts": time.time()}
+        with self.pending_lock:
+            pending = self._read_pending()
+            pending.append(record)
+            self._write_pending(pending)
+        return record
+
+    def drop_pending(self, message_id: str) -> None:
+        """Removes one message from the queue file. Called as its turn starts, right
+        after the transcript entry is written - the transcript is now the record of it,
+        and a message in both files at once would show up twice on the chat page were it
+        not for the shared id."""
+        with self.pending_lock:
+            pending = self._read_pending()
+            remaining = [record for record in pending if record.get("id") != message_id]
+            if len(remaining) != len(pending):
+                self._write_pending(remaining)
+
     def _append_incoming_entry(
         self,
         text: str,
         attachments: list[str] | None = None,
         role: str = "user",
+        entry_id: str | None = None,
     ) -> None:
         """Persists just the incoming stakeholder/system entry to chat_history.json,
         called at the START of a turn (before _run_pm_turn) so a mid-turn reload's
@@ -1108,6 +1169,10 @@ class PMAgent:
         entry = {"role": role, "text": text, "ts": time.time()}
         if attachments:
             entry["attachments"] = attachments
+        # The queue record's id, carried onto the transcript entry so the chat page can
+        # match the two up and never render a message twice (see drop_pending).
+        if entry_id:
+            entry["id"] = entry_id
         history.append(entry)
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         self.history_path.write_text(json.dumps(history, indent=2))
@@ -1153,19 +1218,25 @@ class PMAgent:
     def handle_user_message(
         self,
         text: str,
-        attachments: list[dict] | None = None,
+        attachments: list[str] | None = None,
         other_sessions_context: str = "",
         roadmap_context: str = "",
+        pending_id: str | None = None,
     ) -> Iterator[dict]:
         """Runs one PM turn in response to a real stakeholder message. `attachments` are
-        base64-encoded images from the chat UI (see _save_attachments) - written to disk
-        and pointed at from the prompt text so the PM can Read them. `other_sessions_context`
-        is server.py's live snapshot of what every other active session is doing - see
+        the FILENAMES of images already written under uploads/ - decoding happens at
+        enqueue_pending, when the message arrives, not here when its turn finally starts,
+        so a queued image survives a restart like its text does. They're pointed at from
+        the prompt text so the PM can Read them. `other_sessions_context` is server.py's
+        live snapshot of what every other active session is doing - see
         _with_session_context. `roadmap_context` is server.py's per-turn roadmap snapshot
-        (own product in full, others as a shallow digest) - see _with_roadmap_context."""
+        (own product in full, others as a shallow digest) - see _with_roadmap_context.
+        `pending_id` is the queue record this turn came from, dropped from the queue file
+        as the turn starts."""
         self._auto_continue_streak = 0
 
-        saved_paths = self._save_attachments(attachments or [])
+        names = list(attachments or [])
+        saved_paths = [self.uploads_dir / name for name in names]
         prompt_text = text
         if saved_paths:
             file_list = "\n".join(f"- {path}" for path in saved_paths)
@@ -1180,8 +1251,9 @@ class PMAgent:
             prompt_text,
             history_text=text,
             history_role="user",
-            history_attachments=[path.name for path in saved_paths],
+            history_attachments=names,
             commit_message=f"PM turn: {(text or '[image]')[:72]}",
+            pending_id=pending_id,
         )
 
     def handle_task_completion(
@@ -1286,6 +1358,7 @@ class PMAgent:
         history_role: str,
         history_attachments: list[str] | None,
         commit_message: str,
+        pending_id: str | None = None,
     ) -> Iterator[dict]:
         """Runs one `claude -p` turn (which may itself dispatch a nested dev-agent call
         via Bash), persists it to the transcript, and yields UI events. Serialized by
@@ -1306,8 +1379,16 @@ class PMAgent:
                 # after the turn returns. Both writes stay serialized under pm_lock, exactly
                 # as the single combined write was, so no history write can race.
                 self._append_incoming_entry(
-                    history_text, attachments=history_attachments, role=history_role
+                    history_text,
+                    attachments=history_attachments,
+                    role=history_role,
+                    entry_id=pending_id,
                 )
+                # Transcript first, queue file second: a reader caught between the two
+                # sees the message twice (deduped on the shared id) rather than not at
+                # all, which is the failure that would actually lose a message.
+                if pending_id:
+                    self.drop_pending(pending_id)
                 final_event = self._run_pm_turn(prompt_text)
                 self._append_reply_entry(final_event)
                 with self.git_lock:
