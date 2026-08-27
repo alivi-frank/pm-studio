@@ -2050,9 +2050,13 @@ def _run_tracker_sync(tracker_id: str | None) -> None:
     their epic's project in the same cycle instead of waiting for the next one. The
     won't-do removal runs LAST and changes-before-projects internally, so a declined
     epic's declined changes are gone by the time its project's emptiness is judged -
-    the whole subtree can leave in one cycle. The stale-exclusion report runs after
-    all of them, so it reads the board as this cycle left it and never names something
-    another pass was about to remove anyway.
+    the whole subtree can leave in one cycle. The status mirror runs after that removal
+    rather than before it, so a change about to be deleted is not written to first. The
+    epic mirror runs after the change mirror, so a project's closure is judged against
+    changes that already followed their tickets this cycle - reversed, a project would
+    close on last sync's reading of its own children. The stale-exclusion report runs
+    after all of them, so it reads the board as this cycle left it and never names
+    something another pass was about to remove anyway.
     """
     try:
         tracker_store.sync(tracker_id)
@@ -2069,6 +2073,8 @@ def _run_tracker_sync(tracker_id: str | None) -> None:
         _import_routed_tickets()
         _assign_changes_to_epic_projects()
         _remove_wont_do_imports()
+        _mirror_ticket_status()
+        _mirror_epic_status()
         _report_stale_excluded_imports()
     except Exception as exc:  # noqa: BLE001
         print(f"[trackers] sync failed: {exc}")
@@ -2118,10 +2124,12 @@ def _reconcile_people() -> None:
 _import_report: dict[str, dict] = {}
 
 # Per-tracker outcome of the last EPIC pass (see _sync_epic_projects): projects linked
-# to existing epics vs created from new ones, changes filed under their epic's project,
-# and everything that was skipped with the reason - held by a change, unrouted, done,
-# or ambiguous. Same posture as _import_report: the skips are the report half of
-# "reported, never guessed".
+# to existing epics vs created from new ones, changes filed under their epic's project
+# (`changes_assigned`) or moved to follow a re-parenting upstream
+# (`changes_reparented`), and everything that was skipped with the reason - held by a
+# change, unrouted, done, ambiguous, or filed by hand somewhere the tracker may not
+# override (`reparent_kept`). Same posture as _import_report: the skips are the report
+# half of "reported, never guessed".
 _epic_report: dict[str, dict] = {}
 
 
@@ -2236,6 +2244,8 @@ def _sync_epic_projects() -> None:
             "projects_linked": 0,
             "projects_created": 0,
             "changes_assigned": 0,
+            "changes_reparented": 0,
+            "reparent_kept": 0,
             "reclaimed_from_changes": 0,
             "twins_merged": 0,
             "held_by_changes": 0,
@@ -2439,14 +2449,30 @@ def _sync_epic_projects() -> None:
 
 
 def _assign_changes_to_epic_projects() -> None:
-    """A change whose ticket parents to an epic belongs to that epic's project - fill
-    the assignment in wherever it is MISSING. Runs after the change import so a change
-    and its project meet in the same sync cycle.
+    """A change whose ticket parents to an epic belongs to that epic's project - filled
+    in where it is MISSING, and corrected where the tracker's hierarchy has since moved.
+    Runs after the change import so a change and its project meet in the same sync cycle.
 
-    Only ever fills None: a change a human deliberately filed under some other project
-    is their statement, and silently overriding it with the tracker's hierarchy would
-    make the board fight its own users. The unassigned report shrinking is the whole
-    effect.
+    Re-parenting a story in the tracker is a deliberate act, and a more recent one than
+    the import that filed the change, so the tracker wins - but only over slots the
+    tracker owns. Three cases, by what the change sits in now:
+
+    - NOTHING: filled, the original behaviour. (A dangling id whose project has since
+      been deleted counts as nothing - that is rot, not somebody's filing.)
+    - A project linked to an epic in THIS tracker: the tracker put the change there, so
+      the tracker may move it. This is what makes re-parenting upstream replicate onto
+      the board instead of stranding the change under its old epic forever.
+    - A project with no epic link, or one linked to a DIFFERENT tracker: a human filed
+      it there by hand, against the hierarchy. That outranks the tracker and is counted
+      (`reparent_kept`) rather than overridden - the board must not fight its own users.
+      Catch-alls land here too, since an epic link is refused on them by construction.
+
+    Nothing here ever CLEARS an assignment. `_epic_ancestor_key` answers None for a
+    parent outside the synced catalog just as readily as for a genuinely parentless
+    ticket, and excluded epics are invisible to these passes by design - so "no epic
+    visible" is UNKNOWN, not "no epic", the same posture _remove_wont_do_imports takes
+    on a ticket missing from the catalog. Unassigning on that would drop a story
+    parented to another team's epic out of its project on the next sync.
     """
     for config in CONFIG.trackers:
         if not config.imports:
@@ -2459,8 +2485,7 @@ def _assign_changes_to_epic_projects() -> None:
         for items in roadmap_store.list_all().values():
             for change in items:
                 if (
-                    change.get("project_id")
-                    or change.get("tracker_id") != config.id
+                    change.get("tracker_id") != config.id
                     or not change.get("ticket_key")
                 ):
                     continue
@@ -2473,9 +2498,33 @@ def _assign_changes_to_epic_projects() -> None:
                 project = portfolio_store.project_for_ticket(config.id, parent)
                 if project is None:
                     continue
+                current_id = change.get("project_id")
+                if current_id == project.id:
+                    continue
+                current = (
+                    portfolio_store.get_project(current_id) if current_id else None
+                )
+                if current is None:
+                    roadmap_store.update(change["id"], project_id=project.id)
+                    if report is not None:
+                        report["changes_assigned"] += 1
+                    continue
+                if current.tracker_id != config.id:
+                    if report is not None:
+                        report["reparent_kept"] += 1
+                    continue
                 roadmap_store.update(change["id"], project_id=project.id)
                 if report is not None:
-                    report["changes_assigned"] += 1
+                    report["changes_reparented"] += 1
+                _audit(
+                    None, "roadmap.change_reparented", change["id"],
+                    f"{change['ticket_key']}: {current.ticket_key} -> {parent}",
+                )
+        if report is not None and report["changes_reparented"]:
+            print(
+                f"[trackers] {config.id}: {report['changes_reparented']} change(s) "
+                f"moved to follow their ticket's epic"
+            )
 
 
 def _remove_wont_do_imports() -> None:
@@ -2567,6 +2616,279 @@ def _remove_wont_do_imports() -> None:
             print(
                 f"[trackers] {config.id}: won't-do -> removed {removed} change(s), "
                 f"{projects_removed} project(s)"
+            )
+
+
+def _mirror_ticket_status() -> None:
+    """A linked change's `status` mirrors its ticket's state, every sync.
+
+    The one thing the board does NOT get to disagree with the tracker about. `bucket` is
+    the plan and stays untouched - now/next/later is this deployment's call, and nothing
+    here ever moves a card between columns. But status is a claim about EXECUTION, and
+    for work that has a ticket the tracker is the system that actually knows: a change
+    reading "in progress" against a closed ticket is not a plan, it is a stale snapshot.
+    Before this pass existed, `_imported_status` ran once at import and never again, so
+    every linked change froze at whatever state its ticket had on the day it landed.
+
+    Both directions, deliberately. A ticket reopened after it was imported drags its
+    change back out of done, because "done" here was only ever a reading of the ticket -
+    `roadmap_store.create` stamps `shipped_at` from the clock at IMPORT time, so there
+    is no real ship date to protect.
+
+    Three kinds of ticket are left alone, each for a reason the other passes share:
+
+    - ABSENT from the catalog: unknown, not "not done" (it may simply have aged out of
+      `since`). Mirroring on absence would reopen the whole board the first time a sync
+      came back short - the same posture _remove_wont_do_imports takes.
+    - WON'T-DO: declined is not shipped. Its Done category maps to "done", so mirroring
+      would quietly relabel abandoned work as delivered - exactly what the import
+      refuses to do. The removal pass above has already deleted the untouched ones and
+      counted the rest (`wont_do_kept`); the survivors keep the status a human gave them.
+    - EXCLUDED: this slice is tracked authoritatively elsewhere, and exclusion means
+      invisible to every automatic pass, status included.
+
+    Unlike every other pass here this one does NOT skip a tracker that imports nothing.
+    `imports` gates whether a tracker MANUFACTURES changes; this pass only keeps changes
+    that already exist honest, and a ticket somebody linked by hand from a catalog-only
+    tracker (no `import_types`, no routes - the shape the ADO instance runs in) has
+    exactly the same claim to a current status as one the import created. Gating on
+    `imports` here stranded every hand-linked ADO change at its import-day state.
+    """
+    for config in CONFIG.trackers:
+        by_key = {
+            normalize_key(config.id, t.key): t for t in tracker_store.tickets_of(config.id)
+        }
+        excluded = _excluded_keys(config, by_key)
+        refreshed = 0
+        for items in roadmap_store.list_all().values():
+            for change in items:
+                if change.get("tracker_id") != config.id or not change.get("ticket_key"):
+                    continue
+                key = normalize_key(config.id, change["ticket_key"])
+                ticket = by_key.get(key)
+                if ticket is None or key in excluded or _is_wont_do(ticket):
+                    continue
+                status = _imported_status(ticket)
+                if status == change.get("status"):
+                    continue
+                roadmap_store.update(change["id"], status=status)
+                refreshed += 1
+                _audit(
+                    None, "roadmap.status_synced", change["id"],
+                    f"{change['ticket_key']}: {change.get('status')} -> {status} "
+                    f"({ticket.state})",
+                )
+        # Stashed onto the report the import pass rebuilt earlier this cycle, the same
+        # way the won't-do counts are. `setdefault` because a catalog-only tracker has
+        # no import report of its own and its count would otherwise vanish.
+        _import_report.setdefault(config.id, {})["status_refreshed"] = refreshed
+        if refreshed:
+            print(f"[trackers] {config.id}: {refreshed} change status(es) followed the tracker")
+
+
+def _outstanding_changes(project_id: str) -> list[dict]:
+    """The changes under a project that are genuinely still to do.
+
+    Not simply `status != "done"`. A change linked to a ticket the tracker resolved
+    won't-do is SETTLED, not outstanding: `_mirror_ticket_status` refuses to mark those
+    done (declined is not delivered) and `_remove_wont_do_imports` only deletes the ones
+    nobody touched - so a declined change a human had already filed into now/next stays
+    `pending` for good. Counting it as open work pinned its project on the board
+    permanently, unable to ever become history however many times the epic closed.
+
+    Named as a function rather than inlined at its one caller because the same rule is
+    spelled twice more and all three have to agree: `_is_outstanding` below, which the
+    candidate report applies to its own grouping, and `isOutstanding` on the board, which
+    reads `is_wont_do` off the ticket the wire now carries.
+    """
+    return [c for c in roadmap_store.list_by_project(project_id) if _is_outstanding(c)]
+
+
+def _is_outstanding(change: dict) -> bool:
+    """The per-change half of the rule above, so a caller holding its own grouping of
+    changes does not have to walk every board once per project to reuse it."""
+    if change["status"] == "done":
+        return False
+    ticket = tracker_store.lookup(change.get("tracker_id"), change.get("ticket_key"))
+    return ticket is None or not ticket.is_wont_do
+
+
+def _close_candidates(boards: dict | None = None) -> dict:
+    """project_id -> why this project looks finished, for the board to offer a close.
+
+    The counterpart to `_mirror_epic_status` for everything that pass will NOT touch on
+    its own. Two different facts, kept apart because acting on them is not equally safe:
+
+    `reason: "tracker"` - the epic itself is done. This is the one the close pass acts on
+    when `close_done_epics` is set; reported here too so a deployment running the pass in
+    its default report-only mode still sees the row it would have closed.
+
+    `reason: "changes"` - every change under the project is settled and the epic is NOT
+    done. Never closed automatically, because an epic still open is a live claim by the
+    system that actually runs the work: mostly ADO epics parked in Active, and Jira epics
+    nobody transitioned. The board offers the close and a human takes it.
+
+    `blocked` is the reason neither is offered, and it is the one that matters most:
+    every LOCAL change may be done while the epic still has open children in the catalog
+    that were never imported - a partially routed epic reads as finished from here and is
+    not. Naming the count is what stops the board from claiming otherwise.
+
+    Recomputed per board load like `_project_activity`, and its indexes are built ONCE
+    rather than asked of the stores per project: `list_by_project` walks every board to
+    answer for one project, which made a board load quadratic in projects x changes.
+    `boards` is the caller's own already-serialized changes where it has them - the board
+    endpoint does, and serializing 3500 changes a second time was most of what this cost.
+    """
+    changes_by_project: dict[str, list[dict]] = {}
+    for items in (boards if boards is not None else roadmap_store.list_all()).values():
+        for change in items:
+            if change.get("project_id"):
+                changes_by_project.setdefault(change["project_id"], []).append(change)
+
+    kids_of: dict[tuple[str, str], list] = {}
+    for config in CONFIG.trackers:
+        for ticket in tracker_store.tickets_of(config.id):
+            if ticket.parent_key:
+                kids_of.setdefault(
+                    (config.id, normalize_key(config.id, ticket.parent_key)), []
+                ).append(ticket)
+
+    candidates: dict[str, dict] = {}
+    for project in portfolio_store.list_projects():
+        if project["status"] == "closed":
+            continue
+        if project["is_catch_all"] or project["catch_all_for_initiative"]:
+            continue
+        changes = changes_by_project.get(project["id"], [])
+        # No changes is no evidence, not completion: 89 of this deployment's projects sit
+        # there, half of them never linked to a tracker at all. Offering to close an
+        # empty project would fire on every idea somebody had filed and not started.
+        if not changes:
+            continue
+        if any(_is_outstanding(c) for c in changes):
+            continue
+        ticket = tracker_store.lookup(project["tracker_id"], project["ticket_key"])
+        if ticket is None:
+            # Unlinked, or linked to something outside the sync window. Nothing else can
+            # speak for it, so its own changes are the whole story.
+            candidates[project["id"]] = {"reason": "changes", "shipped": len(changes)}
+            continue
+        if _is_wont_do(ticket):
+            continue
+        epic_open = [
+            k for k in kids_of.get(
+                (project["tracker_id"], normalize_key(project["tracker_id"], ticket.key)), []
+            )
+            if _imported_status(k) != "done" and not k.is_wont_do
+        ]
+        if epic_open:
+            candidates[project["id"]] = {
+                "reason": "blocked",
+                "shipped": len(changes),
+                "tracker_open": len(epic_open),
+                # Capped: the chip shows the count, and `keys` is for the tooltip. The
+                # count beside it is the whole number, so a consumer can see the list is
+                # short rather than mistaking five for all of them.
+                "keys": [k.key for k in epic_open[:5]],
+            }
+            continue
+        candidates[project["id"]] = {
+            "reason": "tracker" if _imported_status(ticket) == "done" else "changes",
+            "shipped": len(changes),
+            "epic_state": ticket.state,
+        }
+    return candidates
+
+
+def _mirror_epic_status() -> None:
+    """A project whose epic the tracker calls done gets closed. Nothing here reopens one.
+
+    The project-level counterpart to `_mirror_ticket_status`, and deliberately NOT its
+    mirror image. A change's status was only ever a reading of its ticket, so that pass
+    follows the tracker in both directions. A project's `closed` is a human act carrying
+    a `closed_at`: somebody decided the bet was over, sometimes ahead of an epic nobody
+    got round to transitioning. Reopening that on a tracker read would fight the PM every
+    sync and lose the date, so the disagreement is REPORTED (`epic_open_on_closed`) and
+    the local decision stands - the same posture `_report_stale_excluded_imports` takes
+    on a mismatch it refuses to resolve by itself.
+
+    Closing on a done epic can leave open changes beneath it, and does so out loud: a
+    closed project still holding outstanding work keeps its place on the board wearing
+    its "closed" chip, which is precisely what the fold rule was built to surface (see
+    isHistoryRow). `closed_with_open_changes` names it in the cycle it happens rather
+    than leaving it to be noticed later.
+
+    Four kinds of project are left alone, each for a reason a sibling pass shares:
+
+    - ABSENT from the catalog: unknown, not done - it may have aged out of `since`.
+      Mirroring on absence would close the board the first time a sync came back short.
+    - WON'T-DO epic: declined is not delivered. `_remove_wont_do_imports` owns those,
+      and the ones it kept are somebody's work - they keep the status a human gave them.
+    - EXCLUDED: this slice is tracked authoritatively elsewhere, status included.
+    - CATCH-ALL: unplanned work never stops arriving, so `update_project` refuses to
+      close it. Skipped here so that refusal is not raised as an error every sync.
+
+    Gated per tracker by `close_done_epics`, default OFF: off, the pass counts what it
+    WOULD close (`projects_closable`) and writes nothing, so a deployment sees the list
+    before a tracker transition is given the power to close local planning work. Not
+    gated on `imports` - like the status mirror this only keeps EXISTING records honest
+    rather than manufacturing new ones, and a project hand-linked from a catalog-only
+    tracker has the same claim to a current status as an imported one.
+    """
+    for config in CONFIG.trackers:
+        by_key = {
+            normalize_key(config.id, t.key): t for t in tracker_store.tickets_of(config.id)
+        }
+        excluded = _excluded_keys(config, by_key)
+        closed = closable = stranded = disagreed = 0
+        for project in portfolio_store.list_projects():
+            if project["tracker_id"] != config.id or not project["ticket_key"]:
+                continue
+            key = normalize_key(config.id, project["ticket_key"])
+            ticket = by_key.get(key)
+            if ticket is None or key in excluded or _is_wont_do(ticket):
+                continue
+            if _imported_status(ticket) != "done":
+                # Close-only. An epic that moved back out of done leaves a project
+                # somebody closed exactly as it is, and is counted so the board can say
+                # the two disagree instead of silently picking a side.
+                if project["status"] == "closed":
+                    disagreed += 1
+                continue
+            if project["status"] == "closed":
+                continue
+            if project["is_catch_all"] or project["catch_all_for_initiative"]:
+                continue
+            open_changes = len(_outstanding_changes(project["id"]))
+            if not config.close_done_epics:
+                closable += 1
+                continue
+            portfolio_store.update_project(project["id"], status="closed")
+            closed += 1
+            if open_changes:
+                stranded += 1
+            _audit(
+                None, "portfolio.closed_by_tracker", project["id"],
+                f"{project['ticket_key']} ({ticket.state})"
+                + (f", {open_changes} change(s) left open" if open_changes else ""),
+            )
+        # setdefault, not [config.id]: _sync_epic_projects skips a tracker that imports
+        # nothing and never builds it a report, and a catalog-only tracker's closes must
+        # still be reportable.
+        report = _epic_report.setdefault(config.id, {})
+        report["projects_closed"] = closed
+        report["projects_closable"] = closable
+        report["closed_with_open_changes"] = stranded
+        report["epic_open_on_closed"] = disagreed
+        if closed or stranded:
+            print(
+                f"[trackers] {config.id}: closed {closed} project(s) on a done epic"
+                + (f", {stranded} still holding open changes" if stranded else "")
+            )
+        elif closable:
+            print(
+                f"[trackers] {config.id}: {closable} project(s) closable on a done epic "
+                "(close_done_epics is off - nothing written)"
             )
 
 
@@ -2906,6 +3228,11 @@ def roadmap_data() -> dict:
             # for the roadmap to read liveness from. Timestamps and counts only -
             # cost stays behind the admin endpoints.
             "activity": _project_activity(),
+            # project_id -> why the project looks finished (see _close_candidates). The
+            # board draws a "ready to close" affordance from it, and names the epic's
+            # own open children where they contradict the local roll-up - which the page
+            # cannot work out for itself, since it holds no catalog.
+            "close_candidates": _close_candidates(items),
         },
         # So the board can render the badge palette and the picker without a second
         # round trip. Empty/`configured: false` when no [[trackers]] are declared.

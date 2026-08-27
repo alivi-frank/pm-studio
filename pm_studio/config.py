@@ -223,6 +223,13 @@ class TrackerConfig:
     # components of their own. Manual linking stays possible: exclusion governs what
     # the sync does on its own, never what a human does on purpose.
     exclude_components: tuple[str, ...] = ()
+    # CLOSING: whether an epic the tracker calls done closes the project linked to it.
+    # False (the default) makes the pass report-only - it counts what it WOULD close and
+    # says so on the epic report, writing nothing. That default is deliberate: enabling
+    # it hands a tracker transition the power to close local planning work, and a
+    # deployment should see the list once before it does. Close-only in either mode -
+    # nothing here ever reopens a project a human closed, however the epic moves.
+    close_done_epics: bool = False
     # PUSH: where this tracker creates tickets for work planned here. None (no
     # [trackers.push] table) = read-only, the historical behavior, and every push
     # affordance is absent rather than disabled. See PushConfig.
@@ -1014,6 +1021,13 @@ def _parse_trackers(
             str(c).strip() for c in exclude_raw if str(c).strip()
         )
 
+        close_raw = entry.get("close_done_epics", False)
+        if not isinstance(close_raw, bool):
+            _fatal(
+                f"{config_path} {where} has `close_done_epics` as a "
+                f"{type(close_raw).__name__}; it must be true or false"
+            )
+
         routes_raw = entry.get("routes", [])
         if not isinstance(routes_raw, list):
             _fatal(
@@ -1161,6 +1175,7 @@ def _parse_trackers(
                 routes=tuple(routes),
                 since=since,
                 exclude_components=exclude_components,
+                close_done_epics=close_raw,
                 push=push,
             )
         )

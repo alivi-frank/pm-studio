@@ -462,9 +462,42 @@ before; with one it is told the control exists **and told not to press it** — 
 POST allowlist does reach the endpoint, so the prompt is the only thing standing between an
 agent and a real ticket on someone else's board.
 
-**Read-only otherwise.** Apart from that create, nothing writes to Jira or ADO. The board's
-bucket/status stays independent of the ticket's state, on purpose, and the PM prompt says so
-explicitly.
+**Read-only otherwise.** Apart from that create, nothing writes to Jira or ADO. Inbound,
+the split is per field: `_mirror_ticket_status` makes a linked change's **status** follow
+its ticket's state every sync (both directions — a reopened ticket reopens its change,
+and `shipped_at` was only ever the import clock anyway), while **bucket** stays this
+deployment's plan and is never touched by any pass. Absent-from-catalog, won't-do and
+excluded tickets are skipped, so a short sync cannot reopen the board and a declined
+ticket is never relabelled as delivered. It is the one pass that does not gate on
+`TrackerConfig.imports` — that flag governs manufacturing changes, not keeping linked
+ones current, so a catalog-only tracker's hand-linked changes are mirrored too. The PM prompt states the split explicitly.
+
+One rung up, `_mirror_epic_status` does the same for **projects**, and deliberately not
+symmetrically: a done epic closes its project, and nothing reopens one. A change's status
+was only ever a reading of its ticket; a project's `closed` is a decision carrying a
+`closed_at`, sometimes taken ahead of an epic nobody transitioned, so an epic that leaves
+done is *reported* (`epic_open_on_closed`) rather than acted on. Gated per tracker by
+`close_done_epics`, **default off** — off it counts `projects_closable` and writes nothing,
+so a deployment sees the list once before handing a tracker transition that power. Same
+four skips as the change mirror plus the catch-all, which `update_project` refuses outright.
+Closing can strand open changes and reports the count; those rows stay visible wearing a
+"closed" chip, which is what `isHistoryRow` was built to surface.
+
+The pass that would have been wrong to automate is `_close_candidates`, which only
+*offers*. A project whose every local change is settled while its epic is still open is a
+"ready to close" chip on the board, not a write — because all-imported-done is not
+all-done: an epic partly routed onto this deployment reads as finished from the local
+roll-up while its unimported children still run. The report names those children's count
+(`reason: "blocked"`) rather than offering anything, which is the one fact the board cannot
+work out for itself — the page holds no catalog.
+
+**Declined is settled, not outstanding.** `_outstanding_changes` (server) and
+`isOutstanding` (board) both discount a change whose ticket is won't-do. The status mirror
+refuses to mark those done and the removal pass only deletes untouched ones, so a declined
+change a human had filed into now/next keeps `pending` for good — counted as open work it
+pinned its project on the board permanently, closed and fully declined and unable to ever
+become history. `Ticket.to_dict` carries `is_wont_do` onto the wire so the board reads the
+one definition instead of spelling a second one in JavaScript.
 
 The cache at `workspace/trackers.json` is in `SENSITIVE_WORKSPACE_FILES`: it holds no
 credential of ours but caches another system's ticket titles, and never committing it costs

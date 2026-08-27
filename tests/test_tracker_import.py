@@ -275,8 +275,9 @@ class _StubTrackerStore:
         return {"configured": True, "trackers": []}
 
 
-class ImportPassTest(unittest.TestCase):
-    """_import_routed_tickets against the real RoadmapStore."""
+class _ImportHarness(unittest.TestCase):
+    """Real RoadmapStore, stubbed catalog, reports cleared - shared by the import-pass
+    tests and the status-mirror tests, which exercise the same machinery."""
 
     TRACKER = TrackerConfig(
         id="jira", provider="jira", label="Jira", base_url="https://x",
@@ -327,6 +328,10 @@ class ImportPassTest(unittest.TestCase):
     def _run(self, tickets):
         server_module.tracker_store = _StubTrackerStore(tickets)
         server_module._import_routed_tickets()
+
+
+class ImportPassTest(_ImportHarness):
+    """_import_routed_tickets against the real RoadmapStore."""
 
     def test_routed_ticket_becomes_a_linked_attributed_change(self) -> None:
         self._run([_ticket("PROJ-1", components=["Checkout Web"])])
@@ -431,6 +436,122 @@ class ImportPassTest(unittest.TestCase):
         self._run([_ticket("PROJ-1", components=["Checkout Web Extra"])])
         self.assertEqual(self.store.list_product("checkout"), [])
         self.assertEqual(server_module._import_report["jira"]["unrouted_total"], 1)
+
+
+class StatusMirrorTest(_ImportHarness):
+    """_mirror_ticket_status: a linked change's status follows its ticket's state on
+    every sync, in both directions, without ever touching the bucket.
+
+    The bug this pass exists for: _imported_status ran once at import and never again,
+    so a ticket closed the day after it landed left its change reading "in progress"
+    forever, and the board looked like the sync was broken.
+    """
+
+    def _mirror(self, tickets):
+        server_module.tracker_store = _StubTrackerStore(tickets)
+        server_module._mirror_ticket_status()
+
+    def _only(self):
+        items = self.store.list_product("checkout")
+        self.assertEqual(len(items), 1)
+        return items[0]
+
+    def test_a_ticket_closed_after_import_closes_its_change(self) -> None:
+        self._run([_ticket("PROJ-1", components=["Checkout Web"],
+                           state_category="In Progress")])
+        self.assertEqual(self._only()["status"], "in_progress")
+        self._mirror([_ticket("PROJ-1", components=["Checkout Web"],
+                              state_category="Done", state="Done")])
+        self.assertEqual(self._only()["status"], "done")
+        self.assertEqual(server_module._import_report["jira"]["status_refreshed"], 1)
+
+    def test_a_ticket_reopened_after_import_reopens_its_change(self) -> None:
+        """The live ADO case (work item 12171): imported while it was closed, reopened
+        upstream afterwards. The local "done" was only ever a reading of the ticket -
+        `shipped_at` came from the import clock, not from anything shipping - so there
+        is nothing to protect by refusing to follow."""
+        self._run([_ticket("PROJ-1", components=["Checkout Web"], state_category="Done")])
+        item_id = self._only()["id"]
+        self.assertIsNotNone(self.store.get(item_id).shipped_at)
+        self._mirror([_ticket("PROJ-1", components=["Checkout Web"],
+                              state_category="Active", state="Active")])
+        self.assertEqual(self.store.get(item_id).status, "in_progress")
+        self.assertIsNone(self.store.get(item_id).shipped_at)
+
+    def test_the_bucket_is_never_touched(self) -> None:
+        """Status is execution and the tracker's to state; bucket is the plan and stays
+        this deployment's. A closed ticket sitting in NOW is the signal to clear the
+        column, not licence for the sync to reshuffle it."""
+        self._run([_ticket("PROJ-1", components=["Checkout Web"],
+                           state_category="In Progress")])
+        item_id = self._only()["id"]
+        self.store.update(item_id, bucket="now")
+        self._mirror([_ticket("PROJ-1", components=["Checkout Web"],
+                              state_category="Done", state="Done")])
+        item = self.store.get(item_id)
+        self.assertEqual((item.status, item.bucket), ("done", "now"))
+
+    def test_a_settled_status_is_not_rewritten_every_sync(self) -> None:
+        tickets = [_ticket("PROJ-1", components=["Checkout Web"], state_category="Done")]
+        self._run(tickets)
+        self._mirror(tickets)
+        self.assertEqual(server_module._import_report["jira"]["status_refreshed"], 0)
+
+    def test_a_ticket_absent_from_the_catalog_is_unknown_not_reopened(self) -> None:
+        """A short sync must not reopen the board. Absence is no evidence at all - the
+        same posture the won't-do removal takes."""
+        self._run([_ticket("PROJ-1", components=["Checkout Web"], state_category="Done")])
+        item_id = self._only()["id"]
+        self._mirror([])
+        self.assertEqual(self.store.get(item_id).status, "done")
+        self.assertEqual(server_module._import_report["jira"]["status_refreshed"], 0)
+
+    def test_a_ticket_declined_after_import_is_not_relabelled_as_done(self) -> None:
+        """Won't Do sits in the Done category, so mirroring it blindly would present
+        abandoned work as delivered - the exact thing the import refuses to do. The
+        removal pass owns this case; the mirror keeps its hands off."""
+        self._run([_ticket("PROJ-1", components=["Checkout Web"],
+                           state_category="In Progress")])
+        item_id = self._only()["id"]
+        self._mirror([_ticket("PROJ-1", components=["Checkout Web"],
+                              state_category="Done", state="Closed",
+                              resolution="Won't Do")])
+        self.assertEqual(self.store.get(item_id).status, "in_progress")
+
+    def test_a_catalog_only_tracker_still_mirrors_its_linked_changes(self) -> None:
+        """The live ADO shape: a tracker with no import_types and no routes syncs its
+        catalog and can be linked by hand, but manufactures nothing. `imports` gates
+        making changes, not keeping them honest - gating this pass on it stranded every
+        hand-linked change at its import-day status."""
+        # On `ops`, which declares no systems - this pass has nothing to do with routing.
+        item = self.store.create("ops", "Linked by hand", status="pending")
+        self.store.link_ticket(item.id, "jira", "PROJ-9")
+        server_module.CONFIG = dataclasses.replace(
+            server_module.CONFIG,
+            trackers=(dataclasses.replace(
+                self.TRACKER, import_types=(), routes=()
+            ),),
+        )
+        self.assertFalse(server_module.CONFIG.trackers[0].imports)
+        self._mirror([_ticket("PROJ-9", state_category="Done", state="Done")])
+        self.assertEqual(self.store.get(item.id).status, "done")
+        self.assertEqual(server_module._import_report["jira"]["status_refreshed"], 1)
+
+    def test_a_ticket_excluded_after_import_is_left_alone(self) -> None:
+        """Excluded means invisible to every automatic pass, status included: the slice
+        is tracked authoritatively somewhere else."""
+        self._run([_ticket("PROJ-1", components=["Checkout Web"],
+                           state_category="In Progress")])
+        item_id = self._only()["id"]
+        server_module.CONFIG = dataclasses.replace(
+            server_module.CONFIG,
+            trackers=(dataclasses.replace(
+                self.TRACKER, exclude_components=("Checkout Web",)
+            ),),
+        )
+        self._mirror([_ticket("PROJ-1", components=["Checkout Web"],
+                              state_category="Done", state="Done")])
+        self.assertEqual(self.store.get(item_id).status, "in_progress")
 
 
 class AdoImportShapeTest(unittest.TestCase):
