@@ -229,7 +229,13 @@ class Ticket:
         return False
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        # `is_wont_do` is a property, so asdict() would drop it - and it has to
+        # travel. The board decides whether a project's remaining work is genuinely
+        # outstanding or merely declined, and a second spelling of "declined" in
+        # JavaScript is exactly the disagreement the property's own docstring warns
+        # about. Harmless in the cache file too: from_dict keeps only declared
+        # fields, so a catalog written with this key loads back without it.
+        return {**asdict(self), "is_wont_do": self.is_wont_do}
 
     @classmethod
     def from_dict(cls, data: dict) -> "Ticket":

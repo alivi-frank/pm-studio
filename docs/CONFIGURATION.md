@@ -233,6 +233,19 @@ The 1:1 link is the dedupe: re-syncs and restarts never double-import, and a man
 linked ticket is never re-imported. The import pass itself never writes to the tracker —
 creating a ticket only ever happens when someone presses Push (see below).
 
+An imported change is filed under the **project that mirrors its ticket's epic**, in
+the same cycle it lands: epic-level tickets become projects of their own one rung up,
+and the change joins its epic's project rather than sitting unaligned. The walk climbs
+the whole parent chain, so an ADO story under a feature under an epic still finds it.
+
+**Re-parenting a story in the tracker moves the change too** — but only out of a
+project that mirrors an epic in that same tracker, because that is a slot the sync put
+it in and may correct. A project created here by hand is somebody's filing and outranks
+the hierarchy: the change stays, and the sync report counts it (`reparent_kept`) rather
+than quietly emptying the project. Nothing ever *unfiles* a change: a parent the sync
+cannot see — outside the synced projects, aged out of `since`, excluded, or an epic
+nothing mirrors yet — is unknown, not "no epic", so the change keeps the project it has.
+
 Tickets resolved as **won't-do** are never imported — not as changes and not as
 projects. Jira files "Won't Do" under the Done status category, so without this the
 declined work would land on the board as shipped-looking `done` changes. The check
@@ -270,6 +283,46 @@ means "never, it lives elsewhere" and is only counted. A component that is both 
 and excluded refuses to boot — one of the two lines is a leftover. Manual linking
 stays possible: exclusion governs what the sync does on its own, never what a human
 does on purpose.
+
+### Closing projects the tracker has finished
+
+A project's `closed` is normally a human act. Turn this on and an epic the tracker
+calls **done** closes the project linked to it:
+
+```toml
+close_done_epics = true   # default false: count what would close, write nothing
+```
+
+**Close-only, in both modes.** Nothing here ever reopens a project — an epic that
+moves back out of done leaves a project somebody closed exactly as it was, and the
+disagreement is counted (`epic_open_on_closed`) instead. That asymmetry is deliberate:
+a change's status was only ever a reading of its ticket, so `_mirror_ticket_status`
+follows the tracker both ways, but a project's closure is a decision with a date on it
+and a PM who closes ahead of an epic nobody transitioned should not be overruled every
+sync.
+
+**The default is report-only**, and the flag is worth leaving off for a sync or two:
+off, the pass counts what it *would* close as `projects_closable` on the sync report
+and writes nothing, so a deployment sees the list before a tracker transition is given
+the power to close local planning work.
+
+Four kinds of project are never closed, each for the reason a sibling pass shares:
+an epic **absent** from the catalog (unknown, not done — it may have aged out of
+`since`), a **won't-do** epic (declined is not delivered), an **excluded** epic, and
+the **catch-all** (unplanned work never stops arriving).
+
+Closing can leave open changes beneath a project, and says so — `closed_with_open_changes`
+on the report. Those rows stay on the board wearing a "closed" chip rather than folding
+away, which is the point: work stranded under an epic somebody closed is exactly what
+the board exists to surface.
+
+**What it will not do on its own** is close a project whose local changes have all
+shipped while its epic is still open. That case is *offered*, not taken: the board
+draws a "ready to close" chip and a human decides. An open epic is a live claim by the
+system that actually runs the work, and — the reason this is not automated — an epic
+only partly imported here reads as finished from the local roll-up. Where the epic
+still has open children of its own, the row gets a warning naming the count instead of
+an offer.
 
 ## Hierarchical products
 
@@ -692,8 +745,24 @@ colour rather than a wrong one. Colour is never the only signal.
 
 **A ticket is never updated.** The sync is read-only, and so is everything after it: PM
 Studio never changes a ticket's type, state, title or anything else in Jira or ADO. The
-board's own bucket/status stays independent, on purpose. The single exception is
-**creating** a ticket, which only happens when someone presses Push — see below.
+single exception is **creating** a ticket, which only happens when someone presses Push
+— see below.
+
+The reverse direction is not symmetric. A linked change's **`status` follows its
+ticket's state on every sync**, both ways: a ticket closed after it was imported closes
+its change, and one reopened upstream reopens it. Status is a claim about execution, and
+for work that has a ticket the tracker is the system that knows — a change reading "in
+progress" against a closed ticket is a stale snapshot, not a plan. **`bucket` is never
+touched:** now/next/later is the plan and stays yours, so a closed ticket sitting in NOW
+is your signal to clear the column, not licence for the sync to reshuffle it. This
+applies to **every** linked change, including one linked by hand from a tracker that
+imports nothing (no `import_types`, no routes): `import_types` governs whether a tracker
+manufactures changes, never whether existing ones stay current. Three
+tickets are left alone — one absent from the catalog (unknown, not "not done", so a
+short sync cannot reopen the board), one resolved **won't-do** (declined is not
+delivered, and its Done category would otherwise relabel abandoned work as shipped —
+the removal pass below owns that case), and one **excluded**. The sync report counts
+what moved as `status_refreshed`.
 
 **Credentials and cached data.** Tokens are read from the environment via `token_env`
 (filled from the git-ignored root `.env` if you keep it there), are only ever sent in an

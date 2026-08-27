@@ -24,6 +24,10 @@
        change status, and the violet keeps it from reading as one more delivery color. */
     --status-ideation: #7a4fc0;
     --ideation-bg: rgba(122, 79, 192, 0.10);
+    /* "Ready to close" wears the done hue rather than the warning one: the row is not a
+       problem, it is finished work waiting on a decision. Tinted well below the meter's
+       green so a page of them does not read as louder than the delivery it reports. */
+    --ready-bg: rgba(12, 163, 12, 0.10);
     --suggestion-bg: rgba(184, 134, 11, 0.10);
     --suggestion-border: #b8860b;
     --accent: #2a78d6;
@@ -60,6 +64,7 @@
       --status-done: #0ca30c;
       --status-ideation: #b087e8;
       --ideation-bg: rgba(176, 135, 232, 0.14);
+      --ready-bg: rgba(12, 163, 12, 0.16);
       --suggestion-bg: rgba(212, 167, 44, 0.10);
       --suggestion-border: #d4a72c;
       --accent: #3987e5;
@@ -147,6 +152,12 @@
   }
   .group-head .tally .live { color: var(--status-in-progress); font-weight: 600; }
   .group-head .tally .ideation { color: var(--status-ideation); font-weight: 600; }
+  /* Both closing counts are coloured like the state they report, not like a severity:
+     stranded work borrows the warning hue because somebody has to go and resolve it,
+     ready-to-close the done hue because nothing is wrong with it. Weighted like `live`
+     so a folded heading's actionable numbers all read at the same level. */
+  .group-head .tally .warn-count { color: var(--suggestion-border); font-weight: 600; }
+  .group-head .tally .ready-count { color: var(--status-done); font-weight: 600; }
   .group-head .info {
     flex: 0 0 auto;
     font-size: 0.85em;
@@ -377,6 +388,7 @@
   .meter .seg.done { background: var(--status-done); }
   .meter .seg.in_progress { background: var(--status-in-progress); }
   .meter .seg.pending { background: var(--status-pending); opacity: 0.45; }
+  .meter .seg.declined { background: var(--border); }
   .meter .seg.empty { flex: 1; background: var(--border); }
 
   /* ---- lanes (the now / next / later subview) ---- */
@@ -534,6 +546,13 @@
     background: var(--ideation-bg);
   }
   .chip.ideation::after { content: none; }
+  .chip.ready {
+    padding: 0 5px;
+    border-radius: 4px;
+    color: var(--status-done);
+    background: var(--ready-bg);
+  }
+  .chip.ready::after { content: none; }
   .chip.owner { color: var(--ink-secondary); }
   /* Who is on it. Tinted with the person hue so a card scanned in the product lens says
      "somebody" at a glance; the conflict variant borrows the warning clothes, because a
@@ -1436,7 +1455,10 @@
   }
   // The work model, used only by the initiative grouping. Empty on a deployment that
   // doesn't use /portfolio, in which case everything lands in one "Unaligned" group.
-  let PORTFOLIO = { initiatives: [], projects: [], catch_all_project_id: null, activity: {} };
+  let PORTFOLIO = {
+    initiatives: [], projects: [], catch_all_project_id: null, activity: {},
+    close_candidates: {},
+  };
   // External trackers (see trackers.py). `configured: false` on a deployment with no
   // [[trackers]] block, which hides every ticket control on this page.
   let TRACKERS = { configured: false, syncing: false, trackers: [], last_sync_at: null };
@@ -2034,6 +2056,22 @@
     return (PORTFOLIO.activity || {})[projectId] || null;
   }
 
+  /* Why a project looks finished, or null. Computed server-side (see
+     _close_candidates) because the deciding fact is not on this page: whether the
+     EPIC still has open children in the tracker. A project whose every local change
+     shipped can be a partially imported epic with six open stories nobody routed here,
+     and the board must not offer to close that. Three reasons:
+       tracker  - the epic itself is done; safe to close, and what the sync pass closes
+                  on its own once close_done_epics is enabled.
+       changes  - all local work settled but the epic is still open (or there is no
+                  epic). Offered, never automatic: an open epic is a live claim by the
+                  system that actually runs the work.
+       blocked  - all local work settled and the epic disagrees. A warning, not an offer.
+  */
+  function closeCandidate(projectId) {
+    return (PORTFOLIO.close_candidates || {})[projectId] || null;
+  }
+
   /* Whether any project under this section - catch-alls included, since an
      initiative-scoped session's brainstorming lands in its catch-all until the idea
      names a project - was touched by a session recently. */
@@ -2049,6 +2087,12 @@
      the product on every card, an initiative section doesn't repeat the initiative. */
   function metaChips(item, omit = {}) {
     const chips = [];
+    /* Leads the row, because it changes how the rest of the card reads: a "next" bucket
+       and an unmet target date mean nothing on work the tracker has declined. The status
+       dot still says pending - that IS its local status, and the status mirror refuses to
+       call declined work done (see isOutstanding) - so this chip is the only thing that
+       explains why the board's counts do not include it. */
+    if (item.ticket && item.ticket.is_wont_do) chips.push(chip("declined in tracker"));
     // The full path, because this chip only appears where the section does NOT name the
     // product (the initiative lens) - and there, "Billing" alone doesn't say whose.
     if (!omit.product) chips.push(chip(productPathLabel(item.product)));
@@ -2621,7 +2665,7 @@
 
   function computeGroupState(group) {
     const changes = groupChanges(group);
-    const open = changes.filter((c) => c.status !== "done");
+    const open = changes.filter(isOutstanding);
     if (open.some((c) => c.bucket === "now" || c.bucket === "next")) return "active";
     if (group.kind !== "initiative") return "inactive";
     // An initiative in ideation that sessions touched recently IS being worked -
@@ -2833,7 +2877,7 @@
       // somebody with six open changes across four boards is stretched in a way six on
       // one board is not.
       if (products.size > 1) flags.push([`${products.size} products`, false]);
-      const overdue = changes.filter((c) => c.status !== "done" && c.is_overdue).length;
+      const overdue = changes.filter((c) => isOutstanding(c) && c.is_overdue).length;
       if (overdue) flags.push([`${overdue} overdue`, true]);
       groups.push({
         key: `person:${person.id}`,
@@ -2854,7 +2898,7 @@
     // Heaviest first. Open changes, not all of them: a person whose entire load shipped
     // last quarter is not the busiest person on the board.
     groups.sort((a, b) => {
-      const open = (g) => g.changes.filter((c) => c.status !== "done").length;
+      const open = (g) => g.changes.filter(isOutstanding).length;
       return open(b) - open(a) || a.title.localeCompare(b.title);
     });
 
@@ -2950,10 +2994,27 @@
      `key` is scoped to the group, so the same project appearing under two products
      folds independently: opening it on one board should not open it on the other. */
 
+  /* Whether a change is still work somebody has to do.
+
+     Not `status !== "done"`. A change whose ticket the tracker resolved won't-do is
+     SETTLED - the decision was "not this", which is an answer. The status mirror
+     deliberately refuses to mark those done (declined is not delivered) and the won't-do
+     removal only deletes the ones nobody had touched, so a declined change a human had
+     filed into now/next keeps `pending` for good. Counted as open it pinned its project
+     on the board permanently: closed, fully declined, and unable to ever become history.
+
+     `ticket.is_wont_do` comes off the wire rather than being re-derived here - the
+     spelling lives on Ticket in trackers.py and a second one in JavaScript is exactly
+     the disagreement that property's docstring warns about. */
+  function isOutstanding(change) {
+    return change.status !== "done" && !(change.ticket && change.ticket.is_wont_do);
+  }
+
   function rollup(changes) {
     const done = changes.filter((c) => c.status === "done");
-    const live = changes.filter((c) => c.status === "in_progress");
-    const open = changes.filter((c) => c.status !== "done");
+    const live = changes.filter((c) => c.status === "in_progress" && isOutstanding(c));
+    const open = changes.filter(isOutstanding);
+    const declined = changes.filter((c) => c.status !== "done" && !isOutstanding(c));
     const overdue = open.filter((c) => c.is_overdue);
     // The window the project actually runs over, from whatever dates its changes
     // carry. Undated changes contribute nothing rather than collapsing it to today.
@@ -2973,6 +3034,7 @@
       live: live.length,
       pending: open.length - live.length,
       open: open.length,
+      declined: declined.length,
       overdue: overdue.length,
       now: open.filter((c) => c.bucket === "now").length,
       from,
@@ -2987,13 +3049,21 @@
       node.appendChild(el("span", "seg empty"));
       return node;
     }
-    for (const [name, count] of [["done", roll.done], ["in_progress", roll.live], ["pending", roll.pending]]) {
+    /* Declined gets its own segment rather than being folded into pending or dropped.
+       Dropped, the bar would read as pure progress on a project that abandoned half its
+       work - the segments flex-grow into a fixed width, so a missing one is invisible
+       rather than short. Inert-coloured, because it is neither done nor waiting. */
+    for (const [name, count] of [
+      ["done", roll.done], ["in_progress", roll.live],
+      ["pending", roll.pending], ["declined", roll.declined],
+    ]) {
       if (!count) continue;
       const seg = el("span", `seg ${name}`);
       seg.style.flex = `${count} 1 0`;
       node.appendChild(seg);
     }
-    node.title = `${roll.done} shipped · ${roll.live} in progress · ${roll.pending} not started`;
+    node.title = `${roll.done} shipped · ${roll.live} in progress · ${roll.pending} not started`
+      + (roll.declined ? ` · ${roll.declined} declined` : "");
     return node;
   }
 
@@ -3065,7 +3135,7 @@
        "No project" row stays last among its peers. History rows land at the end either
        way - both views already split them off behind the "show closed" toggle. */
     const rowRank = (r) =>
-      (r.changes.some((c) => c.status !== "done" && (c.bucket === "now" || c.bucket === "next"))
+      (r.changes.some((c) => isOutstanding(c) && (c.bucket === "now" || c.bucket === "next"))
         ? 0 : isHistoryRow(r) ? 2 : 1) * 2
       + (r.project && r.project.status === "closed" ? 1 : 0);
     const rank = new Map(rows.map((r) => [r.key, rowRank(r)]));
@@ -3080,7 +3150,7 @@
   function isHistoryRow(row) {
     return !!row.project
       && row.project.status === "closed"
-      && !row.changes.some((c) => c.status !== "done");
+      && !row.changes.some(isOutstanding);
   }
 
   // ---- the now / next / later view ----
@@ -3140,6 +3210,13 @@
      group had, and untriaged suggestions have already been lifted out of it by
      renderBoard. */
   function renderLanes(row, container) {
+    /* `status !== "done"`, NOT isOutstanding - the one place that distinction is
+       deliberate. A declined change is discounted from every count on the board, but it
+       is still a card a human filed into a horizon, and it will never appear under
+       "recently shipped" either (that reads `status === "done"`). Excluded here it would
+       simply vanish. So the lane keeps drawing it and metaChips marks it declined, which
+       is what stops the lane and the tally that discounted it from reading as a
+       contradiction. */
     const open = row.changes.filter((i) => i.status !== "done");
 
     const lanes = el("div", "lanes");
@@ -3312,6 +3389,24 @@
     // exists locally (see projectEpicNode).
     const epic = projectEpicNode(row.project);
     if (epic) head.appendChild(epic);
+    /* Finished-looking but still open. Beside the epic badge on purpose: the two
+       together are the whole argument for closing it - "every change shipped, and this
+       is the epic that says so". The blocked case is a warn chip rather than an offer,
+       because the number it carries is the reason not to trust the row's own shipped
+       count. Both are suppressed on a closed row, where they would state the obvious. */
+    const candidate = row.project && row.project.status !== "closed"
+      ? closeCandidate(row.project.id) : null;
+    if (candidate && candidate.reason === "blocked") {
+      head.appendChild(chip(
+        `${candidate.tracker_open} open in the tracker`, "warn"));
+    } else if (candidate) {
+      const ready = chip("ready to close", "ready");
+      ready.title = candidate.reason === "tracker"
+        ? `Every change shipped and the epic is ${candidate.epic_state}.`
+        : "Every change here is settled" + (candidate.epic_state
+          ? `, though the epic is still ${candidate.epic_state}.` : ".");
+      head.appendChild(ready);
+    }
     // The one flag that isn't about the project's shape but about its health, so it is
     // the one that gets a fill.
     if (row.roll.overdue) head.appendChild(chip(`${row.roll.overdue} overdue`, "late"));
@@ -3433,7 +3528,7 @@
        a project: nobody has accepted them onto this board yet, so claiming they are
        part of a project's plan would be putting them in the plan by drawing them. */
     const suggestions = group.changes.filter(
-      (i) => i.status !== "done" && i.origin_product !== i.product && !i.triaged);
+      (i) => isOutstanding(i) && i.origin_product !== i.product && !i.triaged);
     const suggested = new Set(suggestions.map((i) => i.id));
     const planned = group.changes.filter((i) => !suggested.has(i.id));
     const rows = projectRows(group, planned);
@@ -3442,7 +3537,7 @@
     const currentRows = rows.filter((r) => !isHistoryRow(r));
     const closedRows = rows.filter(isHistoryRow);
 
-    const open = planned.filter((i) => i.status !== "done");
+    const open = planned.filter(isOutstanding);
     const live = open.filter((i) => i.status === "in_progress").length;
     const subgroups = group.subgroups || [];
     const tally = el("div", "tally");
@@ -3458,6 +3553,28 @@
     // have to be audible here, the same way in-progress work is.
     const ideating = currentRows.filter((r) => r.project && r.project.status === "ideation").length;
     if (ideating) tally.appendChild(el("span", "ideation", `${ideating} in ideation`));
+    /* Two counts about closing, and they are not the same fact.
+
+       `closed` above counts the history rows - closed AND settled, folded away. A closed
+       project still holding outstanding work is NOT folded (see isHistoryRow), so it is
+       counted among this section's projects while wearing a "closed" chip, which reads as
+       a contradiction until something names it. This is that something: it says out loud
+       that N rows below are closed and still have work in them, which is the whole reason
+       they are above the fold rather than behind it.
+
+       `ready to close` is the other direction - open rows whose work is all settled. Both
+       belong in the heading because a folded section shows nothing else, and both are
+       piles somebody is supposed to empty. */
+    const stranded = currentRows.filter(
+      (r) => r.project && r.project.status === "closed").length;
+    if (stranded) {
+      tally.appendChild(el("span", "warn-count",
+        `${stranded} closed with work left`));
+    }
+    const ready = currentRows.filter(
+      (r) => r.project && closeCandidate(r.project.id)
+        && closeCandidate(r.project.id).reason !== "blocked").length;
+    if (ready) tally.appendChild(el("span", "ready-count", `${ready} ready to close`));
     if (suggestions.length) tally.appendChild(el("span", null, `${suggestions.length} to triage`));
     if (subgroups.length) {
       // Counted separately from the section's own numbers rather than folded into them:
@@ -3467,7 +3584,7 @@
       const nested = groupDescendants(group);
       const nestedOpen = subgroups
         .flatMap(groupChanges)
-        .filter((i) => i.status !== "done").length;
+        .filter(isOutstanding).length;
       tally.appendChild(el("span", "nested",
         `+${nestedOpen} open in ${nested.length} sub-product${nested.length === 1 ? "" : "s"}`));
     }
@@ -3906,7 +4023,7 @@
       const allRows = projectRows(group, group.changes);
       const rows = allRows.filter((r) => !isHistoryRow(r));
       const closedRows = allRows.filter(isHistoryRow);
-      const open = group.changes.filter((i) => i.status !== "done").length;
+      const open = group.changes.filter(isOutstanding).length;
       tally.appendChild(el("span", null,
         `${rows.length} project${rows.length === 1 ? "" : "s"} · ` +
         (closedRows.length ? `${closedRows.length} closed · ` : "") +
@@ -3916,7 +4033,7 @@
       const subgroups = group.subgroups || [];
       if (subgroups.length && isFolded) {
         const nested = groupDescendants(group);
-        const nestedOpen = subgroups.flatMap(groupChanges).filter((i) => i.status !== "done").length;
+        const nestedOpen = subgroups.flatMap(groupChanges).filter(isOutstanding).length;
         tally.appendChild(el("span", "nested",
           `+${nestedOpen} open in ${nested.length} sub-product${nested.length === 1 ? "" : "s"}`));
       }
@@ -4107,7 +4224,7 @@
     const rows = groups
       .filter((g) => g.key !== "person:none")
       .map((group) => {
-        const open = group.changes.filter((c) => c.status !== "done");
+        const open = group.changes.filter(isOutstanding);
         const spread = (pick) => {
           const counts = new Map();
           for (const change of open) {
@@ -4154,7 +4271,7 @@
     const head = el("div", "load-head");
     head.appendChild(el("h2", null, "Load"));
     const nobody = groups.find((g) => g.key === "person:none");
-    const unassigned = nobody ? nobody.changes.filter((c) => c.status !== "done") : [];
+    const unassigned = nobody ? nobody.changes.filter(isOutstanding) : [];
     // Stated up front rather than left to be noticed at the bottom of the board: work
     // nobody is on is the pile this table exists to help empty.
     head.appendChild(el("span", "load-note", unassigned.length

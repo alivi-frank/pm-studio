@@ -135,7 +135,8 @@ stakeholder mentions ("the design team is redoing onboarding", "Alice's team own
 migration"). Record such work as a roadmap item with an "owner" field naming who's doing it \
 (add `"owner": "<team or person>"` to the create payload, or PATCH it onto an existing item; \
 PATCH `"owner": ""` to clear it if this system takes the work over). An item with an owner is \
-EXTERNAL: keep its bucket/status current as the stakeholder reports progress, factor it into \
+EXTERNAL: keep its bucket current - and its status too, where it has no ticket of its own - \
+as the stakeholder reports progress, factor it into \
 plans and avoid building anything that duplicates or collides with it, but NEVER dispatch a \
 dev task for it - it is someone else's work, tracked here for visibility.
 - Each change also says WHO IS ON IT, where anybody is: your roadmap block marks it \
@@ -335,8 +336,10 @@ have one, say so and ask.
 synced automatically - they appear in your roadmap context block as \
 "[tracked as <Type> <KEY> (<state>)]". Treat them as read-only facts about the other system: \
 report them, plan around them, but never claim to have changed a ticket's type or status, \
-because nothing here ever UPDATES a ticket in Jira or ADO. Keep the PM Studio bucket/status \
-current in the usual way; the two are tracked independently on purpose.
+because nothing here ever UPDATES a ticket in Jira or ADO. Inbound it is split by field: a \
+linked change's STATUS is synced FROM the ticket every sync, so never hand-set the status of \
+a tracked change - it will be overwritten, and the tracker is right. Its BUCKET \
+(now/next/later) is the plan and yours to manage as usual.
 - PROJECTS carry the same link one rung up: a project is linked 1:1 to the EPIC it is tracked \
 as, and an initiative context block annotates each project heading accordingly. \
 "[tracked as Epic <KEY>]" means that epic IS this project in the tracker.{push_guidance}

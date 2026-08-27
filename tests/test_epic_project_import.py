@@ -432,6 +432,120 @@ class EpicProjectImportTest(_EpicHarness):
         self._run(tickets)
         server_module._assign_changes_to_epic_projects()
         self.assertEqual(server_module.roadmap_store.get(item.id).project_id, chosen.id)
+        # Not even a candidate for correction: the evidence step LINKED "Deliberate home"
+        # to PROJ-1 on the way through, so the hierarchy already agrees with the human.
+        self.assertEqual(
+            server_module.portfolio_store.project_for_ticket("jira", "PROJ-1").id,
+            chosen.id,
+        )
+
+    # ---- assignment: following a re-parenting upstream ----
+
+    def test_a_hand_made_project_is_not_drained_by_the_hierarchy(self) -> None:
+        """The casualty case the fill-only rule was really protecting, and the reason
+        the correction is scoped to slots the tracker owns: the epic already has an
+        import-created project, so a hand-made project holding one of its stories cannot
+        be linked to it - and must not be emptied into it either. Reported instead."""
+        epic = _ticket("PROJ-1", "Epic", title="The epic")
+        self._run([epic])  # the epic gets its own project first
+        imported = server_module.portfolio_store.project_for_ticket("jira", "PROJ-1")
+        chosen = server_module.portfolio_store.create_project("Deliberate home")
+        item = server_module.roadmap_store.create(
+            "checkout", "A story", project_id=chosen.id
+        )
+        server_module.roadmap_store.link_ticket(item.id, "jira", "PROJ-2")
+        self._run([epic, _ticket("PROJ-2", "Story", parent="PROJ-1", parent_type="Epic")])
+        server_module._assign_changes_to_epic_projects()
+        self.assertIsNone(chosen.tracker_id)  # still nobody's mirror
+        self.assertEqual(server_module.roadmap_store.get(item.id).project_id, chosen.id)
+        self.assertEqual(server_module._epic_report["jira"]["reparent_kept"], 1)
+        self.assertEqual(
+            server_module.roadmap_store.count_by_project(imported.id), 0
+        )
+
+    def test_a_reparented_story_follows_its_ticket_to_the_new_epic(self) -> None:
+        """The point of the whole pass: re-parenting a story in the tracker replicates
+        onto the board. Both projects here are the tracker's own, so the slot the change
+        sits in is the tracker's to correct."""
+        epics = [
+            _ticket("PROJ-1", "Epic", title="First epic"),
+            _ticket("PROJ-2", "Epic", title="Second epic"),
+        ]
+        item = server_module.roadmap_store.create("checkout", "A story")
+        server_module.roadmap_store.link_ticket(item.id, "jira", "PROJ-3")
+        self._run(epics + [_ticket("PROJ-3", "Story", parent="PROJ-1", parent_type="Epic")])
+        server_module._assign_changes_to_epic_projects()
+        first = server_module.portfolio_store.project_for_ticket("jira", "PROJ-1")
+        self.assertEqual(server_module.roadmap_store.get(item.id).project_id, first.id)
+
+        # The one edit, made in the tracker: PROJ-3 now hangs off the second epic.
+        self._run(epics + [_ticket("PROJ-3", "Story", parent="PROJ-2", parent_type="Epic")])
+        server_module._assign_changes_to_epic_projects()
+        second = server_module.portfolio_store.project_for_ticket("jira", "PROJ-2")
+        self.assertEqual(server_module.roadmap_store.get(item.id).project_id, second.id)
+        self.assertEqual(server_module._epic_report["jira"]["changes_reparented"], 1)
+
+    def test_a_settled_assignment_is_not_rewritten_every_sync(self) -> None:
+        """Idempotency: the correction fires on the change, not on every pass, or the
+        report would cry wolf and every sync would touch every change."""
+        tickets = [
+            _ticket("PROJ-1", "Epic", title="The epic"),
+            _ticket("PROJ-2", "Story", parent="PROJ-1", parent_type="Epic"),
+        ]
+        item = server_module.roadmap_store.create("checkout", "A story")
+        server_module.roadmap_store.link_ticket(item.id, "jira", "PROJ-2")
+        self._run(tickets)
+        server_module._assign_changes_to_epic_projects()
+        self._run(tickets)
+        server_module._assign_changes_to_epic_projects()
+        report = server_module._epic_report["jira"]
+        self.assertEqual(report["changes_assigned"], 0)
+        self.assertEqual(report["changes_reparented"], 0)
+        self.assertEqual(report["reparent_kept"], 0)
+
+    def test_a_story_that_lost_its_parent_keeps_its_project(self) -> None:
+        """Never CLEARS: a ticket with no visible parent is unknown, not "no epic". The
+        story stays where it was filed rather than falling off its project."""
+        item = server_module.roadmap_store.create("checkout", "A story")
+        server_module.roadmap_store.link_ticket(item.id, "jira", "PROJ-2")
+        epic = _ticket("PROJ-1", "Epic", title="The epic")
+        self._run([epic, _ticket("PROJ-2", "Story", parent="PROJ-1", parent_type="Epic")])
+        server_module._assign_changes_to_epic_projects()
+        project = server_module.portfolio_store.project_for_ticket("jira", "PROJ-1")
+        self._run([epic, _ticket("PROJ-2", "Story")])
+        server_module._assign_changes_to_epic_projects()
+        self.assertEqual(server_module.roadmap_store.get(item.id).project_id, project.id)
+
+    def test_a_story_moved_under_an_epic_with_no_project_keeps_its_project(self) -> None:
+        """The new epic is outside the synced catalog, so nothing backs it locally yet.
+        Unfiling the story until that resolves would be worse than leaving it put."""
+        item = server_module.roadmap_store.create("checkout", "A story")
+        server_module.roadmap_store.link_ticket(item.id, "jira", "PROJ-2")
+        epic = _ticket("PROJ-1", "Epic", title="The epic")
+        self._run([epic, _ticket("PROJ-2", "Story", parent="PROJ-1", parent_type="Epic")])
+        server_module._assign_changes_to_epic_projects()
+        project = server_module.portfolio_store.project_for_ticket("jira", "PROJ-1")
+        self._run([epic, _ticket("PROJ-2", "Story", parent="OTHER-9", parent_type="Epic")])
+        server_module._assign_changes_to_epic_projects()
+        self.assertEqual(server_module.roadmap_store.get(item.id).project_id, project.id)
+
+    def test_a_change_whose_project_was_deleted_is_refilled(self) -> None:
+        """A dangling project id is rot, not somebody's filing - the hierarchy fills it
+        the same as an empty one."""
+        gone = server_module.portfolio_store.create_project("Deleted later")
+        item = server_module.roadmap_store.create(
+            "checkout", "A story", project_id=gone.id
+        )
+        server_module.roadmap_store.link_ticket(item.id, "jira", "PROJ-2")
+        server_module.portfolio_store.delete_project(gone.id)
+        self._run([
+            _ticket("PROJ-1", "Epic", title="The epic"),
+            _ticket("PROJ-2", "Story", parent="PROJ-1", parent_type="Epic"),
+        ])
+        server_module._assign_changes_to_epic_projects()
+        project = server_module.portfolio_store.project_for_ticket("jira", "PROJ-1")
+        self.assertEqual(server_module.roadmap_store.get(item.id).project_id, project.id)
+        self.assertEqual(server_module._epic_report["jira"]["changes_assigned"], 1)
 
     # ---- exclusion: the slice of the tracker that lives elsewhere ----
 
@@ -456,6 +570,26 @@ class EpicProjectImportTest(_EpicHarness):
         report = server_module._epic_report["jira"]
         self.assertEqual(report["excluded_epics"], 1)
         self.assertEqual((report["projects_created"], report["projects_linked"]), (0, 0))
+
+    def test_a_story_moved_under_an_excluded_epic_keeps_its_project(self) -> None:
+        """Excluded means "this slice lives elsewhere", not "unfile it here": the epic
+        is invisible to these passes, so the correction has nothing to say and the
+        change stays where it was."""
+        first = _ticket("PROJ-1", "Epic", title="The epic")
+        elsewhere = _ticket("PROJ-9", "Epic", title="Somebody else's epic")
+        elsewhere.components = ["CapAdmin"]
+        item = server_module.roadmap_store.create("checkout", "A story")
+        server_module.roadmap_store.link_ticket(item.id, "jira", "PROJ-2")
+        self._run([first, _ticket("PROJ-2", "Story", parent="PROJ-1", parent_type="Epic")])
+        server_module._assign_changes_to_epic_projects()
+        project = server_module.portfolio_store.project_for_ticket("jira", "PROJ-1")
+        self._exclude("CapAdmin")
+        self._run([
+            first, elsewhere,
+            _ticket("PROJ-2", "Story", parent="PROJ-9", parent_type="Epic"),
+        ])
+        server_module._assign_changes_to_epic_projects()
+        self.assertEqual(server_module.roadmap_store.get(item.id).project_id, project.id)
 
     def test_exclusion_covers_the_whole_parent_chain(self) -> None:
         """Only the epic carries the component; the story under it and the task under
