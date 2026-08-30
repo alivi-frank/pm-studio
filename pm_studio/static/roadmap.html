@@ -3806,18 +3806,47 @@
 
   function axis() {
     const q0 = startOfQuarter(new Date());
-    // One quarter of history, then the three horizons: Now is this quarter, Next the
-    // one after, Later the two beyond that. Fifteen months, which fits without
-    // scrolling on a normal window and keeps a month column readable.
-    return {
-      start: +addMonths(q0, -3),
-      end: +addMonths(q0, 12),
-      bands: {
-        now: [+q0, +addMonths(q0, 3)],
-        next: [+addMonths(q0, 3), +addMonths(q0, 6)],
-        later: [+addMonths(q0, 6), +addMonths(q0, 12)],
-      },
+    // The horizon bands keep their fixed calendar meaning: Now is this quarter, Next
+    // the one after, Later the two beyond.
+    const bands = {
+      now: [+q0, +addMonths(q0, 3)],
+      next: [+addMonths(q0, 3), +addMonths(q0, 6)],
+      later: [+addMonths(q0, 6), +addMonths(q0, 12)],
     };
+    /* The window fits the work. The old fixed 15-month frame left most of the canvas
+       empty whenever a portfolio's dates clustered - which real ones do - rendering
+       every bar as a sliver. The extent covers every dated span, every recent ship,
+       and the horizon band of every undated open change (their bars ARE the band), so
+       nothing drawn can fall outside it. Month-aligned with a month of padding, never
+       narrower than four months, never wider than eighteen (old shipped work must not
+       stretch the frame until the columns are unreadable), and today is always in it. */
+    let lo = Date.now(), hi = Date.now();
+    for (const item of allChanges()) {
+      const s = dateMs(item.start_at);
+      const t = endOfDayMs(item.target_at);
+      if (s) lo = Math.min(lo, s);
+      if (t) { lo = Math.min(lo, t); hi = Math.max(hi, t); }
+      if (item.shipped_at) {
+        const sh = item.shipped_at * 1000;
+        lo = Math.min(lo, sh); hi = Math.max(hi, sh);
+      }
+      if (!s && !t && item.status !== "done") {
+        const band = bands[item.bucket] || bands.later;
+        lo = Math.min(lo, band[0]);
+        // Later's band is two quarters wide and mostly empty by definition; letting it
+        // set the right edge re-creates the sprawl this fit exists to kill. Its bars
+        // clamp at the frame's edge instead, which reads as "extends beyond".
+        hi = Math.max(hi, item.bucket === "later" ? band[0] + 31 * 86400000 : band[1]);
+      }
+    }
+    let start = new Date(lo);
+    start = new Date(start.getFullYear(), start.getMonth() - 1, 1);
+    let end = new Date(hi);
+    end = new Date(end.getFullYear(), end.getMonth() + 2, 1);
+    while (+end - +start < 4 * 31 * 86400000) end = addMonths(end, 1);
+    const floor = addMonths(end, -18);
+    if (+start < +floor) start = floor;
+    return { start: +start, end: +end, bands };
   }
 
   function barFor(item, ax) {
