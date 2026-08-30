@@ -523,6 +523,21 @@
         ? `${serving.length} initiative${serving.length === 1 ? "" : "s"} serving this`
         : "no initiatives yet";
       item.appendChild(meta);
+      // The reading view names them: a count alone made every goal card a dead end.
+      if (serving.length) {
+        const named = document.createElement("div");
+        named.className = "meta serves read-only";
+        serving.forEach((initiative, i) => {
+          if (i) named.appendChild(document.createTextNode(" · "));
+          const link = document.createElement("a");
+          link.textContent = initiative.title;
+          link.href = "/roadmap?group=initiative&section="
+            + encodeURIComponent("initiative:" + initiative.id);
+          link.title = "This initiative's changes on the board";
+          named.appendChild(link);
+        });
+        item.appendChild(named);
+      }
       list.appendChild(item);
     });
   }
