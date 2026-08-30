@@ -1377,6 +1377,13 @@ def costing_report(request: Request, week: str | None = None) -> dict:
     report["rollup"] = costing_store.rollup_to_initiatives(
         report["by_project"], portfolio_store
     )
+    # The to-date view beside the weekly one: "what has this cost so far" is the
+    # portfolio question, and a week-scoped page structurally couldn't answer it.
+    cumulative = costing_store.cumulative_to_date(user_ids=known)
+    cumulative["rollup"] = costing_store.rollup_to_initiatives(
+        cumulative["by_project"], portfolio_store
+    )
+    report["cumulative"] = cumulative
     report["portfolio"] = {
         "projects": portfolio_store.list_projects(),
         "initiatives": portfolio_store.list_initiatives(),
