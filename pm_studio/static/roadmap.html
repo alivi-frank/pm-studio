@@ -165,6 +165,15 @@
     color: var(--ink-muted);
   }
   .group-head .info:hover, .group-head .info.open { color: var(--accent); }
+  /* The quick-add sits in the same heading as the collapse chevron; without its own
+     breathing room the two are one mis-click apart. */
+  .group-head .section-add {
+    margin-left: 10px;
+    padding: 0 7px;
+    border: 1px solid var(--border, rgba(127,127,127,0.35));
+    border-radius: 6px;
+    font-weight: 600;
+  }
   /* Indented to start under the title (4px head padding + 16px chevron + 7px gap),
      so it reads as the heading's own aside rather than a row of the board. */
   .group-desc {
@@ -1571,6 +1580,11 @@
   /* Which initiative sections are currently showing their description. Transient for
      the same reason as revealClosed: reading the why is a reading act. */
   const revealDesc = new Set();
+  /* Which product sections have their quick-add form open. Transient like the two
+     above. The form targets the product with no project - the server routes that to
+     the catch-all, the documented landing spot for work nobody has filed yet - so
+     raising a change no longer requires knowing which project row to unfold first. */
+  const sectionAddOpen = new Set();
 
   /* Which activity states the board shows sections for. "active" alone is the default
      altitude - the plan you are running - and adding "inactive" or "completed" back is
@@ -3552,6 +3566,30 @@
       });
       head.appendChild(info);
     }
+    // Quick-add on product sections, beside the heading the same way the info toggle
+    // sits on initiative ones (span with a button role - the heading is already a
+    // button). Products only: they are the one section kind with an unambiguous board.
+    if (group.product) {
+      const quickAdd = el("span", "info section-add", "+");
+      quickAdd.setAttribute("role", "button");
+      quickAdd.tabIndex = 0;
+      quickAdd.title = `Add a change to ${group.title}`;
+      const openAdd = (event) => {
+        event.stopPropagation();
+        if (sectionAddOpen.has(group.key)) {
+          sectionAddOpen.delete(group.key);
+        } else {
+          sectionAddOpen.add(group.key);
+          if (!expanded.has(group.key)) { expanded.add(group.key); persistExpanded(); }
+        }
+        renderAll();
+      };
+      quickAdd.addEventListener("click", openAdd);
+      quickAdd.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openAdd(event); }
+      });
+      head.appendChild(quickAdd);
+    }
     // Owner/team as the heading's tooltip: context on demand, not a row of chrome.
     if (group.product && PRODUCT_META[group.product]) {
       const m = PRODUCT_META[group.product];
@@ -3642,6 +3680,17 @@
        far the most expensive thing on this page (see buildOnce). */
     const body = el("div", "group-body");
     const fillBody = buildOnce(() => {
+      if (group.product && sectionAddOpen.has(group.key)) {
+        const form = addForm(group.product, "now", null);
+        form.classList.add("open", "section-add-form");
+        // The form's own Cancel only hides it; at section level it should also drop
+        // the flag, or the next re-render would bring it straight back.
+        form.querySelector(".cancel").addEventListener("click", () => {
+          sectionAddOpen.delete(group.key);
+          renderAll();
+        });
+        body.appendChild(form);
+      }
       if (suggestions.length) {
         const triage = el("div", "triage");
         for (const item of suggestions) triage.appendChild(suggestionCard(item));
