@@ -136,6 +136,17 @@ class OrderingTest(unittest.TestCase):
         ])["initiatives"]
         self.assertEqual([r["title"] for r in rows], ["Small", "Maint", None])
 
+    def test_rows_with_neither_open_nor_recent_work_are_dropped(self) -> None:
+        """The table's promise is "open or recently shipped": declared-but-empty
+        ideation and long-finished initiatives are the portfolio page's business."""
+        empty_idea = group("Empty idea", [], initiative_id="i5", in_ideation=True)
+        stale_done = group("Old glory", [change("a", "done", shipped_at=NOW - 40 * DAY)],
+                           initiative_id="i6")
+        fresh_done = group("Just finished", [change("b", "done", shipped_at=NOW - DAY)],
+                           initiative_id="i7")
+        rows = build([empty_idea, stale_done, fresh_done])["initiatives"]
+        self.assertEqual([r["title"] for r in rows], ["Just finished"])
+
     def test_closed_initiative_with_no_recent_ship_is_dropped(self) -> None:
         old = group("Old", [change("a", "done", shipped_at=NOW - 400 * DAY)],
                     status="closed")
@@ -204,6 +215,17 @@ class PlanFeedsTest(unittest.TestCase):
         self.assertEqual(data["working_total"], 2)
         self.assertEqual(data["next_total"], 2)
 
+    def test_undated_work_falls_back_to_recency_not_alphabet(self) -> None:
+        stale = change("stale", "in_progress")
+        stale["updated_at"] = NOW - 10 * DAY
+        stale["title"] = "AAA ancient"
+        fresh = change("fresh", "in_progress")
+        fresh["updated_at"] = NOW - DAY
+        fresh["title"] = "ZZZ recent"
+        dated = change("dated", "in_progress", target_at="2030-01-01")
+        data = build([group("A", [stale, fresh, dated])])
+        self.assertEqual([e["id"] for e in data["working"]], ["dated", "fresh", "stale"])
+
     def test_in_progress_next_bucket_counts_as_working_not_next(self) -> None:
         item = change("x", "in_progress")
         item["bucket"] = "next"
@@ -224,6 +246,20 @@ class LoadTest(unittest.TestCase):
             "person_id": "p1", "name": "Ada", "open": 3, "in_progress": 1,
             "overdue": 0, "now": 2, "shipped": 2,
         }])
+        self.assertEqual(data["load_quiet_people"], 0)
+
+    def test_shipped_only_people_fold_into_a_count(self) -> None:
+        rows = [
+            {"person_id": "p1", "name": "Ada", "open": 2, "in_progress": 1,
+             "overdue": 0, "shipped": 0, "now": 1, "next": 1, "later": 0,
+             "products": [], "systems": [], "areas": []},
+            {"person_id": "p2", "name": "Eve", "open": 0, "in_progress": 0,
+             "overdue": 0, "shipped": 5, "now": 0, "next": 0, "later": 0,
+             "products": [], "systems": [], "areas": []},
+        ]
+        data = build([], workload=rows)
+        self.assertEqual([r["name"] for r in data["load"]], ["Ada"])
+        self.assertEqual(data["load_quiet_people"], 1)
 
 
 if __name__ == "__main__":

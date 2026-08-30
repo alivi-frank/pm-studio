@@ -123,12 +123,12 @@
 
   <section>
     <h2>In flight<a href="/roadmap">board →</a><a href="/portfolio">portfolio →</a></h2>
-    <p class="sub">Every initiative with open or recently shipped work, most active first. Health is derived from the board: overdue work means at risk, open work with nothing moving means quiet.</p>
+    <p class="sub">Initiatives with open or recently shipped work, most active first — maintenance, unaligned and recently finished work trail the list. Health is derived from the board: overdue work means at risk, open work with nothing moving means quiet.</p>
     <table id="initiatives">
       <thead><tr>
         <th>Initiative</th><th>Health</th><th>Progress</th>
         <th class="num">In&nbsp;progress</th><th class="num">Overdue</th>
-        <th>People</th><th>Next&nbsp;target</th>
+        <th>People</th><th id="target-head">Next&nbsp;target</th>
       </tr></thead>
       <tbody></tbody>
     </table>
@@ -166,7 +166,7 @@
 
   <section>
     <h2>Who's on what<a href="/people">people →</a></h2>
-    <p class="sub">Open work per person. Unassigned work is a row, not a footnote.</p>
+    <p class="sub">People carrying open work. Unassigned work is a row, not a footnote.</p>
     <table id="load">
       <thead><tr>
         <th>Person</th><th class="num">Open</th><th class="num">In progress</th>
@@ -174,6 +174,7 @@
       </tr></thead>
       <tbody></tbody>
     </table>
+    <div class="feed-empty" id="load-quiet" hidden></div>
   </section>
 </main>
 <script>
@@ -224,6 +225,9 @@
 
     var tbody = document.querySelector("#initiatives tbody");
     tbody.textContent = "";
+    var anyTarget = data.initiatives.some(function (row) { return row.next_target; });
+    var targetHead = document.getElementById("target-head");
+    if (targetHead) targetHead.hidden = !anyTarget;
     data.initiatives.forEach(function (row) {
       var tr = document.createElement("tr");
 
@@ -265,13 +269,16 @@
       var extra = row.people.length - names.length;
       tr.appendChild(td("second", names.join(", ") + (extra > 0 ? " +" + extra : "") || ""));
 
-      tr.appendChild(td("muted days", row.next_target || "—"));
+      if (anyTarget) tr.appendChild(td("muted days", row.next_target || "—"));
       tbody.appendChild(tr);
     });
 
     function planList(tableId, emptyId, subId, entries, total, noun) {
       var body = document.querySelector("#" + tableId + " tbody");
       body.textContent = "";
+      // A column of em-dashes is noise, not information: portfolios that don't set
+      // target dates get no date column at all.
+      var anyDated = entries.some(function (entry) { return entry.target_at; });
       entries.forEach(function (entry) {
         var tr = document.createElement("tr");
         var name = td(null, null);
@@ -281,7 +288,7 @@
         name.appendChild(el("div", "initiative-meta",
           [entry.initiative, entry.product, entry.assignee].filter(Boolean).join(" — ")));
         tr.appendChild(name);
-        tr.appendChild(td("muted num days", entry.target_at || "—"));
+        if (anyDated) tr.appendChild(td("muted num days", entry.target_at || "—"));
         body.appendChild(tr);
       });
       document.getElementById(emptyId).hidden = entries.length > 0;
@@ -353,6 +360,15 @@
       tr.appendChild(td("num muted", String(row.shipped)));
       load.appendChild(tr);
     });
+    var quietNote = document.getElementById("load-quiet");
+    if (data.load_quiet_people > 0) {
+      quietNote.textContent = data.load_quiet_people +
+        " more " + (data.load_quiet_people === 1 ? "person carries" : "people carry") +
+        " nothing open right now.";
+      quietNote.hidden = false;
+    } else {
+      quietNote.hidden = true;
+    }
   }
 
   function refresh() {

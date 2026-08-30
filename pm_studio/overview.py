@@ -110,6 +110,10 @@ def build_overview(
                 "initiative": initiative_title,
                 "target_at": change.get("target_at"),
                 "assignee": name,
+                # Fallback ordering signal only - not rendered. On a portfolio that
+                # doesn't set dates (most real ones), "dated first" alone degrades to
+                # an alphabetical slice under the feed caps; recency carries signal.
+                "updated_at": change.get("updated_at") or 0.0,
             }
             if status == "in_progress":
                 working_feed.append(entry)
@@ -193,32 +197,48 @@ def build_overview(
         )
 
     initiatives.sort(key=sort_key)
+    # The table's promise is "open or recently shipped work". Rows with neither -
+    # closed history, fully-done initiatives with nothing recent, declared-but-empty
+    # ideation - are the portfolio page's business, and at real scale they bury the
+    # rows that ARE news.
     initiatives = [
         row for row in initiatives
-        if not (row["status"] == "closed" and row["shipped_recent"] == 0)
-        and not (row["counts"]["total"] == 0 and row["id"] is None)
+        if row["open"] > 0 or row["shipped_recent"] > 0
     ]
 
     shipped_feed.sort(key=lambda entry: -entry["shipped_at"])
     overdue_feed.sort(key=lambda entry: -entry["days_late"])
-    # Dated commitments lead; the undated trail alphabetically so the order is stable.
+    # Dated commitments lead (soonest first); the undated trail by recency of activity,
+    # newest first - under the feed caps an alphabetical tail is an arbitrary slice,
+    # and recently-touched work is the signal a reader wants from "working now".
     def plan_key(entry: dict) -> tuple:
-        return (entry["target_at"] is None, entry["target_at"] or "", entry["title"])
+        return (
+            entry["target_at"] is None,
+            entry["target_at"] or "",
+            -entry["updated_at"],
+            entry["title"],
+        )
     working_feed.sort(key=plan_key)
     next_feed.sort(key=plan_key)
 
-    load = [
-        {
-            "person_id": row.get("person_id"),
-            "name": row["name"],
-            "open": row.get("open", 0),
-            "in_progress": row.get("in_progress", 0),
-            "overdue": row.get("overdue", 0),
-            "now": row.get("now", 0),
-            "shipped": row.get("shipped", 0),
-        }
-        for row in workload_rows
-    ]
+    # People carrying open work only; on a real directory a third of the rows are
+    # shipped-only history and pad the table past its useful fold. They are counted,
+    # not hidden - the page says how many were folded away.
+    load = []
+    quiet_people = 0
+    for row in workload_rows:
+        if row.get("open", 0) > 0 or row.get("overdue", 0) > 0:
+            load.append({
+                "person_id": row.get("person_id"),
+                "name": row["name"],
+                "open": row.get("open", 0),
+                "in_progress": row.get("in_progress", 0),
+                "overdue": row.get("overdue", 0),
+                "now": row.get("now", 0),
+                "shipped": row.get("shipped", 0),
+            })
+        else:
+            quiet_people += 1
 
     return {
         "generated_at": now,
@@ -233,4 +253,5 @@ def build_overview(
         "next_up": next_feed[:NEXT_FEED_CAP],
         "next_total": len(next_feed),
         "load": load,
+        "load_quiet_people": quiet_people,
     }
