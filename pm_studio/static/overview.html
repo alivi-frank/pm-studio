@@ -237,6 +237,19 @@
     stats.appendChild(stat(open, "open changes"));
     stats.appendChild(stat(data.overdue_total, "overdue", true));
     stats.appendChild(stat(data.shipped_total, "shipped, last " + data.shipped_window_days + "d"));
+    // Plan honesty, when a weekly plan exists: of what the Now lane held when the
+    // week's plan pinned, how much shipped - with scope-added work beside it, never
+    // folded in.
+    if (data.week_plan && data.week_plan.planned_total) {
+      var wp = data.week_plan;
+      var planBox = el("div", "stat");
+      planBox.appendChild(el("div", "n", wp.shipped + "/" + wp.planned_total));
+      planBox.appendChild(el("div", "l",
+        "of this week's plan shipped" + (wp.added ? " · " + wp.added + " added" : "")));
+      planBox.title = "Planned = open Now-lane changes when the week's plan pinned ("
+        + wp.still_now + " still in Now, " + wp.moved + " moved, " + wp.gone + " gone)";
+      stats.appendChild(planBox);
+    }
 
     var tbody = document.querySelector("#initiatives tbody");
     tbody.textContent = "";

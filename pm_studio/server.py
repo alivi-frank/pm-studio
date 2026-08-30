@@ -41,6 +41,7 @@ from .costing import (
 )
 from .models import list_models
 from .overview import build_overview
+from .plans import PlanStore, plan_vs_actual
 from .people import (
     UNASSIGNED,
     PeopleError,
@@ -130,6 +131,7 @@ costing_store = CostingStore(
     weights=CONFIG.costing.weights,
     currency=CONFIG.costing.currency,
 )
+plan_store = PlanStore(CONFIG.workspace_dir / "plans")
 
 # task_id -> the user who dispatched it. A dev task's token spend is only known when it
 # finishes, by which time the request that started it is long gone, so the dispatcher is
@@ -1665,8 +1667,14 @@ def overview_data() -> dict:
         for items in roadmap_store.list_all().values()
         for item in items
     ]
+    # Reads are how the week's plan gets pinned: lazy capture needs a hook that fires
+    # often, and the overview is the page every day starts on.
+    plan_store.ensure_current(changes)
     groups = portfolio_store.group_changes_by_initiative(changes)
-    return build_overview(groups, workload(changes))
+    payload = build_overview(groups, workload(changes))
+    plan = plan_store.plan_for(current_week())
+    payload["week_plan"] = plan_vs_actual(plan, changes) if plan else None
+    return payload
 
 
 @app.get("/systems")
