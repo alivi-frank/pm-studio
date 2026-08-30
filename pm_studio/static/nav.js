@@ -25,6 +25,14 @@
   // arrows between them in the bar are this relationship, and `what` is the one-line
   // descriptor the context row shows for whichever stop you are standing on. See
   // docs/ARCHITECTURE.md section 3b for the model this mirrors.
+  // The read-first answer to "what are we working on?" - a summary of the work model,
+  // not a stop on it, so it leads the bar but stays outside the arrow chain the same
+  // way Systems trails it.
+  var OVERVIEW_TAB = {
+    page: "overview", href: "/overview", label: "Overview",
+    what: "in flight · shipped recently · who's on what",
+  };
+
   var CORE_TABS = [
     { page: "portfolio", href: "/portfolio", label: "Portfolio", what: "goals · initiatives · projects" },
     { page: "roadmap", href: "/roadmap", label: "Roadmap", what: "changes · now / next / later" },
@@ -63,6 +71,7 @@
   // Per-page chrome. `tab` marks which top-level tab lights up (session-scoped pages
   // light up "Sessions", because that is where they live).
   var PAGES = {
+    overview: { tab: "overview" },
     sessions: { tab: "sessions" },
     portfolio: { tab: "portfolio" },
     roadmap: { tab: "roadmap" },
@@ -133,6 +142,8 @@
     bar.appendChild(link("/", "pmnav-brand", "PM Studio"));
 
     var tabs = el("div", "pmnav-tabs");
+    tabs.appendChild(makeTab(OVERVIEW_TAB, current, "pmnav-tab"));
+    tabs.appendChild(el("span", "pmnav-group-sep"));
     CORE_TABS.forEach(function (tab, i) {
       // The work model, drawn where the destinations already are: intent narrowing into
       // work. Decorative - the tabs are the navigation, the arrow is the relationship.
@@ -193,7 +204,7 @@
   // set - the bar above is the only place destinations are listed.
   function buildPageContext(spec) {
     var row = el("div", "pmnav-context");
-    var all = CORE_TABS.concat(REFERENCE_TABS, ADMIN_TABS);
+    var all = [OVERVIEW_TAB].concat(CORE_TABS, REFERENCE_TABS, ADMIN_TABS);
     var here = null;
     all.forEach(function (tab) { if (tab.page === spec.tab) here = tab; });
 

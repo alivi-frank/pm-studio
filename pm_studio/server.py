@@ -40,6 +40,7 @@ from .costing import (
     current_week,
 )
 from .models import list_models
+from .overview import build_overview
 from .people import (
     UNASSIGNED,
     PeopleError,
@@ -1623,6 +1624,26 @@ def _resolve_project_id(payload: dict) -> str | None:
 @app.get("/portfolio")
 def portfolio_page() -> FileResponse:
     return _app_asset("portfolio.html")
+
+
+@app.get("/overview")
+def overview_page() -> FileResponse:
+    return _app_asset("overview.html")
+
+
+@app.get("/overview/data")
+def overview_data() -> dict:
+    """One read-only payload answering "what are we working on?" - initiative rollups
+    with derived health, the shipped-recently feed, the overdue list and per-person
+    load. Composed here because it joins all three stores; the arithmetic itself lives
+    in overview.build_overview, pure and store-free."""
+    changes = [
+        _with_ticket(item)
+        for items in roadmap_store.list_all().values()
+        for item in items
+    ]
+    groups = portfolio_store.group_changes_by_initiative(changes)
+    return build_overview(groups, workload(changes))
 
 
 @app.get("/systems")

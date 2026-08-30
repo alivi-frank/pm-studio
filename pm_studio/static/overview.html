@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PM Studio — Overview</title>
+<link rel="stylesheet" href="/static/nav.css" />
+<script src="/static/nav.js"></script>
+<style>
+  :root {
+    color-scheme: light dark;
+    --surface: #fcfcfb;
+    --page: #f9f9f7;
+    --ink-primary: #0b0b0b;
+    --ink-secondary: #52514e;
+    --ink-muted: #898781;
+    --border: rgba(11, 11, 11, 0.10);
+    --accent: #2a78d6;
+    --error: #d03b3b;
+    --warn: #b57e10;
+    --ok: #0ca30c;
+    --chip-ok-bg: rgba(12, 163, 12, 0.10);
+    --chip-risk-bg: rgba(208, 59, 59, 0.10);
+    --chip-quiet-bg: rgba(11, 11, 11, 0.06);
+    --bar-track: rgba(11, 11, 11, 0.08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface: #1a1a19;
+      --page: #0d0d0d;
+      --ink-primary: #ffffff;
+      --ink-secondary: #c3c2b7;
+      --ink-muted: #898781;
+      --border: rgba(255, 255, 255, 0.10);
+      --accent: #3987e5;
+      --error: #e66767;
+      --warn: #d9a13a;
+      --ok: #2fce2f;
+      --chip-ok-bg: rgba(47, 206, 47, 0.14);
+      --chip-risk-bg: rgba(230, 103, 103, 0.16);
+      --chip-quiet-bg: rgba(255, 255, 255, 0.08);
+      --bar-track: rgba(255, 255, 255, 0.10);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--page);
+    color: var(--ink-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  main { padding: 24px; max-width: 1100px; margin: 0 auto; }
+
+  /* headline numbers: the ten-second read */
+  .stats { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
+  .stat {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 18px;
+    min-width: 118px;
+  }
+  .stat .n { font-size: 1.5em; font-weight: 650; line-height: 1.2; }
+  .stat .n.bad { color: var(--error); }
+  .stat .l { color: var(--ink-muted); font-size: 0.78em; margin-top: 2px; }
+
+  section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+  h2 { font-size: 0.95em; margin: 0 0 4px; }
+  h2 a { color: var(--accent); text-decoration: none; font-weight: 500; font-size: 0.85em; margin-left: 10px; }
+  p.sub { margin: 0 0 14px; color: var(--ink-muted); font-size: 0.83em; line-height: 1.5; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.88em; }
+  th {
+    text-align: left; font-weight: 500; font-size: 0.82em;
+    color: var(--ink-muted);
+    padding: 0 10px 8px 0;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  th.num, td.num { text-align: right; }
+  td { padding: 9px 10px 9px 0; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  tr:last-child td { border-bottom: 0; }
+  td .muted, .muted { color: var(--ink-muted); }
+  td .second { color: var(--ink-secondary); }
+
+  .chip {
+    display: inline-block; padding: 2px 9px; border-radius: 999px;
+    font-size: 0.78em; font-weight: 550; white-space: nowrap;
+  }
+  .chip.on_track { background: var(--chip-ok-bg); color: var(--ok); }
+  .chip.at_risk { background: var(--chip-risk-bg); color: var(--error); }
+  .chip.quiet, .chip.ideation, .chip.empty { background: var(--chip-quiet-bg); color: var(--ink-muted); }
+  .chip.done, .chip.closed { background: var(--chip-ok-bg); color: var(--ink-secondary); }
+
+  .initiative-title { font-weight: 550; }
+  .initiative-meta { color: var(--ink-muted); font-size: 0.85em; margin-top: 2px; }
+
+  .progress { display: flex; align-items: center; gap: 8px; min-width: 130px; }
+  .bar { flex: 1; height: 6px; border-radius: 3px; background: var(--bar-track); overflow: hidden; }
+  .bar > span { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+  .fraction { color: var(--ink-secondary); font-size: 0.85em; white-space: nowrap; }
+
+  .late { color: var(--error); font-weight: 600; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 860px) { .cols { grid-template-columns: 1fr; } }
+  .feed-empty { color: var(--ink-muted); font-size: 0.86em; padding: 6px 0; }
+  .days { white-space: nowrap; }
+</style>
+</head>
+<body>
+<div id="pm-nav" data-page="overview"></div>
+<main>
+  <div class="stats" id="stats"></div>
+
+  <section>
+    <h2>In flight<a href="/roadmap">board →</a><a href="/portfolio">portfolio →</a></h2>
+    <p class="sub">Every initiative with open or recently shipped work, most active first. Health is derived from the board: overdue work means at risk, open work with nothing moving means quiet.</p>
+    <table id="initiatives">
+      <thead><tr>
+        <th>Initiative</th><th>Health</th><th>Progress</th>
+        <th class="num">In&nbsp;progress</th><th class="num">Overdue</th>
+        <th>People</th><th>Next&nbsp;target</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <div class="cols">
+    <section>
+      <h2>Shipped recently</h2>
+      <p class="sub" id="shipped-sub"></p>
+      <table id="shipped"><tbody></tbody></table>
+      <div class="feed-empty" id="shipped-empty" hidden>Nothing shipped in this window.</div>
+    </section>
+    <section>
+      <h2>Overdue</h2>
+      <p class="sub">Open work past its target date, most late first.</p>
+      <table id="overdue"><tbody></tbody></table>
+      <div class="feed-empty" id="overdue-empty" hidden>Nothing is overdue.</div>
+    </section>
+  </div>
+
+  <section>
+    <h2>Who's on what<a href="/people">people →</a></h2>
+    <p class="sub">Open work per person. Unassigned work is a row, not a footnote.</p>
+    <table id="load">
+      <thead><tr>
+        <th>Person</th><th class="num">Open</th><th class="num">In progress</th>
+        <th class="num">Now</th><th class="num">Late</th><th class="num">Shipped</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  function el(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+  function td(className, text) { return el("td", className, text); }
+
+  var HEALTH_LABEL = {
+    on_track: "On track", at_risk: "At risk", quiet: "Quiet",
+    ideation: "Ideation", done: "Done", closed: "Closed", empty: "Empty",
+  };
+
+  function stat(n, label, bad) {
+    var box = el("div", "stat");
+    var num = el("div", "n" + (bad && n > 0 ? " bad" : ""), String(n));
+    box.appendChild(num);
+    box.appendChild(el("div", "l", label));
+    return box;
+  }
+
+  function render(data) {
+    var open = 0, inProgress = 0;
+    data.initiatives.forEach(function (row) {
+      if (row.status !== "closed") { open += row.open; inProgress += row.counts.in_progress; }
+    });
+    var stats = document.getElementById("stats");
+    stats.textContent = "";
+    var active = data.initiatives.filter(function (r) {
+      return r.status !== "closed" && r.id !== null && !r.is_maintenance && r.open > 0;
+    }).length;
+    stats.appendChild(stat(active, "initiatives in flight"));
+    stats.appendChild(stat(inProgress, "changes in progress"));
+    stats.appendChild(stat(open, "open changes"));
+    stats.appendChild(stat(data.overdue_total, "overdue", true));
+    stats.appendChild(stat(data.shipped_total, "shipped, last " + data.shipped_window_days + "d"));
+
+    var tbody = document.querySelector("#initiatives tbody");
+    tbody.textContent = "";
+    data.initiatives.forEach(function (row) {
+      var tr = document.createElement("tr");
+
+      var name = td(null, null);
+      name.appendChild(el("div", "initiative-title", row.title || "Unaligned work"));
+      var metaBits = [];
+      if (row.products.length) metaBits.push(row.products.join(" · "));
+      if (row.shipped_recent) metaBits.push(row.shipped_recent + " shipped recently");
+      if (metaBits.length) name.appendChild(el("div", "initiative-meta", metaBits.join(" — ")));
+      tr.appendChild(name);
+
+      var health = td(null, null);
+      health.appendChild(el("span", "chip " + row.health, HEALTH_LABEL[row.health] || row.health));
+      tr.appendChild(health);
+
+      var prog = td(null, null);
+      var wrap = el("div", "progress");
+      var bar = el("div", "bar");
+      var fill = el("span");
+      fill.style.width = row.pct_done + "%";
+      bar.appendChild(fill);
+      wrap.appendChild(bar);
+      wrap.appendChild(el("span", "fraction", row.counts.done + "/" + row.counts.total));
+      prog.appendChild(wrap);
+      tr.appendChild(prog);
+
+      tr.appendChild(td("num", String(row.counts.in_progress)));
+      var overdue = td("num", String(row.overdue));
+      if (row.overdue > 0) overdue.className += " late";
+      tr.appendChild(overdue);
+
+      var names = row.people.slice(0, 3).map(function (p) { return p.name; });
+      var extra = row.people.length - names.length;
+      tr.appendChild(td("second", names.join(", ") + (extra > 0 ? " +" + extra : "") || ""));
+
+      tr.appendChild(td("muted days", row.next_target || "—"));
+      tbody.appendChild(tr);
+    });
+
+    document.getElementById("shipped-sub").textContent =
+      "Last " + data.shipped_window_days + " days, newest first" +
+      (data.shipped_total > data.shipped.length
+        ? " — showing " + data.shipped.length + " of " + data.shipped_total : "") + ".";
+    var shipped = document.querySelector("#shipped tbody");
+    shipped.textContent = "";
+    data.shipped.forEach(function (entry) {
+      var tr = document.createElement("tr");
+      var name = td(null, null);
+      name.appendChild(el("div", null, entry.title));
+      name.appendChild(el("div", "initiative-meta",
+        [entry.initiative, entry.product, entry.assignee].filter(Boolean).join(" — ")));
+      tr.appendChild(name);
+      tr.appendChild(td("muted num days",
+        entry.days_ago === 0 ? "today" : entry.days_ago + "d ago"));
+      shipped.appendChild(tr);
+    });
+    document.getElementById("shipped-empty").hidden = data.shipped.length > 0;
+
+    var overdueBody = document.querySelector("#overdue tbody");
+    overdueBody.textContent = "";
+    data.overdue.forEach(function (entry) {
+      var tr = document.createElement("tr");
+      var name = td(null, null);
+      name.appendChild(el("div", null, entry.title));
+      name.appendChild(el("div", "initiative-meta",
+        [entry.initiative, entry.product, entry.assignee].filter(Boolean).join(" — ")));
+      tr.appendChild(name);
+      tr.appendChild(td("late num days", entry.days_late + "d late"));
+      overdueBody.appendChild(tr);
+    });
+    document.getElementById("overdue-empty").hidden = data.overdue.length > 0;
+
+    var load = document.querySelector("#load tbody");
+    load.textContent = "";
+    data.load.forEach(function (row) {
+      var tr = document.createElement("tr");
+      // The unassigned row arrives with an empty display name (a sentinel person id);
+      // it is usually the largest row, so it must say what it is.
+      tr.appendChild(td(row.name ? null : "muted", row.name || "Unassigned"));
+      tr.appendChild(td("num", String(row.open)));
+      tr.appendChild(td("num", String(row.in_progress)));
+      tr.appendChild(td("num", String(row.now)));
+      var late = td("num", String(row.overdue));
+      if (row.overdue > 0) late.className += " late";
+      tr.appendChild(late);
+      tr.appendChild(td("num muted", String(row.shipped)));
+      load.appendChild(tr);
+    });
+  }
+
+  function refresh() {
+    fetch("/overview/data", { headers: { Accept: "application/json" } })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) { if (data) render(data); });
+  }
+
+  refresh();
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) refresh();
+  });
+})();
+</script>
+</body>
+</html>
