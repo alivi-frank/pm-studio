@@ -184,6 +184,34 @@ class OverdueFeedTest(unittest.TestCase):
         self.assertEqual(data["overdue_total"], 2)
 
 
+class PlanFeedsTest(unittest.TestCase):
+    """The "working now vs. up next" halves: in-progress work is one list, next-bucket
+    pending work the other, dated commitments leading in both."""
+
+    def test_split_and_order(self) -> None:
+        changes = [
+            change("w2", "in_progress"),
+            change("w1", "in_progress", target_at="2030-01-01"),
+            change("n2"), change("n1", target_at="2030-02-01"),
+            change("skip_later"), change("d", "done", shipped_at=NOW - DAY),
+        ]
+        changes[2]["bucket"] = "next"
+        changes[3]["bucket"] = "next"
+        changes[4]["bucket"] = "later"
+        data = build([group("A", changes)])
+        self.assertEqual([e["id"] for e in data["working"]], ["w1", "w2"])
+        self.assertEqual([e["id"] for e in data["next_up"]], ["n1", "n2"])
+        self.assertEqual(data["working_total"], 2)
+        self.assertEqual(data["next_total"], 2)
+
+    def test_in_progress_next_bucket_counts_as_working_not_next(self) -> None:
+        item = change("x", "in_progress")
+        item["bucket"] = "next"
+        data = build([group("A", [item])])
+        self.assertEqual([e["id"] for e in data["working"]], ["x"])
+        self.assertEqual(data["next_up"], [])
+
+
 class LoadTest(unittest.TestCase):
     def test_workload_rows_are_trimmed_not_recomputed(self) -> None:
         rows = [{

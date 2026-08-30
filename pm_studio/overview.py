@@ -19,6 +19,8 @@ from datetime import date
 SHIPPED_WINDOW_DAYS = 30
 SHIPPED_FEED_CAP = 25
 OVERDUE_FEED_CAP = 25
+WORKING_FEED_CAP = 25
+NEXT_FEED_CAP = 25
 
 
 def _days_between(earlier: float, later: float) -> int:
@@ -58,6 +60,10 @@ def build_overview(
     initiatives = []
     shipped_feed = []
     overdue_feed = []
+    # The two halves of "what is planned next vs. being worked now", as actual items
+    # rather than counts - the question a rollup alone keeps failing to answer.
+    working_feed = []
+    next_feed = []
 
     for group in groups:
         initiative = group.get("initiative")
@@ -97,6 +103,18 @@ def build_overview(
             # open work from here down
             if name:
                 people[name] = people.get(name, 0) + 1
+            entry = {
+                "id": change["id"],
+                "title": change["title"],
+                "product": change["product"],
+                "initiative": initiative_title,
+                "target_at": change.get("target_at"),
+                "assignee": name,
+            }
+            if status == "in_progress":
+                working_feed.append(entry)
+            elif change.get("bucket") == "next":
+                next_feed.append(entry)
             target = change.get("target_at")
             if change.get("is_overdue") and target:
                 overdue += 1
@@ -183,6 +201,11 @@ def build_overview(
 
     shipped_feed.sort(key=lambda entry: -entry["shipped_at"])
     overdue_feed.sort(key=lambda entry: -entry["days_late"])
+    # Dated commitments lead; the undated trail alphabetically so the order is stable.
+    def plan_key(entry: dict) -> tuple:
+        return (entry["target_at"] is None, entry["target_at"] or "", entry["title"])
+    working_feed.sort(key=plan_key)
+    next_feed.sort(key=plan_key)
 
     load = [
         {
@@ -205,5 +228,9 @@ def build_overview(
         "shipped_total": len(shipped_feed),
         "overdue": overdue_feed[:OVERDUE_FEED_CAP],
         "overdue_total": len(overdue_feed),
+        "working": working_feed[:WORKING_FEED_CAP],
+        "working_total": len(working_feed),
+        "next_up": next_feed[:NEXT_FEED_CAP],
+        "next_total": len(next_feed),
         "load": load,
     }

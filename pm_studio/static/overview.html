@@ -136,6 +136,21 @@
 
   <div class="cols">
     <section>
+      <h2>Working now</h2>
+      <p class="sub" id="working-sub">Changes in progress, dated commitments first.</p>
+      <table id="working"><tbody></tbody></table>
+      <div class="feed-empty" id="working-empty" hidden>Nothing is in progress.</div>
+    </section>
+    <section>
+      <h2>Up next</h2>
+      <p class="sub" id="next-sub">Planned next, not yet started.</p>
+      <table id="next"><tbody></tbody></table>
+      <div class="feed-empty" id="next-empty" hidden>Nothing is queued as next.</div>
+    </section>
+  </div>
+
+  <div class="cols">
+    <section>
       <h2>Shipped recently</h2>
       <p class="sub" id="shipped-sub"></p>
       <table id="shipped"><tbody></tbody></table>
@@ -253,6 +268,32 @@
       tr.appendChild(td("muted days", row.next_target || "—"));
       tbody.appendChild(tr);
     });
+
+    function planList(tableId, emptyId, subId, entries, total, noun) {
+      var body = document.querySelector("#" + tableId + " tbody");
+      body.textContent = "";
+      entries.forEach(function (entry) {
+        var tr = document.createElement("tr");
+        var name = td(null, null);
+        var line = el("div");
+        line.appendChild(link("/roadmap?change=" + encodeURIComponent(entry.id), null, entry.title));
+        name.appendChild(line);
+        name.appendChild(el("div", "initiative-meta",
+          [entry.initiative, entry.product, entry.assignee].filter(Boolean).join(" — ")));
+        tr.appendChild(name);
+        tr.appendChild(td("muted num days", entry.target_at || "—"));
+        body.appendChild(tr);
+      });
+      document.getElementById(emptyId).hidden = entries.length > 0;
+      if (total > entries.length) {
+        document.getElementById(subId).textContent =
+          noun + " — showing " + entries.length + " of " + total + ".";
+      }
+    }
+    planList("working", "working-empty", "working-sub",
+      data.working || [], data.working_total || 0, "Changes in progress, dated commitments first");
+    planList("next", "next-empty", "next-sub",
+      data.next_up || [], data.next_total || 0, "Planned next, not yet started");
 
     document.getElementById("shipped-sub").textContent =
       "Last " + data.shipped_window_days + " days, newest first" +
