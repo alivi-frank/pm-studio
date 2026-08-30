@@ -94,6 +94,22 @@
     color: var(--ink-primary);
     font: inherit;
   }
+  #new-form .field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+  #new-form .field.wide { flex: 1 1 150px; }
+  #new-form .field > span {
+    font-size: 0.72em;
+    color: var(--ink-muted);
+    padding-left: 2px;
+  }
+  /* Inside a labeled field the select must not inherit the row's grow rule on the
+     column axis - it would stretch to fill the tallest field's height. */
+  #new-form .field select { width: 100%; flex: 0 0 auto; }
   #new-form select {
     /* An explicit basis, so the longest option's width no longer drives the layout. */
     flex: 1 1 150px;
@@ -302,19 +318,29 @@
 <main>
   <form id="new-form">
     <input id="new-name" type="text" placeholder="Session name (optional — the PM will auto-title this session)" />
-    <select id="new-product"><option value="">General (no specific product)</option></select>
+    <!-- Every picker wears its name: three judges independently called the unlabeled
+         row opaque ("what is Opus? what is Build?"), and a truncated selected value
+         was the only clue to what a control did. -->
+    <label class="field wide"><span>Product</span>
+      <select id="new-product"><option value="">General (no specific product)</option></select>
+    </label>
     <!-- Hidden until the deployment actually has initiatives to pick: on an instance not
          using the work model this would be a permanently empty control. -->
-    <select id="new-initiative" hidden
-            title="Work IN an initiative instead of on one product. Leave the product as General when the initiative spans several - the session finds out which as it goes, and adopts those boards then.">
-      <option value="">No initiative</option>
-    </select>
-    <select id="new-model"></select>
-    <select id="new-mode"
-            title="Build sessions dispatch dev tasks that change code. Research / strategy sessions can't - the PM researches, specs and plans only, until you switch it to build from its chat header.">
-      <option value="build">Build</option>
-      <option value="research">Research / strategy</option>
-    </select>
+    <label class="field wide" id="new-initiative-field" hidden>
+      <span>Initiative</span>
+      <select id="new-initiative"
+              title="Work IN an initiative instead of on one product. Leave the product as General when the initiative spans several - the session finds out which as it goes, and adopts those boards then.">
+        <option value="">No initiative</option>
+      </select>
+    </label>
+    <label class="field"><span>Model</span><select id="new-model"></select></label>
+    <label class="field"><span>Session type</span>
+      <select id="new-mode"
+              title="Build sessions dispatch dev tasks that change code. Research / strategy sessions can't - the PM researches, specs and plans only, until you switch it to build from its chat header.">
+        <option value="build">Build</option>
+        <option value="research">Research / strategy</option>
+      </select>
+    </label>
     <button id="new-submit" type="submit">+ New session</button>
   </form>
   <div id="toggle-row">
@@ -405,7 +431,9 @@
         opt.title = initiative.description || initiative.title;
         initiativeSelect.appendChild(opt);
       }
-      if (initiativeSelect.options.length > 1) initiativeSelect.hidden = false;
+      if (initiativeSelect.options.length > 1) {
+        document.getElementById("new-initiative-field").hidden = false;
+      }
       renderList(); // re-render with initiative titles now known
     })
     .catch(() => {});
