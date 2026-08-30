@@ -152,7 +152,9 @@
         arrow.setAttribute("aria-hidden", "true");
         tabs.appendChild(arrow);
       }
-      tabs.appendChild(makeTab(tab, current, "pmnav-tab"));
+      tabs.appendChild(makeTab(
+        tab.page === "sessions" ? { page: tab.page, href: sessionsHref, label: tab.label, what: tab.what } : tab,
+        current, "pmnav-tab"));
     });
 
     if (info && info.systems_declared) {
@@ -220,7 +222,7 @@
 
     var crumbs = el("nav", "pmnav-crumbs");
     crumbs.setAttribute("aria-label", "Breadcrumb");
-    crumbs.appendChild(link("/", null, "Sessions"));
+    crumbs.appendChild(link(sessionsHref, null, "Sessions"));
     var chev = el("span", "pmnav-chev", "›");
     chev.setAttribute("aria-hidden", "true");
     crumbs.appendChild(chev);
@@ -252,6 +254,10 @@
     return row;
   }
 
+  // Where the sessions list lives: "/" by default, "/sessions-page" when the
+  // deployment points the front door at the overview (see /auth/me `landing`).
+  var sessionsHref = "/";
+
   function render() {
     var mount = document.getElementById("pm-nav");
     if (!mount) return;
@@ -259,6 +265,7 @@
     if (!spec) return;
 
     auth.then(function (info) {
+      if (info && info.landing === "overview") sessionsHref = "/sessions-page";
       mount.textContent = "";
       mount.appendChild(buildBar(spec.tab, info));
       var context = spec.context === "session"

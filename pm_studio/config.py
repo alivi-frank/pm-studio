@@ -332,6 +332,11 @@ class Config:
     workspace_root: str
     host: str
     port: int
+    # Which page GET / serves: "sessions" (the default, unchanged behavior) or
+    # "overview". A deployment whose stakeholders open the tool to ASK about the work
+    # points the front door at the read-first answer; the sessions list keeps a stable
+    # address at /sessions-page either way, and the nav follows (see /auth/me).
+    landing: str = "sessions"
     # Every product this deployment declares, id -> display label, ordered depth first so
     # each product is immediately followed by its own descendants (see _parse_products).
     # Sub-products are products in every respect - the flatness here is what keeps every
@@ -793,6 +798,20 @@ def _parse_products(
     return ordered, parents, touches, meta
 
 
+def _parse_landing(server: dict, config_path: Path) -> str:
+    """`[server] landing`: which page the front door serves. Validated fatally like
+    every other taxonomy-shaped value - a typo here would silently land every visitor
+    on the wrong page, which is exactly the class of quiet misconfiguration load-time
+    validation exists to refuse."""
+    landing = str(server.get("landing", "")).strip() or "sessions"
+    if landing not in ("sessions", "overview"):
+        _fatal(
+            f"{config_path} sets [server] landing = {landing!r}; "
+            'valid values are "sessions" (default) and "overview".'
+        )
+    return landing
+
+
 def _parse_mode(raw: dict, config_path: Path) -> str:
     """Reads [enterprise] mode / enabled. A typo here decides whether the whole
     instance requires authentication, so an unrecognized value is fatal rather than
@@ -1251,6 +1270,7 @@ def load_config(repo_root: Path | None = None) -> Config:
         or DEFAULT_WORKSPACE_ROOT,
         host=str(server.get("host", "")).strip() or DEFAULT_HOST,
         port=int(server.get("port", DEFAULT_PORT)),
+        landing=_parse_landing(server, config_path),
         products=products,
         product_parents=product_parents,
         systems=systems,

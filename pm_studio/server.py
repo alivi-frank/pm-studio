@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from fastapi import Body, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, JSONResponse, RedirectResponse
 
 from . import mailer
 from .accounts import (
@@ -773,6 +773,9 @@ def auth_me(request: Request) -> dict:
         # The nav uses it to decide whether the Systems tab exists, so a deployment that
         # does not use the layer is offered no tab into an empty taxonomy.
         "systems_declared": systems_declared(),
+        # Where GET / points, so the nav can keep a Sessions tab that works when the
+        # front door serves the overview instead.
+        "landing": CONFIG.landing,
         # So a page can hide controls that would only 403. Every one of these is
         # still enforced server-side, independently of what the UI chooses to show.
         "capabilities": capabilities_of(user.role) if user is not None else [],
@@ -1082,7 +1085,20 @@ def delete_person(person_id: str, request: Request) -> dict:
 # ---- session picker / lifecycle ----
 
 @app.get("/")
-def index() -> FileResponse:
+def index():
+    """The front door. `[server] landing = "overview"` points it at the read-first
+    answer to "what are we working on?"; the default stays the sessions list. A
+    redirect rather than serving the file here, so the overview keeps one canonical
+    URL wherever a visitor enters."""
+    if CONFIG.landing == "overview":
+        return RedirectResponse("/overview", status_code=307)
+    return _app_asset("sessions.html")
+
+
+@app.get("/sessions-page")
+def sessions_page() -> FileResponse:
+    """The sessions list at a stable address, whatever the landing setting - the nav's
+    Sessions tab points here when / no longer serves it."""
     return _app_asset("sessions.html")
 
 
