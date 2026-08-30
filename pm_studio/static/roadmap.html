@@ -293,6 +293,14 @@
      dashed inset - a frame around the drop, not a repaint of everything in it. */
   .project.dragging { opacity: 0.45; }
   .group.drop-ok { outline: 2px dashed var(--accent); outline-offset: -2px; border-radius: 7px; }
+  /* The landing spot of a ?change=/?section= deep link - a steady ring, not a flash,
+     because the reader arrived from another page and needs to find it after the scroll
+     settles. Cleared by the next full re-render that isn't the deep link's own. */
+  .card.deep-linked, .gantt-row.deep-linked, .group.deep-linked {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 7px;
+  }
   .project-head {
     display: flex;
     align-items: center;
@@ -1512,6 +1520,33 @@
     : "product";
   let view = localStorage.getItem("roadmapView") === "timeline" ? "timeline" : "board";
 
+  /* Deep links: /roadmap?group=initiative&view=board&section=initiative:<id>&change=<id>
+     The two view axes override the persisted ones - a shared link must show what the
+     sender saw - and from then on group/view are kept in the URL (syncUrl), so the
+     current lens is always shareable. section/change are one-shot reveals consumed by
+     applyDeepLink() after the first load: a pointer, not state. */
+  const bootParams = new URLSearchParams(location.search);
+  if (GROUP_BY_VALUES.includes(bootParams.get("group"))) {
+    groupBy = bootParams.get("group");
+    localStorage.setItem("roadmapGroupBy", groupBy);
+  }
+  if (["board", "timeline"].includes(bootParams.get("view"))) {
+    view = bootParams.get("view");
+    localStorage.setItem("roadmapView", view);
+  }
+  let pendingReveal = (bootParams.get("section") || bootParams.get("change"))
+    ? { section: bootParams.get("section"), change: bootParams.get("change") }
+    : null;
+
+  function syncUrl() {
+    const params = new URLSearchParams(location.search);
+    params.set("group", groupBy);
+    params.set("view", view);
+    params.delete("section");
+    params.delete("change");
+    history.replaceState(null, "", location.pathname + "?" + params);
+  }
+
   /* Which sections are folded, which projects are opened out, and which cards are open.
      All three live outside the DOM because renderAll() rebuilds everything from scratch
      on every websocket event - without this, a fold would reset the instant anyone else
@@ -1823,6 +1858,7 @@
     ], groupBy, (value) => {
       groupBy = value;
       localStorage.setItem("roadmapGroupBy", value);
+      syncUrl();
       renderAll();
     }));
     slot.appendChild(el("span", "pmnav-seg-label", "View"));
@@ -1832,6 +1868,7 @@
     ], view, (value) => {
       view = value;
       localStorage.setItem("roadmapView", value);
+      syncUrl();
       renderAll();
     }));
   }
@@ -2330,6 +2367,7 @@
 
   function itemCard(item, omit) {
     const card = el("article", "card" + (openCards.has(item.id) ? " open" : ""));
+    card.dataset.changeId = item.id;
 
     const main = el("button", "card-main");
     main.type = "button";
@@ -3478,6 +3516,7 @@
      residue, not the headline. */
   function groupSection(group, depth) {
     const section = el("section", "group" + (depth ? " sub" : ""));
+    section.dataset.groupKey = group.key;
     if (isCollapsed(group.key)) section.classList.add("collapsed");
     // Every initiative section takes drops, folded or not - the heading is enough of a
     // target - and "Unaligned" (initiative:none) is one too: dropping there is how a
@@ -3895,6 +3934,7 @@
     // existed - it just no longer sits directly under a section.
     function changeRow(item, bar, omit) {
       const row = el("div", "gantt-row is-change");
+      row.dataset.changeId = item.id;
 
       const label = el("button", "gantt-label");
       label.type = "button";
@@ -4402,7 +4442,67 @@
         indexProjects();
         renderTrackerBar();
         renderAll();
+        applyDeepLink();
       });
+  }
+
+  /* Consume a ?section= / ?change= deep link: expand exactly the folds between the
+     reader and the target, then scroll to it. Runs after every loadBoard so a link
+     opened before the data arrived still resolves; pendingReveal empties on first use
+     so a later websocket refetch cannot re-yank the scroll position. */
+  function sectionKeyForChange(item) {
+    if (groupBy === "person") {
+      const who = item.assigned && item.assigned.person_id;
+      return who ? `person:${who}` : "person:none";
+    }
+    if (groupBy === "initiative") {
+      const project = item.project_id ? PROJECTS_BY_ID[item.project_id] : null;
+      return project && project.initiative_id && INITIATIVES_BY_ID[project.initiative_id]
+        ? `initiative:${project.initiative_id}`
+        : "initiative:none";
+    }
+    return `product:${item.product}`;
+  }
+
+  function applyDeepLink() {
+    if (!pendingReveal) return;
+    const reveal = pendingReveal;
+    pendingReveal = null;
+    let target = null;
+    if (reveal.change) {
+      for (const items of Object.values(itemsByProduct)) {
+        const hit = items.find((i) => i.id === reveal.change);
+        if (hit) { target = hit; break; }
+      }
+    }
+    const key = target ? sectionKeyForChange(target) : reveal.section;
+    if (!key && !target) return;
+    if (key) {
+      expanded.add(key);
+      if (key.startsWith("product:")) {
+        // A nested board only renders when its ancestors are open too.
+        let productId = key.slice("product:".length);
+        while (PRODUCT_PARENTS[productId]) {
+          productId = PRODUCT_PARENTS[productId];
+          expanded.add(`product:${productId}`);
+        }
+      }
+      persistExpanded();
+    }
+    if (target) {
+      const project = target.project_id && PROJECTS_BY_ID[target.project_id];
+      openProjects.add(`${key}/project:${project ? project.id : "none"}`);
+      persistOpenProjects();
+      openCards.add(target.id);
+    }
+    renderAll();
+    const node = target
+      ? document.querySelector(`[data-change-id="${CSS.escape(target.id)}"]`)
+      : document.querySelector(`[data-group-key="${CSS.escape(key)}"]`);
+    if (node) {
+      node.classList.add("deep-linked");
+      node.scrollIntoView({ block: "center" });
+    }
   }
 
   // ---- tracker sync status ----
