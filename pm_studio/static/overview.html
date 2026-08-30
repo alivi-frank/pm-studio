@@ -107,7 +107,12 @@
 
   .progress { display: flex; align-items: center; gap: 8px; min-width: 130px; }
   .bar { flex: 1; height: 6px; border-radius: 3px; background: var(--bar-track); overflow: hidden; }
-  .bar > span { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+  .bar { display: flex; }
+  .bar > span { display: block; height: 100%; background: var(--accent); }
+  /* Motion is progress too: shipped fills solid, in-flight fills faded, so an
+     initiative that is all motion and no ships yet no longer renders an empty track
+     that contradicts its On-track chip. */
+  .bar > span.ip { opacity: 0.45; }
   .fraction { color: var(--ink-secondary); font-size: 0.85em; white-space: nowrap; }
 
   .late { color: var(--error); font-weight: 600; }
@@ -258,6 +263,13 @@
       var fill = el("span");
       fill.style.width = row.pct_done + "%";
       bar.appendChild(fill);
+      if (row.counts.total && row.counts.in_progress) {
+        var ip = el("span", "ip");
+        ip.style.width = Math.round(100 * row.counts.in_progress / row.counts.total) + "%";
+        bar.appendChild(ip);
+      }
+      bar.title = row.counts.done + " shipped · " + row.counts.in_progress
+        + " in progress · " + row.counts.pending + " pending";
       wrap.appendChild(bar);
       wrap.appendChild(el("span", "fraction", row.counts.done + "/" + row.counts.total));
       prog.appendChild(wrap);

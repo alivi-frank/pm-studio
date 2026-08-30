@@ -274,6 +274,13 @@
     justify-content: flex-end;
     margin: -12px 0 16px;
   }
+  .open-cue {
+    color: var(--accent);
+    font-size: 0.82em;
+    font-weight: 550;
+    margin-top: 6px;
+  }
+  .card:hover .open-cue { text-decoration: underline; }
   #toggle-row label {
     display: flex;
     align-items: center;
@@ -532,6 +539,7 @@
         <div class="name"></div>
         ${goal ? `<div class="goal"></div>` : ""}
         <div class="branch"></div>
+        <div class="open-cue">Open chat →</div>
         ${session.initiative_id ? `<div class="initiative-badge"></div>` : ""}
         ${session.product || (session.adopted_products || []).length ? `<div class="product-badge"></div>` : ""}
         ${note ? `<div class="result-note"></div>` : ""}
