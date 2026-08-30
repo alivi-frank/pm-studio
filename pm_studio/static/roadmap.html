@@ -4491,9 +4491,25 @@
         PEOPLE_BY_ID = Object.fromEntries(PEOPLE.map((p) => [p.id, p]));
         indexProjects();
         renderTrackerBar();
+        openFirstVisit();
         renderAll();
         applyDeepLink();
       });
+  }
+
+  /* The very first visit opens every top-level section - headings alone taught a new
+     reader nothing, and three independent reviews called the blank board the page's
+     worst moment. Only the SECTION level opens: project rows stay folded, so the page
+     still reads as a plan rather than a backlog, exactly the altitude the fold design
+     protects. Once only, then persisted like any fold the user makes themselves - from
+     then on the board comes back the way they left it. */
+  function openFirstVisit() {
+    if (localStorage.getItem("roadmapVisited")) return;
+    localStorage.setItem("roadmapVisited", "1");
+    if (expanded.size) return;  // deep link or restored state already opened something
+    invalidateGroups();
+    for (const group of currentGroups()) expanded.add(group.key);
+    persistExpanded();
   }
 
   /* Consume a ?section= / ?change= deep link: expand exactly the folds between the
