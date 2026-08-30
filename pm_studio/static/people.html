@@ -426,11 +426,18 @@
     const table = document.createElement("table");
     const thead = document.createElement("thead");
     const hrow = document.createElement("tr");
-    [["Name", ""], ["Known as", "How each tracker spells this person"],
+    // Columns that would be a dash for every row are omitted, not rendered empty: in
+    // personal mode nobody signs in, and until a tracker sync brings components there
+    // are no areas. A column of em-dashes is noise pretending to be information.
+    const showAreas = DIRECTORY.people.some((p) => (loadFor(p.id).areas || []).length);
+    const showAccounts = DIRECTORY.accounts.length > 0;
+    const headers = [["Name", ""], ["Known as", "How each tracker spells this person"],
      ["Open", "Open changes assigned to them"], ["Now", "Of those, in the Now horizon"],
-     ["Late", "Past their target date"],
-     ["Areas", "Where their open work sits — the tracker's own components or area paths"],
-     ["Signs in as", ""], [""]].forEach(([label, hint]) => {
+     ["Late", "Past their target date"]];
+    if (showAreas) headers.push(["Areas", "Where their open work sits — the tracker's own components or area paths"]);
+    if (showAccounts) headers.push(["Signs in as", ""]);
+    headers.push([""]);
+    headers.forEach(([label, hint]) => {
       const th = document.createElement("th");
       th.textContent = label;
       if (hint) th.title = hint;
@@ -444,8 +451,12 @@
       const row = document.createElement("tr");
 
       const name = document.createElement("td");
-      const label = document.createElement("span");
+      // The name links to their section on the person-grouped board - the one thing a
+      // reader wants from this row is "show me their work".
+      const label = document.createElement("a");
       label.textContent = person.name;
+      label.href = "/roadmap?group=person&section=" + encodeURIComponent("person:" + person.id);
+      label.title = "Their work on the board";
       name.appendChild(label);
       if (person.status !== "active") {
         const badge = document.createElement("span");
@@ -471,15 +482,16 @@
       cell(row, String(load.overdue), "num" + (load.overdue ? " late" : ""));
       // The tracker's areas, then the products, capped - the same hint the board's load
       // table gives, in the same order: coarse before fine.
-      const areas = (load.areas || []).slice(0, 3).map((a) => a.id);
-      cell(row, areas.length ? areas.join(", ") : "—", "areas");
+      if (showAreas) {
+        const areas = (load.areas || []).slice(0, 3).map((a) => a.id);
+        cell(row, areas.length ? areas.join(", ") : "—", "areas");
+      }
 
-      const account = document.createElement("td");
-      // Only where there are accounts to pick from: in personal mode there are none, and
-      // an empty picker would suggest a feature that is off.
-      if (DIRECTORY.accounts.length) account.appendChild(accountSelect(person, writable));
-      else account.textContent = "—";
-      row.appendChild(account);
+      if (showAccounts) {
+        const account = document.createElement("td");
+        account.appendChild(accountSelect(person, writable));
+        row.appendChild(account);
+      }
 
       const actions = document.createElement("td");
       const wrap = document.createElement("div");

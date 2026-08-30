@@ -38,8 +38,8 @@
       --ok: #2fce2f;
       --chip-ok-bg: rgba(47, 206, 47, 0.14);
       --chip-risk-bg: rgba(230, 103, 103, 0.16);
-      --chip-quiet-bg: rgba(255, 255, 255, 0.08);
-      --bar-track: rgba(255, 255, 255, 0.10);
+      --chip-quiet-bg: rgba(255, 255, 255, 0.10);
+      --bar-track: rgba(255, 255, 255, 0.18);
     }
   }
   * { box-sizing: border-box; }
@@ -71,6 +71,9 @@
     border-radius: 12px;
     padding: 20px;
     margin-bottom: 20px;
+    /* Wide tables scroll inside their own card on a narrow screen - the page itself
+       must never pan horizontally. */
+    overflow-x: auto;
   }
   h2 { font-size: 0.95em; margin: 0 0 4px; }
   h2 a { color: var(--accent); text-decoration: none; font-weight: 500; font-size: 0.85em; margin-left: 10px; }
@@ -96,7 +99,7 @@
   }
   .chip.on_track { background: var(--chip-ok-bg); color: var(--ok); }
   .chip.at_risk { background: var(--chip-risk-bg); color: var(--error); }
-  .chip.quiet, .chip.ideation, .chip.empty { background: var(--chip-quiet-bg); color: var(--ink-muted); }
+  .chip.quiet, .chip.ideation, .chip.empty { background: var(--chip-quiet-bg); color: var(--ink-secondary); }
   .chip.done, .chip.closed { background: var(--chip-ok-bg); color: var(--ink-secondary); }
 
   .initiative-title { font-weight: 550; }
