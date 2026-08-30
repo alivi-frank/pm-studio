@@ -3833,10 +3833,17 @@
       if (!s && !t && item.status !== "done") {
         const band = bands[item.bucket] || bands.later;
         lo = Math.min(lo, band[0]);
-        // Later's band is two quarters wide and mostly empty by definition; letting it
-        // set the right edge re-creates the sprawl this fit exists to kill. Its bars
-        // clamp at the frame's edge instead, which reads as "extends beyond".
-        hi = Math.max(hi, item.bucket === "later" ? band[0] + 31 * 86400000 : band[1]);
+        // Later's band is two quarters wide and Next's a full quarter, both mostly
+        // empty by definition; letting either set the right edge re-creates the sprawl
+        // this fit exists to kill (a fresh review confirmed Next alone left months of
+        // dead canvas). Each contributes its opening stretch; bars clamp at the
+        // frame's edge, which reads as "extends beyond".
+        hi = Math.max(
+          hi,
+          item.bucket === "later" ? band[0] + 31 * 86400000
+            : item.bucket === "next" ? band[0] + 45 * 86400000
+            : band[1],
+        );
       }
     }
     let start = new Date(lo);

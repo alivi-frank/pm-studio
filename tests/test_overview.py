@@ -234,6 +234,33 @@ class PlanFeedsTest(unittest.TestCase):
         self.assertEqual(data["next_up"], [])
 
 
+class IdleDaysTest(unittest.TestCase):
+    def test_open_entries_carry_their_idle_age(self) -> None:
+        fresh = change("fresh", "in_progress")
+        fresh["updated_at"] = NOW - DAY
+        stale = change("stale", "in_progress")
+        stale["updated_at"] = NOW - 12 * DAY
+        data = build([group("A", [fresh, stale])])
+        by_id = {e["id"]: e for e in data["working"]}
+        self.assertEqual(by_id["fresh"]["idle_days"], 1)
+        self.assertEqual(by_id["stale"]["idle_days"], 12)
+
+
+class StaleFeedTest(unittest.TestCase):
+    def test_stale_list_is_the_working_feeds_mirror(self) -> None:
+        fresh = change("fresh", "in_progress")
+        fresh["updated_at"] = NOW - DAY
+        stale1 = change("stale1", "in_progress")
+        stale1["updated_at"] = NOW - 9 * DAY
+        stale2 = change("stale2", "in_progress")
+        stale2["updated_at"] = NOW - 20 * DAY
+        pending_old = change("old_pending")
+        pending_old["updated_at"] = NOW - 30 * DAY  # pending: aging quietly is normal
+        data = build([group("A", [fresh, stale1, stale2, pending_old])])
+        self.assertEqual([e["id"] for e in data["stale"]], ["stale2", "stale1"])
+        self.assertEqual(data["stale_total"], 2)
+
+
 class LoadTest(unittest.TestCase):
     def test_workload_rows_are_trimmed_not_recomputed(self) -> None:
         rows = [{

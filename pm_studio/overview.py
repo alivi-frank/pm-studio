@@ -21,6 +21,8 @@ SHIPPED_FEED_CAP = 25
 OVERDUE_FEED_CAP = 25
 WORKING_FEED_CAP = 25
 NEXT_FEED_CAP = 25
+STALE_FEED_CAP = 15
+STALE_AFTER_DAYS = 7
 
 
 def _days_between(earlier: float, later: float) -> int:
@@ -110,10 +112,14 @@ def build_overview(
                 "initiative": initiative_title,
                 "target_at": change.get("target_at"),
                 "assignee": name,
-                # Fallback ordering signal only - not rendered. On a portfolio that
-                # doesn't set dates (most real ones), "dated first" alone degrades to
-                # an alphabetical slice under the feed caps; recency carries signal.
+                # Ordering signal AND the staleness answer: how long since anything
+                # touched this change. Rendered as an age once it stops being "fresh" -
+                # untouched in-flight work is the thing a standup wants surfaced.
                 "updated_at": change.get("updated_at") or 0.0,
+                "idle_days": (
+                    _days_between(change.get("updated_at") or now, now)
+                    if change.get("updated_at") else None
+                ),
             }
             if status == "in_progress":
                 working_feed.append(entry)
@@ -220,6 +226,15 @@ def build_overview(
         )
     working_feed.sort(key=plan_key)
     next_feed.sort(key=plan_key)
+    # The stale list is the working feed's mirror image: the working cap keeps the
+    # FRESHEST motion, which is exactly what hides untouched work on a real portfolio.
+    # In-progress and idle past the threshold, stalest first - staleness while active
+    # is the signal; a pending backlog item aging quietly is normal.
+    stale_feed = sorted(
+        (e for e in working_feed
+         if e["idle_days"] is not None and e["idle_days"] >= STALE_AFTER_DAYS),
+        key=lambda e: -e["idle_days"],
+    )
 
     # People carrying open work only; on a real directory a third of the rows are
     # shipped-only history and pad the table past its useful fold. They are counted,
@@ -250,6 +265,8 @@ def build_overview(
         "overdue_total": len(overdue_feed),
         "working": working_feed[:WORKING_FEED_CAP],
         "working_total": len(working_feed),
+        "stale": stale_feed[:STALE_FEED_CAP],
+        "stale_total": len(stale_feed),
         "next_up": next_feed[:NEXT_FEED_CAP],
         "next_total": len(next_feed),
         "load": load,

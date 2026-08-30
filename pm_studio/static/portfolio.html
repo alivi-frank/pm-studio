@@ -683,6 +683,9 @@
       const statusChip = document.createElement("span");
       statusChip.className = "status-chip read-only";
       statusChip.textContent = project.status;
+      // Ideation already renders as its own tooltipped flag on the same row - two
+      // labels saying one word made the card read as a rendering bug (it was).
+      if (project.status === "ideation") statusChip.hidden = true;
       titleLink.href = "/roadmap?group=initiative&section="
         + encodeURIComponent("initiative:" + (project.initiative_id || "none"));
       titleLink.title = "Its changes on the board";
