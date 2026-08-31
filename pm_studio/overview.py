@@ -62,6 +62,7 @@ def build_overview(
     initiatives = []
     shipped_feed = []
     overdue_feed = []
+    external_open = 0
     # The two halves of "what is planned next vs. being worked now", as actual items
     # rather than counts - the question a rollup alone keeps failing to answer.
     working_feed = []
@@ -121,6 +122,8 @@ def build_overview(
                     if change.get("updated_at") else None
                 ),
             }
+            if change.get("owner"):
+                external_open += 1
             if status == "in_progress":
                 working_feed.append(entry)
             elif change.get("bucket") == "next":
@@ -271,4 +274,5 @@ def build_overview(
         "next_total": len(next_feed),
         "load": load,
         "load_quiet_people": quiet_people,
+        "external_open": external_open,
     }

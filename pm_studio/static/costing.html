@@ -593,6 +593,19 @@
         + `<td class="num">${money(bucket.agent_cost)}</td>`;
       body.appendChild(tr);
     });
+    // Absence must not read as zero-cost: initiatives missing from the fold have NO
+    // recorded signals, which is a different fact than costing nothing.
+    const covered = new Set(Object.keys(cumulative.rollup.initiatives));
+    const uncosted = (report.portfolio.initiatives || [])
+      .filter((i) => !covered.has(i.id))
+      .map((i) => i.title);
+    if (uncosted.length) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td colspan="4" class="muted">No recorded cost: ${""}</td>`;
+      tr.querySelector("td").textContent = `No recorded cost: ${uncosted.join(" · ")}`;
+      tr.querySelector("td").className = "muted";
+      body.appendChild(tr);
+    }
     const totals = document.createElement("tr");
     totals.innerHTML = `<tr><td><strong>Total</strong></td>`
       + `<td class="num">${hours(cumulative.totals.hours)}</td>`

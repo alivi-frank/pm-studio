@@ -1547,6 +1547,8 @@
   let pendingReveal = (bootParams.get("section") || bootParams.get("change"))
     ? { section: bootParams.get("section"), change: bootParams.get("change") }
     : null;
+  // ?q= pre-fills the search - a link can now BE a filter ("show me the external
+  // work"). Transient like typed search: never persisted, dropped by syncUrl.
 
   function syncUrl() {
     const params = new URLSearchParams(location.search);
@@ -1612,6 +1614,9 @@
      loosest, so "a and b or c" reads (a AND b) OR c. The price is that neither word
      can itself be searched for mid-phrase, which for titles is the right trade. */
   let searchQuery = "";
+  if (typeof bootParams !== "undefined" && bootParams.get("q")) {
+    searchQuery = bootParams.get("q");
+  }
   const searchTerm = () => searchQuery.trim().toLowerCase();
   const searchActive = () => searchTerm().length > 0;
 
@@ -2610,6 +2615,11 @@
       // A person's name is one of the things people type into this box, and it works in
       // every lens rather than only the one grouped by person.
       assignedTo(change).name,
+      // External work answers to its owner's name AND to the literal word "external",
+      // so "which work is partner-owned" is one search away instead of a card-by-card
+      // scan - the filter three reviews asked for, in the control that already exists.
+      change.owner,
+      change.owner && "external",
     ].filter(Boolean).join(" · "));
   }
 

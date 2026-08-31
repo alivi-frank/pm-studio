@@ -240,6 +240,19 @@
     // Plan honesty, when a weekly plan exists: of what the Now lane held when the
     // week's plan pinned, how much shipped - with scope-added work beside it, never
     // folded in.
+    if (data.external_open > 0) {
+      // The tile IS the filter: it lands on the board pre-searched for external work.
+      var extLink = document.createElement("a");
+      extLink.href = "/roadmap?q=external";
+      extLink.style.textDecoration = "none";
+      extLink.style.color = "inherit";
+      var extBox = el("div", "stat");
+      extBox.appendChild(el("div", "n", String(data.external_open)));
+      extBox.appendChild(el("div", "l", "external / partner-owned"));
+      extBox.title = "Open work owned outside this team — click to see it on the board";
+      extLink.appendChild(extBox);
+      stats.appendChild(extLink);
+    }
     if (data.week_plan && data.week_plan.planned_total) {
       var wp = data.week_plan;
       var planBox = el("div", "stat");

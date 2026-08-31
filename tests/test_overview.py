@@ -261,6 +261,16 @@ class StaleFeedTest(unittest.TestCase):
         self.assertEqual(data["stale_total"], 2)
 
 
+class ExternalCountTest(unittest.TestCase):
+    def test_open_external_work_is_counted(self) -> None:
+        owned = change("ext")
+        owned["owner"] = "Acme Analytics"
+        shipped_ext = change("done_ext", "done", shipped_at=NOW - DAY)
+        shipped_ext["owner"] = "Acme Analytics"
+        data = build([group("A", [owned, shipped_ext, change("plain")])])
+        self.assertEqual(data["external_open"], 1)  # shipped external is history
+
+
 class LoadTest(unittest.TestCase):
     def test_workload_rows_are_trimmed_not_recomputed(self) -> None:
         rows = [{
