@@ -50,6 +50,7 @@ def build_overview(
     *,
     now: float | None = None,
     shipped_window_days: int = SHIPPED_WINDOW_DAYS,
+    cost_by_initiative: dict | None = None,
 ) -> dict:
     """`groups` is `group_changes_by_initiative` output over the whole board (every
     change appears exactly once - the invariant that pivot already guarantees), so the
@@ -185,6 +186,17 @@ def build_overview(
             "shipped_recent": shipped_in_window,
             "last_shipped_at": last_shipped_at,
         }
+        # Cost beside the initiative wherever it appears - the mission's own words.
+        # None when nothing is recorded: absence and zero are different facts.
+        if cost_by_initiative and initiative and initiative["id"] in cost_by_initiative:
+            bucket = cost_by_initiative[initiative["id"]]
+            row["cost_to_date"] = {
+                "labor": round(bucket.get("labor_cost", 0.0), 2),
+                "agent": round(bucket.get("agent_cost", 0.0), 2),
+                "hours": round(bucket.get("hours", 0.0), 1),
+            }
+        else:
+            row["cost_to_date"] = None
         initiatives.append(row)
 
     # Declared initiatives first (most open work leading), then idle-but-open, ideation,

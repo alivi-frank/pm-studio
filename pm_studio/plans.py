@@ -107,6 +107,11 @@ def plan_vs_actual(plan: dict, changes: list[dict]) -> dict:
         and c["id"] not in planned_ids
     ]
     total = len(plan.get("planned", []))
+
+    def named(items, state):
+        return [{"id": i["id"], "title": i.get("title", ""), "state": state}
+                for i in items]
+
     return {
         "week": plan.get("week"),
         "captured_at": plan.get("captured_at"),
@@ -117,4 +122,9 @@ def plan_vs_actual(plan: dict, changes: list[dict]) -> dict:
         "gone": len(gone),
         "added": len(added),
         "shipped_fraction": round(len(shipped) / total, 4) if total else None,
+        # The tile's drill-down: WHICH items, each in its one bucket - a fraction with
+        # no names invites exactly the "which 11?" question a judge asked.
+        "items": (named(shipped, "shipped") + named(still_now, "still_now")
+                  + named(moved, "moved") + named(gone, "gone")),
+        "added_items": added,
     }

@@ -158,6 +158,12 @@
     </section>
   </div>
 
+  <section id="plan-section" hidden>
+    <h2>This week's plan</h2>
+    <p class="sub" id="plan-sub"></p>
+    <table id="plan-items"><tbody></tbody></table>
+  </section>
+
   <section id="stale-section" hidden>
     <h2>Gone quiet</h2>
     <p class="sub" id="stale-sub">In progress, but untouched for a week or more — stalest first.</p>
@@ -256,12 +262,43 @@
     if (data.week_plan && data.week_plan.planned_total) {
       var wp = data.week_plan;
       var planBox = el("div", "stat");
+      planBox.style.cursor = "pointer";
       planBox.appendChild(el("div", "n", wp.shipped + "/" + wp.planned_total));
       planBox.appendChild(el("div", "l",
         "of this week's plan shipped" + (wp.added ? " · " + wp.added + " added" : "")));
-      planBox.title = "Planned = open Now-lane changes when the week's plan pinned ("
-        + wp.still_now + " still in Now, " + wp.moved + " moved, " + wp.gone + " gone)";
+      planBox.title = "Click for the item-by-item plan";
+      planBox.addEventListener("click", function () {
+        var section = document.getElementById("plan-section");
+        section.hidden = !section.hidden;
+        if (!section.hidden) section.scrollIntoView({ block: "nearest" });
+      });
       stats.appendChild(planBox);
+
+      var planBody = document.querySelector("#plan-items tbody");
+      planBody.textContent = "";
+      var STATE_LABEL = { shipped: "shipped", still_now: "still in Now",
+                          moved: "moved out", gone: "gone" };
+      (wp.items || []).forEach(function (entry) {
+        var tr = document.createElement("tr");
+        var name = td(null, null);
+        name.appendChild(link("/roadmap?change=" + encodeURIComponent(entry.id), null, entry.title));
+        tr.appendChild(name);
+        var state = td(entry.state === "shipped" ? null : "muted",
+          STATE_LABEL[entry.state] || entry.state);
+        tr.appendChild(state);
+        planBody.appendChild(tr);
+      });
+      (wp.added_items || []).forEach(function (entry) {
+        var tr = document.createElement("tr");
+        var name = td(null, null);
+        name.appendChild(link("/roadmap?change=" + encodeURIComponent(entry.id), null, entry.title));
+        tr.appendChild(name);
+        tr.appendChild(td("idle", "added after the plan"));
+        planBody.appendChild(tr);
+      });
+      document.getElementById("plan-sub").textContent =
+        "Pinned " + (wp.captured_at ? new Date(wp.captured_at * 1000).toLocaleDateString() : "")
+        + " — every planned item in exactly one state; work added after the plan is listed, never counted against it.";
     }
 
     var tbody = document.querySelector("#initiatives tbody");
@@ -283,6 +320,13 @@
       var metaBits = [];
       if (row.products.length) metaBits.push(row.products.join(" · "));
       if (row.shipped_recent) metaBits.push(row.shipped_recent + " shipped recently");
+      // Cost beside the initiative wherever it appears; absence of a figure means
+      // nothing recorded, and stays silent rather than reading as zero.
+      if (row.cost_to_date) {
+        var spend = row.cost_to_date.labor + row.cost_to_date.agent;
+        metaBits.push("cost to date " + spend.toLocaleString(undefined,
+          {maximumFractionDigits: 0}) + " " + (data.currency || "USD"));
+      }
       if (metaBits.length) name.appendChild(el("div", "initiative-meta", metaBits.join(" — ")));
       tr.appendChild(name);
 

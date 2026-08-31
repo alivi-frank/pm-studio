@@ -1671,7 +1671,16 @@ def overview_data() -> dict:
     # often, and the overview is the page every day starts on.
     plan_store.ensure_current(changes)
     groups = portfolio_store.group_changes_by_initiative(changes)
-    payload = build_overview(groups, workload(changes))
+    cumulative = costing_store.cumulative_to_date(
+        user_ids=None if CONFIG.is_enterprise else ["local"]
+    )
+    cost_rollup = costing_store.rollup_to_initiatives(
+        cumulative["by_project"], portfolio_store
+    )["initiatives"]
+    payload = build_overview(
+        groups, workload(changes), cost_by_initiative=cost_rollup
+    )
+    payload["currency"] = costing_store.currency
     plan = plan_store.plan_for(current_week())
     payload["week_plan"] = plan_vs_actual(plan, changes) if plan else None
     return payload
