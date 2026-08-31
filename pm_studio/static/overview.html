@@ -123,6 +123,12 @@
   @media (max-width: 860px) { .cols { grid-template-columns: 1fr; } }
   .feed-empty { color: var(--ink-muted); font-size: 0.86em; padding: 6px 0; }
   .days { white-space: nowrap; }
+  /* Audience depth is zoom, not separate screens: exec keeps the numbers, the
+     initiative table and the risks; the item-level feeds are the team's altitude. */
+  body.depth-exec #working-next-row,
+  body.depth-exec #plan-section,
+  body.depth-exec #stale-section,
+  body.depth-exec #load-section { display: none; }
 
   /* Print = the meeting handout. Chrome goes, ink comes back, sections hold together.
      Colors are forced light because most printers and PDF exports assume it. */
@@ -158,7 +164,7 @@
     </table>
   </section>
 
-  <div class="cols">
+  <div class="cols" id="working-next-row">
     <section>
       <h2>Working now</h2>
       <p class="sub" id="working-sub">Changes in progress, dated commitments first.</p>
@@ -200,7 +206,7 @@
     </section>
   </div>
 
-  <section>
+  <section id="load-section">
     <h2>Who's on what<a href="/people">people →</a></h2>
     <p class="sub">People carrying open work. Unassigned work is a row, not a footnote.</p>
     <table id="load">
@@ -224,7 +230,10 @@
     return node;
   }
   function td(className, text) { return el("td", className, text); }
-  var SCOPE = new URLSearchParams(location.search).get("product") || "";
+  var PARAMS = new URLSearchParams(location.search);
+  var SCOPE = PARAMS.get("product") || "";
+  var DEPTH = PARAMS.get("depth") === "exec" ? "exec" : "full";
+  if (DEPTH === "exec") document.body.classList.add("depth-exec");
   function boardLink(query, className, text) {
     // Every outbound board link carries the scope, so a scoped stakeholder view
     // drills into a board scoped the same way.
@@ -285,6 +294,7 @@
       lines.push("- " + parts.join(" · "));
     });
     function feed(heading, entries, tail) {
+      if (DEPTH === "exec" && heading !== "OVERDUE") return;
       if (!entries || !entries.length) return;
       lines.push("");
       lines.push(heading);
@@ -336,6 +346,26 @@
       });
       slot.appendChild(label);
       slot.appendChild(select);
+
+      var depthLabel = el("span", "pmnav-seg-label", "Depth");
+      var depthSelect = document.createElement("select");
+      depthSelect.className = "pmnav-seg mini";
+      depthSelect.title = "Exec keeps the numbers, initiatives and risks; Full adds every item-level feed";
+      [["full", "Full"], ["exec", "Exec"]].forEach(function (pair) {
+        var option = document.createElement("option");
+        option.value = pair[0];
+        option.textContent = pair[1];
+        if (pair[0] === DEPTH) option.selected = true;
+        depthSelect.appendChild(option);
+      });
+      depthSelect.addEventListener("change", function () {
+        var params = new URLSearchParams(location.search);
+        if (depthSelect.value === "exec") params.set("depth", "exec");
+        else params.delete("depth");
+        location.search = params.toString();
+      });
+      slot.appendChild(depthLabel);
+      slot.appendChild(depthSelect);
 
       var copyBtn = document.createElement("button");
       copyBtn.type = "button";
