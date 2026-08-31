@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PM Studio — Overview</title>
+<link rel="stylesheet" href="/static/nav.css" />
+<script src="/static/nav.js"></script>
+<style>
+  :root {
+    color-scheme: light dark;
+    --surface: #fcfcfb;
+    --page: #f9f9f7;
+    --ink-primary: #0b0b0b;
+    --ink-secondary: #52514e;
+    --ink-muted: #898781;
+    --border: rgba(11, 11, 11, 0.10);
+    --accent: #2a78d6;
+    --error: #d03b3b;
+    --warn: #b57e10;
+    --ok: #0ca30c;
+    --chip-ok-bg: rgba(12, 163, 12, 0.10);
+    --chip-risk-bg: rgba(208, 59, 59, 0.10);
+    --chip-quiet-bg: rgba(11, 11, 11, 0.06);
+    --bar-track: rgba(11, 11, 11, 0.08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface: #1a1a19;
+      --page: #0d0d0d;
+      --ink-primary: #ffffff;
+      --ink-secondary: #c3c2b7;
+      --ink-muted: #898781;
+      --border: rgba(255, 255, 255, 0.10);
+      --accent: #3987e5;
+      --error: #e66767;
+      --warn: #d9a13a;
+      --ok: #2fce2f;
+      --chip-ok-bg: rgba(47, 206, 47, 0.14);
+      --chip-risk-bg: rgba(230, 103, 103, 0.16);
+      --chip-quiet-bg: rgba(255, 255, 255, 0.10);
+      --bar-track: rgba(255, 255, 255, 0.18);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--page);
+    color: var(--ink-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  main { padding: 24px; max-width: 1100px; margin: 0 auto; }
+
+  /* headline numbers: the ten-second read */
+  .stats { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
+  .stat {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 18px;
+    min-width: 118px;
+  }
+  .stat .n { font-size: 1.5em; font-weight: 650; line-height: 1.2; }
+  .stat .n.bad { color: var(--error); }
+  .stat .l { color: var(--ink-muted); font-size: 0.78em; margin-top: 2px; }
+
+  section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 20px;
+    /* Wide tables scroll inside their own card on a narrow screen - the page itself
+       must never pan horizontally. */
+    overflow-x: auto;
+  }
+  h2 { font-size: 0.95em; margin: 0 0 4px; }
+  h2 a { color: var(--accent); text-decoration: none; font-weight: 500; font-size: 0.85em; margin-left: 10px; }
+  p.sub { margin: 0 0 14px; color: var(--ink-muted); font-size: 0.83em; line-height: 1.5; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.88em; }
+  th {
+    text-align: left; font-weight: 500; font-size: 0.82em;
+    color: var(--ink-muted);
+    padding: 0 10px 8px 0;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  th.num, td.num { text-align: right; }
+  td { padding: 9px 10px 9px 0; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  tr:last-child td { border-bottom: 0; }
+  td .muted, .muted { color: var(--ink-muted); }
+  td .second { color: var(--ink-secondary); }
+
+  .chip {
+    display: inline-block; padding: 2px 9px; border-radius: 999px;
+    font-size: 0.78em; font-weight: 550; white-space: nowrap;
+  }
+  .chip.on_track { background: var(--chip-ok-bg); color: var(--ok); }
+  .chip.at_risk { background: var(--chip-risk-bg); color: var(--error); }
+  .chip.quiet, .chip.ideation, .chip.empty { background: var(--chip-quiet-bg); color: var(--ink-secondary); }
+  .chip.done, .chip.closed { background: var(--chip-ok-bg); color: var(--ink-secondary); }
+
+  .initiative-title { font-weight: 550; }
+  .initiative-meta { color: var(--ink-muted); font-size: 0.85em; margin-top: 2px; }
+
+  .progress { display: flex; align-items: center; gap: 8px; min-width: 130px; }
+  .bar { flex: 1; height: 6px; border-radius: 3px; background: var(--bar-track); overflow: hidden; }
+  .bar { display: flex; }
+  .bar > span { display: block; height: 100%; background: var(--accent); }
+  /* Motion is progress too: shipped fills solid, in-flight fills faded, so an
+     initiative that is all motion and no ships yet no longer renders an empty track
+     that contradicts its On-track chip. */
+  .bar > span.ip { opacity: 0.45; }
+  .fraction { color: var(--ink-secondary); font-size: 0.85em; white-space: nowrap; }
+
+  .late { color: var(--error); font-weight: 600; }
+  .idle { color: var(--warn); font-size: 0.82em; white-space: nowrap; }
+  td a { color: inherit; text-decoration: none; }
+  td a:hover { color: var(--accent); text-decoration: underline; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 860px) { .cols { grid-template-columns: 1fr; } }
+  .feed-empty { color: var(--ink-muted); font-size: 0.86em; padding: 6px 0; }
+  .days { white-space: nowrap; }
+</style>
+</head>
+<body>
+<div id="pm-nav" data-page="overview"></div>
+<main>
+  <div class="stats" id="stats"></div>
+
+  <section>
+    <h2>In flight<a href="/roadmap">board →</a><a href="/portfolio">portfolio →</a></h2>
+    <p class="sub">Initiatives with open or recently shipped work, most active first — maintenance, unaligned and recently finished work trail the list. Health is derived from the board: overdue work means at risk, open work with nothing moving means quiet.</p>
+    <table id="initiatives">
+      <thead><tr>
+        <th>Initiative</th><th>Health</th><th>Progress</th>
+        <th class="num">In&nbsp;progress</th><th class="num">Overdue</th>
+        <th>People</th><th id="target-head">Next&nbsp;target</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <div class="cols">
+    <section>
+      <h2>Working now</h2>
+      <p class="sub" id="working-sub">Changes in progress, dated commitments first.</p>
+      <table id="working"><tbody></tbody></table>
+      <div class="feed-empty" id="working-empty" hidden>Nothing is in progress.</div>
+    </section>
+    <section>
+      <h2>Up next</h2>
+      <p class="sub" id="next-sub">Planned next, not yet started.</p>
+      <table id="next"><tbody></tbody></table>
+      <div class="feed-empty" id="next-empty" hidden>Nothing is queued as next.</div>
+    </section>
+  </div>
+
+  <section id="plan-section" hidden>
+    <h2>This week's plan</h2>
+    <p class="sub" id="plan-sub"></p>
+    <table id="plan-items"><tbody></tbody></table>
+  </section>
+
+  <section id="stale-section" hidden>
+    <h2>Gone quiet</h2>
+    <p class="sub" id="stale-sub">In progress, but untouched for a week or more — stalest first.</p>
+    <table id="stale"><tbody></tbody></table>
+  </section>
+
+  <div class="cols">
+    <section>
+      <h2>Shipped recently</h2>
+      <p class="sub" id="shipped-sub"></p>
+      <table id="shipped"><tbody></tbody></table>
+      <div class="feed-empty" id="shipped-empty" hidden>Nothing shipped in this window.</div>
+    </section>
+    <section>
+      <h2>Overdue</h2>
+      <p class="sub">Open work past its target date, most late first.</p>
+      <table id="overdue"><tbody></tbody></table>
+      <div class="feed-empty" id="overdue-empty" hidden>Nothing is overdue.</div>
+    </section>
+  </div>
+
+  <section>
+    <h2>Who's on what<a href="/people">people →</a></h2>
+    <p class="sub">People carrying open work. Unassigned work is a row, not a footnote.</p>
+    <table id="load">
+      <thead><tr>
+        <th>Person</th><th class="num">Open</th><th class="num">In progress</th>
+        <th class="num">Now</th><th class="num">Late</th><th class="num">Shipped</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="feed-empty" id="load-quiet" hidden></div>
+  </section>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  function el(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+  function td(className, text) { return el("td", className, text); }
+  function link(href, className, text) {
+    var a = el("a", className, text);
+    a.href = href;
+    return a;
+  }
+
+  var HEALTH_LABEL = {
+    on_track: "On track", at_risk: "At risk", quiet: "Quiet",
+    ideation: "Ideation", done: "Done", closed: "Closed", empty: "Empty",
+  };
+
+  function stat(n, label, bad) {
+    var box = el("div", "stat");
+    var num = el("div", "n" + (bad && n > 0 ? " bad" : ""), String(n));
+    box.appendChild(num);
+    box.appendChild(el("div", "l", label));
+    return box;
+  }
+
+  function render(data) {
+    var open = 0, inProgress = 0;
+    data.initiatives.forEach(function (row) {
+      if (row.status !== "closed") { open += row.open; inProgress += row.counts.in_progress; }
+    });
+    var stats = document.getElementById("stats");
+    stats.textContent = "";
+    var active = data.initiatives.filter(function (r) {
+      return r.status !== "closed" && r.id !== null && !r.is_maintenance && r.open > 0;
+    }).length;
+    stats.appendChild(stat(active, "initiatives in flight"));
+    stats.appendChild(stat(inProgress, "changes in progress"));
+    stats.appendChild(stat(open, "open changes"));
+    stats.appendChild(stat(data.overdue_total, "overdue", true));
+    stats.appendChild(stat(data.shipped_total, "shipped, last " + data.shipped_window_days + "d"));
+    // Plan honesty, when a weekly plan exists: of what the Now lane held when the
+    // week's plan pinned, how much shipped - with scope-added work beside it, never
+    // folded in.
+    if (data.external_open > 0) {
+      // The tile IS the filter: it lands on the board pre-searched for external work.
+      var extLink = document.createElement("a");
+      extLink.href = "/roadmap?q=external";
+      extLink.style.textDecoration = "none";
+      extLink.style.color = "inherit";
+      var extBox = el("div", "stat");
+      extBox.appendChild(el("div", "n", String(data.external_open)));
+      extBox.appendChild(el("div", "l", "external / partner-owned"));
+      extBox.title = "Open work owned outside this team — click to see it on the board";
+      extLink.appendChild(extBox);
+      stats.appendChild(extLink);
+    }
+    if (data.week_plan && data.week_plan.planned_total) {
+      var wp = data.week_plan;
+      var planBox = el("div", "stat");
+      planBox.style.cursor = "pointer";
+      planBox.appendChild(el("div", "n", wp.shipped + "/" + wp.planned_total));
+      planBox.appendChild(el("div", "l",
+        "of this week's plan shipped" + (wp.added ? " · " + wp.added + " added" : "")));
+      planBox.title = "Click for the item-by-item plan";
+      planBox.addEventListener("click", function () {
+        var section = document.getElementById("plan-section");
+        section.hidden = !section.hidden;
+        if (!section.hidden) section.scrollIntoView({ block: "nearest" });
+      });
+      stats.appendChild(planBox);
+
+      var planBody = document.querySelector("#plan-items tbody");
+      planBody.textContent = "";
+      var STATE_LABEL = { shipped: "shipped", still_now: "still in Now",
+                          moved: "moved out", gone: "gone" };
+      (wp.items || []).forEach(function (entry) {
+        var tr = document.createElement("tr");
+        var name = td(null, null);
+        name.appendChild(link("/roadmap?change=" + encodeURIComponent(entry.id), null, entry.title));
+        tr.appendChild(name);
+        var state = td(entry.state === "shipped" ? null : "muted",
+          STATE_LABEL[entry.state] || entry.state);
+        tr.appendChild(state);
+        planBody.appendChild(tr);
+      });
+      (wp.added_items || []).forEach(function (entry) {
+        var tr = document.createElement("tr");
+        var name = td(null, null);
+        name.appendChild(link("/roadmap?change=" + encodeURIComponent(entry.id), null, entry.title));
+        tr.appendChild(name);
+        tr.appendChild(td("idle", "added after the plan"));
+        planBody.appendChild(tr);
+      });
+      document.getElementById("plan-sub").textContent =
+        "Pinned " + (wp.captured_at ? new Date(wp.captured_at * 1000).toLocaleDateString() : "")
+        + " — every planned item in exactly one state; work added after the plan is listed, never counted against it.";
+    }
+
+    var tbody = document.querySelector("#initiatives tbody");
+    tbody.textContent = "";
+    var anyTarget = data.initiatives.some(function (row) { return row.next_target; });
+    var targetHead = document.getElementById("target-head");
+    if (targetHead) targetHead.hidden = !anyTarget;
+    data.initiatives.forEach(function (row) {
+      var tr = document.createElement("tr");
+
+      var name = td(null, null);
+      var sectionKey = "initiative:" + (row.id || "none");
+      var titleLink = link("/roadmap?group=initiative&section=" + encodeURIComponent(sectionKey),
+        null, row.title || "Unaligned work");
+      titleLink.title = "Open on the board";
+      var titleWrap = el("div", "initiative-title");
+      titleWrap.appendChild(titleLink);
+      name.appendChild(titleWrap);
+      var metaBits = [];
+      if (row.products.length) metaBits.push(row.products.join(" · "));
+      if (row.shipped_recent) metaBits.push(row.shipped_recent + " shipped recently");
+      // Cost beside the initiative wherever it appears; absence of a figure means
+      // nothing recorded, and stays silent rather than reading as zero.
+      if (row.cost_to_date) {
+        var spend = row.cost_to_date.labor + row.cost_to_date.agent;
+        metaBits.push("cost to date " + spend.toLocaleString(undefined,
+          {maximumFractionDigits: 0}) + " " + (data.currency || "USD"));
+      }
+      if (metaBits.length) name.appendChild(el("div", "initiative-meta", metaBits.join(" — ")));
+      tr.appendChild(name);
+
+      var health = td(null, null);
+      health.appendChild(el("span", "chip " + row.health, HEALTH_LABEL[row.health] || row.health));
+      tr.appendChild(health);
+
+      var prog = td(null, null);
+      var wrap = el("div", "progress");
+      var bar = el("div", "bar");
+      var fill = el("span");
+      fill.style.width = row.pct_done + "%";
+      bar.appendChild(fill);
+      if (row.counts.total && row.counts.in_progress) {
+        var ip = el("span", "ip");
+        ip.style.width = Math.round(100 * row.counts.in_progress / row.counts.total) + "%";
+        bar.appendChild(ip);
+      }
+      bar.title = row.counts.done + " shipped · " + row.counts.in_progress
+        + " in progress · " + row.counts.pending + " pending";
+      wrap.appendChild(bar);
+      wrap.appendChild(el("span", "fraction", row.counts.done + "/" + row.counts.total));
+      prog.appendChild(wrap);
+      tr.appendChild(prog);
+
+      tr.appendChild(td("num", String(row.counts.in_progress)));
+      var overdue = td("num", String(row.overdue));
+      if (row.overdue > 0) overdue.className += " late";
+      tr.appendChild(overdue);
+
+      var names = row.people.slice(0, 3).map(function (p) { return p.name; });
+      var extra = row.people.length - names.length;
+      tr.appendChild(td("second", names.join(", ") + (extra > 0 ? " +" + extra : "") || ""));
+
+      if (anyTarget) tr.appendChild(td("muted days", row.next_target || "—"));
+      tbody.appendChild(tr);
+    });
+
+    function planList(tableId, emptyId, subId, entries, total, noun) {
+      var body = document.querySelector("#" + tableId + " tbody");
+      body.textContent = "";
+      // A column of em-dashes is noise, not information: portfolios that don't set
+      // target dates get no date column at all.
+      var anyDated = entries.some(function (entry) { return entry.target_at; });
+      entries.forEach(function (entry) {
+        var tr = document.createElement("tr");
+        var name = td(null, null);
+        var line = el("div");
+        line.appendChild(link("/roadmap?change=" + encodeURIComponent(entry.id), null, entry.title));
+        name.appendChild(line);
+        var metaBits = [entry.initiative, entry.product, entry.assignee].filter(Boolean);
+        name.appendChild(el("div", "initiative-meta", metaBits.join(" — ")));
+        tr.appendChild(name);
+        // Untouched-for-a-week in-flight work is the standup's stalest news; below
+        // that threshold age is noise.
+        if (entry.idle_days >= 7) {
+          name.appendChild(el("div", "idle", "untouched " + entry.idle_days + "d"));
+        }
+        if (anyDated) tr.appendChild(td("muted num days", entry.target_at || "—"));
+        body.appendChild(tr);
+      });
+      document.getElementById(emptyId).hidden = entries.length > 0;
+      if (total > entries.length) {
+        document.getElementById(subId).textContent =
+          noun + " — showing " + entries.length + " of " + total + ".";
+      }
+    }
+    planList("working", "working-empty", "working-sub",
+      data.working || [], data.working_total || 0, "Changes in progress, dated commitments first");
+    planList("next", "next-empty", "next-sub",
+      data.next_up || [], data.next_total || 0, "Planned next, not yet started");
+
+    // Only present when there is something to say - an empty "gone quiet" section
+    // would itself be noise.
+    var staleSection = document.getElementById("stale-section");
+    var staleEntries = data.stale || [];
+    staleSection.hidden = staleEntries.length === 0;
+    var staleBody = document.querySelector("#stale tbody");
+    staleBody.textContent = "";
+    staleEntries.forEach(function (entry) {
+      var tr = document.createElement("tr");
+      var name = td(null, null);
+      var line = el("div");
+      line.appendChild(link("/roadmap?change=" + encodeURIComponent(entry.id), null, entry.title));
+      name.appendChild(line);
+      name.appendChild(el("div", "initiative-meta",
+        [entry.initiative, entry.product, entry.assignee].filter(Boolean).join(" — ")));
+      tr.appendChild(name);
+      tr.appendChild(td("idle num days", "untouched " + entry.idle_days + "d"));
+      staleBody.appendChild(tr);
+    });
+    if ((data.stale_total || 0) > staleEntries.length) {
+      document.getElementById("stale-sub").textContent =
+        "In progress, untouched a week or more — showing " + staleEntries.length
+        + " of " + data.stale_total + ", stalest first.";
+    }
+
+    document.getElementById("shipped-sub").textContent =
+      "Last " + data.shipped_window_days + " days, newest first" +
+      (data.shipped_total > data.shipped.length
+        ? " — showing " + data.shipped.length + " of " + data.shipped_total : "") + ".";
+    var shipped = document.querySelector("#shipped tbody");
+    shipped.textContent = "";
+    data.shipped.forEach(function (entry) {
+      var tr = document.createElement("tr");
+      var name = td(null, null);
+      var line = el("div");
+      line.appendChild(link("/roadmap?change=" + encodeURIComponent(entry.id), null, entry.title));
+      name.appendChild(line);
+      name.appendChild(el("div", "initiative-meta",
+        [entry.initiative, entry.product, entry.assignee].filter(Boolean).join(" — ")));
+      tr.appendChild(name);
+      tr.appendChild(td("muted num days",
+        entry.days_ago === 0 ? "today" : entry.days_ago + "d ago"));
+      shipped.appendChild(tr);
+    });
+    document.getElementById("shipped-empty").hidden = data.shipped.length > 0;
+
+    var overdueBody = document.querySelector("#overdue tbody");
+    overdueBody.textContent = "";
+    data.overdue.forEach(function (entry) {
+      var tr = document.createElement("tr");
+      var name = td(null, null);
+      var line = el("div");
+      line.appendChild(link("/roadmap?change=" + encodeURIComponent(entry.id), null, entry.title));
+      name.appendChild(line);
+      name.appendChild(el("div", "initiative-meta",
+        [entry.initiative, entry.product, entry.assignee].filter(Boolean).join(" — ")));
+      tr.appendChild(name);
+      tr.appendChild(td("late num days", entry.days_late + "d late"));
+      overdueBody.appendChild(tr);
+    });
+    document.getElementById("overdue-empty").hidden = data.overdue.length > 0;
+
+    var load = document.querySelector("#load tbody");
+    load.textContent = "";
+    data.load.forEach(function (row) {
+      var tr = document.createElement("tr");
+      // The unassigned row arrives with an empty display name (a sentinel person id);
+      // it is usually the largest row, so it must say what it is.
+      var personKey = row.name && row.person_id ? "person:" + row.person_id : "person:none";
+      var personCell = td(row.name ? null : "muted", null);
+      personCell.appendChild(link(
+        "/roadmap?group=person&section=" + encodeURIComponent(personKey),
+        null, row.name || "Unassigned"));
+      tr.appendChild(personCell);
+      tr.appendChild(td("num", String(row.open)));
+      tr.appendChild(td("num", String(row.in_progress)));
+      tr.appendChild(td("num", String(row.now)));
+      var late = td("num", String(row.overdue));
+      if (row.overdue > 0) late.className += " late";
+      tr.appendChild(late);
+      tr.appendChild(td("num muted", String(row.shipped)));
+      load.appendChild(tr);
+    });
+    var quietNote = document.getElementById("load-quiet");
+    if (data.load_quiet_people > 0) {
+      quietNote.textContent = data.load_quiet_people +
+        " more " + (data.load_quiet_people === 1 ? "person carries" : "people carry") +
+        " nothing open right now.";
+      quietNote.hidden = false;
+    } else {
+      quietNote.hidden = true;
+    }
+  }
+
+  function refresh() {
+    fetch("/overview/data", { headers: { Accept: "application/json" } })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) { if (data) render(data); });
+  }
+
+  refresh();
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) refresh();
+  });
+})();
+</script>
+</body>
+</html>

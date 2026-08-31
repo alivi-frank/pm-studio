@@ -518,6 +518,32 @@ class CostingStore:
             },
         }
 
+    def weeks_with_signals(self) -> list[str]:
+        return sorted({week_key(s.at) for s in self._iter_signals()})
+
+    def cumulative_to_date(self, user_ids: list[str] | None = None) -> dict:
+        """Every recorded week folded into one to-date view.
+
+        Additive by construction: each week's distribution reconciles to that week's
+        capacity, so their sum is exact - no re-derivation, no double counting. This is
+        the answer to "what has this cost SO FAR", which a single week can never give;
+        the weekly view stays the operational lens, this is the portfolio one.
+        """
+        weeks = self.weeks_with_signals()
+        by_project: dict[str, dict] = {}
+        totals = {"hours": 0.0, "labor_cost": 0.0, "agent_cost": 0.0}
+        for week in weeks:
+            report = self.distribute_week(week, user_ids=user_ids)
+            for project, bucket in report["by_project"].items():
+                target = by_project.setdefault(
+                    project, {"hours": 0.0, "labor_cost": 0.0, "agent_cost": 0.0}
+                )
+                for key in target:
+                    target[key] = round(target[key] + bucket.get(key, 0.0), 4)
+            for key in totals:
+                totals[key] = round(totals[key] + report["totals"][key], 4)
+        return {"weeks": weeks, "by_project": by_project, "totals": totals}
+
     @staticmethod
     def _totals_by_project(
         rows: list[UserWeek], agent_cost_by_project: dict[str, float]

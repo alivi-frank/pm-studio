@@ -25,6 +25,14 @@
   // arrows between them in the bar are this relationship, and `what` is the one-line
   // descriptor the context row shows for whichever stop you are standing on. See
   // docs/ARCHITECTURE.md section 3b for the model this mirrors.
+  // The read-first answer to "what are we working on?" - a summary of the work model,
+  // not a stop on it, so it leads the bar but stays outside the arrow chain the same
+  // way Systems trails it.
+  var OVERVIEW_TAB = {
+    page: "overview", href: "/overview", label: "Overview",
+    what: "in flight · shipped recently · who's on what",
+  };
+
   var CORE_TABS = [
     { page: "portfolio", href: "/portfolio", label: "Portfolio", what: "goals · initiatives · projects" },
     { page: "roadmap", href: "/roadmap", label: "Roadmap", what: "changes · now / next / later" },
@@ -63,6 +71,7 @@
   // Per-page chrome. `tab` marks which top-level tab lights up (session-scoped pages
   // light up "Sessions", because that is where they live).
   var PAGES = {
+    overview: { tab: "overview" },
     sessions: { tab: "sessions" },
     portfolio: { tab: "portfolio" },
     roadmap: { tab: "roadmap" },
@@ -133,6 +142,8 @@
     bar.appendChild(link("/", "pmnav-brand", "PM Studio"));
 
     var tabs = el("div", "pmnav-tabs");
+    tabs.appendChild(makeTab(OVERVIEW_TAB, current, "pmnav-tab"));
+    tabs.appendChild(el("span", "pmnav-group-sep"));
     CORE_TABS.forEach(function (tab, i) {
       // The work model, drawn where the destinations already are: intent narrowing into
       // work. Decorative - the tabs are the navigation, the arrow is the relationship.
@@ -141,7 +152,9 @@
         arrow.setAttribute("aria-hidden", "true");
         tabs.appendChild(arrow);
       }
-      tabs.appendChild(makeTab(tab, current, "pmnav-tab"));
+      tabs.appendChild(makeTab(
+        tab.page === "sessions" ? { page: tab.page, href: sessionsHref, label: tab.label, what: tab.what } : tab,
+        current, "pmnav-tab"));
     });
 
     if (info && info.systems_declared) {
@@ -193,7 +206,7 @@
   // set - the bar above is the only place destinations are listed.
   function buildPageContext(spec) {
     var row = el("div", "pmnav-context");
-    var all = CORE_TABS.concat(REFERENCE_TABS, ADMIN_TABS);
+    var all = [OVERVIEW_TAB].concat(CORE_TABS, REFERENCE_TABS, ADMIN_TABS);
     var here = null;
     all.forEach(function (tab) { if (tab.page === spec.tab) here = tab; });
 
@@ -209,7 +222,7 @@
 
     var crumbs = el("nav", "pmnav-crumbs");
     crumbs.setAttribute("aria-label", "Breadcrumb");
-    crumbs.appendChild(link("/", null, "Sessions"));
+    crumbs.appendChild(link(sessionsHref, null, "Sessions"));
     var chev = el("span", "pmnav-chev", "›");
     chev.setAttribute("aria-hidden", "true");
     crumbs.appendChild(chev);
@@ -241,6 +254,10 @@
     return row;
   }
 
+  // Where the sessions list lives: "/" by default, "/sessions-page" when the
+  // deployment points the front door at the overview (see /auth/me `landing`).
+  var sessionsHref = "/";
+
   function render() {
     var mount = document.getElementById("pm-nav");
     if (!mount) return;
@@ -248,6 +265,7 @@
     if (!spec) return;
 
     auth.then(function (info) {
+      if (info && info.landing === "overview") sessionsHref = "/sessions-page";
       mount.textContent = "";
       mount.appendChild(buildBar(spec.tab, info));
       var context = spec.context === "session"

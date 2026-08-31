@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>PM Studio — Sessions</title>
 <link rel="stylesheet" href="/static/nav.css" />
 <script src="/static/nav.js"></script>
@@ -93,6 +94,22 @@
     color: var(--ink-primary);
     font: inherit;
   }
+  #new-form .field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+  #new-form .field.wide { flex: 1 1 150px; }
+  #new-form .field > span {
+    font-size: 0.72em;
+    color: var(--ink-muted);
+    padding-left: 2px;
+  }
+  /* Inside a labeled field the select must not inherit the row's grow rule on the
+     column axis - it would stretch to fill the tallest field's height. */
+  #new-form .field select { width: 100%; flex: 0 0 auto; }
   #new-form select {
     /* An explicit basis, so the longest option's width no longer drives the layout. */
     flex: 1 1 150px;
@@ -257,6 +274,13 @@
     justify-content: flex-end;
     margin: -12px 0 16px;
   }
+  .open-cue {
+    color: var(--accent);
+    font-size: 0.82em;
+    font-weight: 550;
+    margin-top: 6px;
+  }
+  .card:hover .open-cue { text-decoration: underline; }
   #toggle-row label {
     display: flex;
     align-items: center;
@@ -296,24 +320,34 @@
 <div id="pm-nav" data-page="sessions"></div>
 <header>
   <h1>Sessions</h1>
-  <p>Each session is its own PM conversation on its own git branch/worktree - work on several at once, then merge back when ready.</p>
+  <p>Each session is a PM conversation working in its own copy of the code. Open one to chat with its PM, watch the dev tasks it dispatches, and merge the finished work back to main. Run several side by side - they can't step on each other.</p>
 </header>
 <main>
   <form id="new-form">
     <input id="new-name" type="text" placeholder="Session name (optional — the PM will auto-title this session)" />
-    <select id="new-product"><option value="">General (no specific product)</option></select>
+    <!-- Every picker wears its name: three judges independently called the unlabeled
+         row opaque ("what is Opus? what is Build?"), and a truncated selected value
+         was the only clue to what a control did. -->
+    <label class="field wide"><span>Product</span>
+      <select id="new-product"><option value="">General (no specific product)</option></select>
+    </label>
     <!-- Hidden until the deployment actually has initiatives to pick: on an instance not
          using the work model this would be a permanently empty control. -->
-    <select id="new-initiative" hidden
-            title="Work IN an initiative instead of on one product. Leave the product as General when the initiative spans several - the session finds out which as it goes, and adopts those boards then.">
-      <option value="">No initiative</option>
-    </select>
-    <select id="new-model"></select>
-    <select id="new-mode"
-            title="Build sessions dispatch dev tasks that change code. Research / strategy sessions can't - the PM researches, specs and plans only, until you switch it to build from its chat header.">
-      <option value="build">Build</option>
-      <option value="research">Research / strategy</option>
-    </select>
+    <label class="field wide" id="new-initiative-field" hidden>
+      <span>Initiative</span>
+      <select id="new-initiative"
+              title="Work IN an initiative instead of on one product. Leave the product as General when the initiative spans several - the session finds out which as it goes, and adopts those boards then.">
+        <option value="">No initiative</option>
+      </select>
+    </label>
+    <label class="field"><span>Model</span><select id="new-model"></select></label>
+    <label class="field"><span>Session type</span>
+      <select id="new-mode"
+              title="Build sessions dispatch dev tasks that change code. Research / strategy sessions can't - the PM researches, specs and plans only, until you switch it to build from its chat header.">
+        <option value="build">Build</option>
+        <option value="research">Research / strategy</option>
+      </select>
+    </label>
     <button id="new-submit" type="submit">+ New session</button>
   </form>
   <div id="toggle-row">
@@ -404,7 +438,9 @@
         opt.title = initiative.description || initiative.title;
         initiativeSelect.appendChild(opt);
       }
-      if (initiativeSelect.options.length > 1) initiativeSelect.hidden = false;
+      if (initiativeSelect.options.length > 1) {
+        document.getElementById("new-initiative-field").hidden = false;
+      }
       renderList(); // re-render with initiative titles now known
     })
     .catch(() => {});
@@ -503,6 +539,7 @@
         <div class="name"></div>
         ${goal ? `<div class="goal"></div>` : ""}
         <div class="branch"></div>
+        <div class="open-cue">Open chat →</div>
         ${session.initiative_id ? `<div class="initiative-badge"></div>` : ""}
         ${session.product || (session.adopted_products || []).length ? `<div class="product-badge"></div>` : ""}
         ${note ? `<div class="result-note"></div>` : ""}

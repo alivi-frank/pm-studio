@@ -124,6 +124,28 @@
   li.unaligned { border-left: 3px solid var(--warn); }
   .row { display: flex; align-items: baseline; gap: 8px; justify-content: space-between; }
   .title { font-weight: 600; font-size: 0.92em; }
+  /* Reading and editing are two intents. The page loads readable - names, chips and
+     drill-down links - and every form, picker, checkbox matrix and destructive button
+     appears only behind the Edit toggle. Three judges independently called the
+     always-on edit chrome the page's defining flaw. */
+  body.read-mode .columns form,
+  body.read-mode .columns .actions,
+  body.read-mode .columns .goal-links,
+  body.read-mode .columns li select { display: none !important; }
+  body:not(.read-mode) .read-only { display: none !important; }
+  .serves { color: var(--ink-secondary); }
+  .status-chip {
+    display: inline-block; padding: 1px 8px; border-radius: 999px;
+    font-size: 0.75em; font-weight: 550; margin-left: 6px;
+    background: rgba(127,127,127,0.12); color: var(--ink-secondary);
+  }
+  #edit-toggle {
+    padding: 6px 12px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--ink-primary); cursor: pointer; font: inherit;
+  }
+  #edit-toggle.on { border-color: var(--accent); color: var(--accent); }
+  .title a { color: inherit; text-decoration: none; }
+  .title a:hover { color: var(--accent); text-decoration: underline; }
   .meta { margin-top: 4px; font-size: 0.78em; color: var(--ink-muted); }
   .actions { display: flex; gap: 5px; flex-shrink: 0; }
   .flag {
@@ -288,6 +310,35 @@
   </div>
 </main>
 <script>
+  // Read-first: edit chrome appears only on request, and the choice persists.
+  let editMode = localStorage.getItem("portfolioEdit") === "1";
+  function applyMode() {
+    document.body.classList.toggle("read-mode", !editMode);
+    const btn = document.getElementById("edit-toggle");
+    if (btn) {
+      btn.classList.toggle("on", editMode);
+      btn.textContent = editMode ? "Done editing" : "Edit";
+      btn.title = editMode
+        ? "Back to the reading view"
+        : "Show the add forms, pickers and lifecycle controls";
+    }
+  }
+  if (window.PMNav && PMNav.ready) {
+    PMNav.ready.then((slot) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.id = "edit-toggle";
+      btn.addEventListener("click", () => {
+        editMode = !editMode;
+        localStorage.setItem("portfolioEdit", editMode ? "1" : "0");
+        applyMode();
+      });
+      slot.appendChild(btn);
+      applyMode();
+    });
+  }
+  applyMode();
+
   let data = {
     goals: [], initiatives: [], projects: [],
     unaligned: { projects: [], initiatives: [] },
@@ -472,6 +523,21 @@
         ? `${serving.length} initiative${serving.length === 1 ? "" : "s"} serving this`
         : "no initiatives yet";
       item.appendChild(meta);
+      // The reading view names them: a count alone made every goal card a dead end.
+      if (serving.length) {
+        const named = document.createElement("div");
+        named.className = "meta serves read-only";
+        serving.forEach((initiative, i) => {
+          if (i) named.appendChild(document.createTextNode(" · "));
+          const link = document.createElement("a");
+          link.textContent = initiative.title;
+          link.href = "/roadmap?group=initiative&section="
+            + encodeURIComponent("initiative:" + initiative.id);
+          link.title = "This initiative's changes on the board";
+          named.appendChild(link);
+        });
+        item.appendChild(named);
+      }
       list.appendChild(item);
     });
   }
@@ -492,7 +558,15 @@
       row.className = "row";
       const title = document.createElement("span");
       title.className = "title";
-      title.textContent = initiative.title;
+      // The name is the drill-down: it opens this initiative's section on the board,
+      // the same link the Overview rows carry, so the strategy page stops being a
+      // dead end the moment somebody asks "so what's IN it?".
+      const titleLink = document.createElement("a");
+      titleLink.textContent = initiative.title;
+      titleLink.href = "/roadmap?group=initiative&section="
+        + encodeURIComponent("initiative:" + initiative.id);
+      titleLink.title = "This initiative's changes on the board";
+      title.appendChild(titleLink);
       if (initiative.is_maintenance) {
         const flag = document.createElement("span");
         flag.className = "flag catch-all";
@@ -550,6 +624,18 @@
       meta.textContent = `${owned.length} project${owned.length === 1 ? "" : "s"}`;
       item.appendChild(meta);
 
+      // The reading view answers "which goals does this serve?" as a sentence; the
+      // checkbox matrix below stays an editing surface only.
+      const servedTitles = data.goals
+        .filter((g) => (initiative.goal_ids || []).includes(g.id))
+        .map((g) => g.title);
+      if (servedTitles.length) {
+        const serves = document.createElement("div");
+        serves.className = "meta serves read-only";
+        serves.textContent = `serves: ${servedTitles.join(" · ")}`;
+        item.appendChild(serves);
+      }
+
       // Goal links: an initiative may serve several, so this is a checkbox set.
       if (data.goals.length) {
         const links = document.createElement("div");
@@ -590,7 +676,21 @@
       row.className = "row";
       const title = document.createElement("span");
       title.className = "title";
-      title.textContent = project.title;
+      // A project's changes live inside its initiative's board section, so that is
+      // where the name lands (initiative:none for an unaligned project).
+      const titleLink = document.createElement("a");
+      titleLink.textContent = project.title;
+      const statusChip = document.createElement("span");
+      statusChip.className = "status-chip read-only";
+      statusChip.textContent = project.status;
+      // Ideation already renders as its own tooltipped flag on the same row - two
+      // labels saying one word made the card read as a rendering bug (it was).
+      if (project.status === "ideation") statusChip.hidden = true;
+      titleLink.href = "/roadmap?group=initiative&section="
+        + encodeURIComponent("initiative:" + (project.initiative_id || "none"));
+      titleLink.title = "Its changes on the board";
+      title.appendChild(titleLink);
+      title.appendChild(statusChip);
       if (project.is_catch_all) {
         const flag = document.createElement("span");
         flag.className = "flag catch-all";

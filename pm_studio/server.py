@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from fastapi import Body, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, JSONResponse, RedirectResponse
 
 from . import mailer
 from .accounts import (
@@ -40,6 +40,8 @@ from .costing import (
     current_week,
 )
 from .models import list_models
+from .overview import build_overview
+from .plans import PlanStore, plan_vs_actual
 from .people import (
     UNASSIGNED,
     PeopleError,
@@ -129,6 +131,7 @@ costing_store = CostingStore(
     weights=CONFIG.costing.weights,
     currency=CONFIG.costing.currency,
 )
+plan_store = PlanStore(CONFIG.workspace_dir / "plans")
 
 # task_id -> the user who dispatched it. A dev task's token spend is only known when it
 # finishes, by which time the request that started it is long gone, so the dispatcher is
@@ -772,6 +775,9 @@ def auth_me(request: Request) -> dict:
         # The nav uses it to decide whether the Systems tab exists, so a deployment that
         # does not use the layer is offered no tab into an empty taxonomy.
         "systems_declared": systems_declared(),
+        # Where GET / points, so the nav can keep a Sessions tab that works when the
+        # front door serves the overview instead.
+        "landing": CONFIG.landing,
         # So a page can hide controls that would only 403. Every one of these is
         # still enforced server-side, independently of what the UI chooses to show.
         "capabilities": capabilities_of(user.role) if user is not None else [],
@@ -1081,7 +1087,20 @@ def delete_person(person_id: str, request: Request) -> dict:
 # ---- session picker / lifecycle ----
 
 @app.get("/")
-def index() -> FileResponse:
+def index():
+    """The front door. `[server] landing = "overview"` points it at the read-first
+    answer to "what are we working on?"; the default stays the sessions list. A
+    redirect rather than serving the file here, so the overview keeps one canonical
+    URL wherever a visitor enters."""
+    if CONFIG.landing == "overview":
+        return RedirectResponse("/overview", status_code=307)
+    return _app_asset("sessions.html")
+
+
+@app.get("/sessions-page")
+def sessions_page() -> FileResponse:
+    """The sessions list at a stable address, whatever the landing setting - the nav's
+    Sessions tab points here when / no longer serves it."""
     return _app_asset("sessions.html")
 
 
@@ -1360,6 +1379,13 @@ def costing_report(request: Request, week: str | None = None) -> dict:
     report["rollup"] = costing_store.rollup_to_initiatives(
         report["by_project"], portfolio_store
     )
+    # The to-date view beside the weekly one: "what has this cost so far" is the
+    # portfolio question, and a week-scoped page structurally couldn't answer it.
+    cumulative = costing_store.cumulative_to_date(user_ids=known)
+    cumulative["rollup"] = costing_store.rollup_to_initiatives(
+        cumulative["by_project"], portfolio_store
+    )
+    report["cumulative"] = cumulative
     report["portfolio"] = {
         "projects": portfolio_store.list_projects(),
         "initiatives": portfolio_store.list_initiatives(),
@@ -1623,6 +1649,41 @@ def _resolve_project_id(payload: dict) -> str | None:
 @app.get("/portfolio")
 def portfolio_page() -> FileResponse:
     return _app_asset("portfolio.html")
+
+
+@app.get("/overview")
+def overview_page() -> FileResponse:
+    return _app_asset("overview.html")
+
+
+@app.get("/overview/data")
+def overview_data() -> dict:
+    """One read-only payload answering "what are we working on?" - initiative rollups
+    with derived health, the shipped-recently feed, the overdue list and per-person
+    load. Composed here because it joins all three stores; the arithmetic itself lives
+    in overview.build_overview, pure and store-free."""
+    changes = [
+        _with_ticket(item)
+        for items in roadmap_store.list_all().values()
+        for item in items
+    ]
+    # Reads are how the week's plan gets pinned: lazy capture needs a hook that fires
+    # often, and the overview is the page every day starts on.
+    plan_store.ensure_current(changes)
+    groups = portfolio_store.group_changes_by_initiative(changes)
+    cumulative = costing_store.cumulative_to_date(
+        user_ids=None if CONFIG.is_enterprise else ["local"]
+    )
+    cost_rollup = costing_store.rollup_to_initiatives(
+        cumulative["by_project"], portfolio_store
+    )["initiatives"]
+    payload = build_overview(
+        groups, workload(changes), cost_by_initiative=cost_rollup
+    )
+    payload["currency"] = costing_store.currency
+    plan = plan_store.plan_for(current_week())
+    payload["week_plan"] = plan_vs_actual(plan, changes) if plan else None
+    return payload
 
 
 @app.get("/systems")

@@ -453,3 +453,51 @@ class ProjectActivityTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CumulativeToDateTest(unittest.TestCase):
+    """The to-date view folds every recorded week; its exactness rests on each week's
+    distribution reconciling to that week's capacity, so summing them is safe."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.store = CostingStore(
+            path=root / "costing.json",
+            activity_path=root / "activity.jsonl",
+            blended_rate=100.0,
+        )
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_cumulative_is_the_sum_of_its_weeks(self) -> None:
+        w1 = week_bounds("2026-W30")[0] + 3600
+        w2 = week_bounds("2026-W31")[0] + 3600
+        self.store.record(at=w1, user_id="u1", kind="pm_turn", project_id="p1",
+                          agent_cost_usd=1.0)
+        self.store.record(at=w1, user_id="u1", kind="dev_task", project_id="p2",
+                          agent_cost_usd=2.0)
+        self.store.record(at=w2, user_id="u1", kind="pm_turn", project_id="p1",
+                          agent_cost_usd=3.0)
+        cumulative = self.store.cumulative_to_date(user_ids=["u1"])
+        self.assertEqual(cumulative["weeks"], ["2026-W30", "2026-W31"])
+        r30 = self.store.distribute_week("2026-W30", user_ids=["u1"])
+        r31 = self.store.distribute_week("2026-W31", user_ids=["u1"])
+        self.assertAlmostEqual(
+            cumulative["totals"]["hours"],
+            r30["totals"]["hours"] + r31["totals"]["hours"], places=3)
+        self.assertAlmostEqual(
+            cumulative["totals"]["labor_cost"],
+            r30["totals"]["labor_cost"] + r31["totals"]["labor_cost"], places=3)
+        self.assertAlmostEqual(cumulative["totals"]["agent_cost"], 6.0, places=3)
+        p1 = cumulative["by_project"]["p1"]
+        self.assertAlmostEqual(
+            p1["hours"],
+            r30["by_project"]["p1"]["hours"] + r31["by_project"]["p1"]["hours"],
+            places=3)
+
+    def test_empty_log_is_an_empty_view(self) -> None:
+        cumulative = self.store.cumulative_to_date(user_ids=["u1"])
+        self.assertEqual(cumulative["weeks"], [])
+        self.assertEqual(cumulative["by_project"], {})
