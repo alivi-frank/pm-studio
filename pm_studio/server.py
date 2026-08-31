@@ -67,6 +67,8 @@ from .roadmap import (
     RoadmapStore,
     TicketAlreadyLinked,
     parent_of,
+    product_path_label,
+    subtree_products,
     systems_declared,
 )
 from .sessions import DEFAULT_SESSION_ID, SessionManager, SessionRuntime
@@ -1657,7 +1659,7 @@ def overview_page() -> FileResponse:
 
 
 @app.get("/overview/data")
-def overview_data() -> dict:
+def overview_data(product: str | None = None) -> dict:
     """One read-only payload answering "what are we working on?" - initiative rollups
     with derived health, the shipped-recently feed, the overdue list and per-person
     load. Composed here because it joins all three stores; the arithmetic itself lives
@@ -1668,8 +1670,19 @@ def overview_data() -> dict:
         for item in items
     ]
     # Reads are how the week's plan gets pinned: lazy capture needs a hook that fires
-    # often, and the overview is the page every day starts on.
+    # often, and the overview is the page every day starts on. Pinning happens BEFORE
+    # any scoping - the plan is the whole board's.
     plan_store.ensure_current(changes)
+    # ?product= narrows the whole answer to one product family - "what is this one
+    # team doing" as a shareable page. Everything downstream (groups, feeds, load,
+    # the plan classification) sees only the family's changes.
+    scope = None
+    if product:
+        if product not in PRODUCTS:
+            raise HTTPException(status_code=404, detail=f"Unknown product: {product}")
+        family = set(subtree_products(product))
+        changes = [c for c in changes if c["product"] in family]
+        scope = {"product": product, "label": product_path_label(product)}
     groups = portfolio_store.group_changes_by_initiative(changes)
     cumulative = costing_store.cumulative_to_date(
         user_ids=None if CONFIG.is_enterprise else ["local"]
@@ -1681,7 +1694,17 @@ def overview_data() -> dict:
         groups, workload(changes), cost_by_initiative=cost_rollup
     )
     payload["currency"] = costing_store.currency
+    payload["scope"] = scope
+    payload["products"] = PRODUCTS
+    payload["product_parents"] = PRODUCT_PARENTS
     plan = plan_store.plan_for(current_week())
+    if plan and scope:
+        # The scoped view classifies only the family's slice of the plan - planned
+        # items carry their product for exactly this.
+        plan = {**plan, "planned": [
+            item for item in plan.get("planned", [])
+            if item.get("product") in family
+        ]}
     payload["week_plan"] = plan_vs_actual(plan, changes) if plan else None
     return payload
 

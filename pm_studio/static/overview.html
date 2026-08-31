@@ -209,6 +209,13 @@
     return node;
   }
   function td(className, text) { return el("td", className, text); }
+  var SCOPE = new URLSearchParams(location.search).get("product") || "";
+  function boardLink(query, className, text) {
+    // Every outbound board link carries the scope, so a scoped stakeholder view
+    // drills into a board scoped the same way.
+    var href = "/roadmap?" + query + (SCOPE ? "&product=" + encodeURIComponent(SCOPE) : "");
+    return link(href, className, text);
+  }
   function link(href, className, text) {
     var a = el("a", className, text);
     a.href = href;
@@ -228,7 +235,48 @@
     return box;
   }
 
+  var scopePickerMounted = false;
+  function mountScopePicker(data) {
+    if (scopePickerMounted || !window.PMNav || !PMNav.ready) return;
+    scopePickerMounted = true;
+    PMNav.ready.then(function (slot) {
+      var label = el("span", "pmnav-seg-label", "Scope");
+      var select = document.createElement("select");
+      select.className = "pmnav-seg mini";
+      select.title = "Narrow this whole page to one product family";
+      var all = document.createElement("option");
+      all.value = ""; all.textContent = "All products";
+      select.appendChild(all);
+      var parents = data.product_parents || {};
+      function depthOf(p) {
+        var d = 0;
+        for (var cur = parents[p]; cur; cur = parents[cur]) d++;
+        return d;
+      }
+      Object.keys(data.products || {}).forEach(function (p) {
+        var option = document.createElement("option");
+        option.value = p;
+        option.textContent = "\u00a0\u00a0".repeat(depthOf(p)) + data.products[p];
+        if (p === SCOPE) option.selected = true;
+        select.appendChild(option);
+      });
+      select.addEventListener("change", function () {
+        location.search = select.value ? "product=" + encodeURIComponent(select.value) : "";
+      });
+      slot.appendChild(label);
+      slot.appendChild(select);
+    });
+  }
+
   function render(data) {
+    mountScopePicker(data);
+    var inflightSub = document.querySelector("#initiatives").parentElement.querySelector(".sub");
+    if (data.scope) {
+      document.title = "PM Studio — Overview · " + data.scope.label;
+      inflightSub.textContent = "Scoped to " + data.scope.label
+        + ". Initiatives shown have open or recently shipped work in this family; "
+        + "cost figures are initiative-wide, not scoped.";
+    }
     var open = 0, inProgress = 0;
     data.initiatives.forEach(function (row) {
       if (row.status !== "closed") { open += row.open; inProgress += row.counts.in_progress; }
@@ -281,7 +329,7 @@
       (wp.items || []).forEach(function (entry) {
         var tr = document.createElement("tr");
         var name = td(null, null);
-        name.appendChild(link("/roadmap?change=" + encodeURIComponent(entry.id), null, entry.title));
+        name.appendChild(boardLink("change=" + encodeURIComponent(entry.id), null, entry.title));
         tr.appendChild(name);
         var state = td(entry.state === "shipped" ? null : "muted",
           STATE_LABEL[entry.state] || entry.state);
@@ -291,7 +339,7 @@
       (wp.added_items || []).forEach(function (entry) {
         var tr = document.createElement("tr");
         var name = td(null, null);
-        name.appendChild(link("/roadmap?change=" + encodeURIComponent(entry.id), null, entry.title));
+        name.appendChild(boardLink("change=" + encodeURIComponent(entry.id), null, entry.title));
         tr.appendChild(name);
         tr.appendChild(td("idle", "added after the plan"));
         planBody.appendChild(tr);
@@ -311,7 +359,7 @@
 
       var name = td(null, null);
       var sectionKey = "initiative:" + (row.id || "none");
-      var titleLink = link("/roadmap?group=initiative&section=" + encodeURIComponent(sectionKey),
+      var titleLink = boardLink("group=initiative&section=" + encodeURIComponent(sectionKey),
         null, row.title || "Unaligned work");
       titleLink.title = "Open on the board";
       var titleWrap = el("div", "initiative-title");
@@ -375,7 +423,7 @@
         var tr = document.createElement("tr");
         var name = td(null, null);
         var line = el("div");
-        line.appendChild(link("/roadmap?change=" + encodeURIComponent(entry.id), null, entry.title));
+        line.appendChild(boardLink("change=" + encodeURIComponent(entry.id), null, entry.title));
         name.appendChild(line);
         var metaBits = [entry.initiative, entry.product, entry.assignee].filter(Boolean);
         name.appendChild(el("div", "initiative-meta", metaBits.join(" — ")));
@@ -410,7 +458,7 @@
       var tr = document.createElement("tr");
       var name = td(null, null);
       var line = el("div");
-      line.appendChild(link("/roadmap?change=" + encodeURIComponent(entry.id), null, entry.title));
+      line.appendChild(boardLink("change=" + encodeURIComponent(entry.id), null, entry.title));
       name.appendChild(line);
       name.appendChild(el("div", "initiative-meta",
         [entry.initiative, entry.product, entry.assignee].filter(Boolean).join(" — ")));
@@ -434,7 +482,7 @@
       var tr = document.createElement("tr");
       var name = td(null, null);
       var line = el("div");
-      line.appendChild(link("/roadmap?change=" + encodeURIComponent(entry.id), null, entry.title));
+      line.appendChild(boardLink("change=" + encodeURIComponent(entry.id), null, entry.title));
       name.appendChild(line);
       name.appendChild(el("div", "initiative-meta",
         [entry.initiative, entry.product, entry.assignee].filter(Boolean).join(" — ")));
@@ -451,7 +499,7 @@
       var tr = document.createElement("tr");
       var name = td(null, null);
       var line = el("div");
-      line.appendChild(link("/roadmap?change=" + encodeURIComponent(entry.id), null, entry.title));
+      line.appendChild(boardLink("change=" + encodeURIComponent(entry.id), null, entry.title));
       name.appendChild(line);
       name.appendChild(el("div", "initiative-meta",
         [entry.initiative, entry.product, entry.assignee].filter(Boolean).join(" — ")));
@@ -469,8 +517,8 @@
       // it is usually the largest row, so it must say what it is.
       var personKey = row.name && row.person_id ? "person:" + row.person_id : "person:none";
       var personCell = td(row.name ? null : "muted", null);
-      personCell.appendChild(link(
-        "/roadmap?group=person&section=" + encodeURIComponent(personKey),
+      personCell.appendChild(boardLink(
+        "group=person&section=" + encodeURIComponent(personKey),
         null, row.name || "Unassigned"));
       tr.appendChild(personCell);
       tr.appendChild(td("num", String(row.open)));
@@ -494,7 +542,8 @@
   }
 
   function refresh() {
-    fetch("/overview/data", { headers: { Accept: "application/json" } })
+    fetch("/overview/data" + (SCOPE ? "?product=" + encodeURIComponent(SCOPE) : ""),
+      { headers: { Accept: "application/json" } })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (data) { if (data) render(data); });
   }

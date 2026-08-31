@@ -1547,6 +1547,27 @@
   let pendingReveal = (bootParams.get("section") || bootParams.get("change"))
     ? { section: bootParams.get("section"), change: bootParams.get("change") }
     : null;
+
+  /* Product scope: ?product=<id> narrows EVERY lens to that product's family - the
+     "what is this one team doing" ask, shareable as a link. Validated after the
+     taxonomy loads; an unknown id is ignored rather than rendering an empty board. */
+  let scopeProduct = bootParams.get("product") || "";
+  let scopeSetCache = null;
+  function scopeSet() {
+    if (!scopeProduct) return null;
+    if (!scopeSetCache) {
+      const set = new Set([scopeProduct]);
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (const p of Object.keys(PRODUCTS)) {
+          if (!set.has(p) && set.has(PRODUCT_PARENTS[p])) { set.add(p); grew = true; }
+        }
+      }
+      scopeSetCache = set;
+    }
+    return scopeSetCache;
+  }
   // ?q= pre-fills the search - a link can now BE a filter ("show me the external
   // work"). Transient like typed search: never persisted, dropped by syncUrl.
 
@@ -1554,6 +1575,8 @@
     const params = new URLSearchParams(location.search);
     params.set("group", groupBy);
     params.set("view", view);
+    if (scopeProduct) params.set("product", scopeProduct);
+    else params.delete("product");
     params.delete("section");
     params.delete("change");
     history.replaceState(null, "", location.pathname + "?" + params);
@@ -1868,6 +1891,36 @@
     collapseControl = null;
     slot.appendChild(searchControl());
     slot.appendChild(collapseAllButton());
+    // The one-team lens: a select over the product tree, families indented. Scoping
+    // is a link-worthy state (it goes into the URL), so a stakeholder update can be
+    // "open this URL" rather than "click these four controls".
+    slot.appendChild(el("span", "pmnav-seg-label", "Scope"));
+    const scopeSelect = document.createElement("select");
+    scopeSelect.className = "pmnav-seg mini";
+    scopeSelect.title = "Narrow every lens to one product family";
+    const allOpt = document.createElement("option");
+    allOpt.value = "";
+    allOpt.textContent = "All products";
+    scopeSelect.appendChild(allOpt);
+    const depthOf = (p) => {
+      let d = 0;
+      for (let cur = PRODUCT_PARENTS[p]; cur; cur = PRODUCT_PARENTS[cur]) d++;
+      return d;
+    };
+    for (const p of Object.keys(PRODUCTS)) {
+      const option = document.createElement("option");
+      option.value = p;
+      option.textContent = "\u00a0".repeat(depthOf(p) * 2) + productLabel(p);
+      if (p === scopeProduct) option.selected = true;
+      scopeSelect.appendChild(option);
+    }
+    scopeSelect.addEventListener("change", () => {
+      scopeProduct = scopeSelect.value;
+      scopeSetCache = null;
+      syncUrl();
+      renderAll();
+    });
+    slot.appendChild(scopeSelect);
     slot.appendChild(el("span", "pmnav-seg-label", "Show"));
     slot.appendChild(stateFilterControl());
     slot.appendChild(el("span", "pmnav-seg-label", "Group by"));
@@ -2581,7 +2634,9 @@
   // ---- grouping: the sections, whichever view draws them ----
 
   function allChanges() {
-    return Object.values(itemsByProduct).flat();
+    const set = scopeSet();
+    const all = Object.values(itemsByProduct).flat();
+    return set ? all.filter((c) => set.has(c.product)) : all;
   }
 
   /* Whether the search keeps this change on the board. A change matches through ANY
@@ -2666,6 +2721,7 @@
           .map((c) => productGroup(c, seen)),
       };
     };
+    if (scopeProduct && PRODUCTS[scopeProduct]) return [productGroup(scopeProduct)];
     return topLevelProducts().map((p) => productGroup(p));
   }
 
@@ -4536,6 +4592,9 @@
         PEOPLE = data.people || [];
         PEOPLE_BY_ID = Object.fromEntries(PEOPLE.map((p) => [p.id, p]));
         indexProjects();
+        // An unknown ?product= would filter the board to nothing; ignoring it is the
+        // honest fallback.
+        if (scopeProduct && !PRODUCTS[scopeProduct]) { scopeProduct = ""; syncUrl(); }
         renderTrackerBar();
         openFirstVisit();
         renderAll();
