@@ -123,6 +123,21 @@
   @media (max-width: 860px) { .cols { grid-template-columns: 1fr; } }
   .feed-empty { color: var(--ink-muted); font-size: 0.86em; padding: 6px 0; }
   .days { white-space: nowrap; }
+
+  /* Print = the meeting handout. Chrome goes, ink comes back, sections hold together.
+     Colors are forced light because most printers and PDF exports assume it. */
+  @media print {
+    #pm-nav, .feed-empty { display: none !important; }
+    body { background: #fff; color: #000; }
+    section { border: 1px solid #ccc; break-inside: avoid; overflow: visible; }
+    .stat { border: 1px solid #ccc; }
+    .stat .n, h2, td, th, .initiative-title, .fraction { color: #000 !important; }
+    .initiative-meta, p.sub, .stat .l, td .muted, .muted { color: #444 !important; }
+    td a { text-decoration: none; color: #000; }
+    .chip { border: 1px solid #999; background: none !important; color: #000 !important; }
+    .bar { background: #eee; }
+    .bar > span { background: #555; }
+  }
 </style>
 </head>
 <body>
@@ -235,6 +250,62 @@
     return box;
   }
 
+  /* The meeting export: the page, re-said as paste-ready text. Built from the same
+     payload the page renders, so the update can never disagree with the screen. */
+  function updateAsText(data) {
+    var lines = [];
+    var title = "Status update" + (data.scope ? " — " + data.scope.label : "");
+    lines.push(title + " · " + new Date().toLocaleDateString());
+    lines.push("");
+    var bits = [];
+    data.initiatives.forEach(function (r) {
+      if (r.status !== "closed" && r.id !== null && !r.is_maintenance && r.open > 0) bits.push(1);
+    });
+    lines.push(bits.length + " initiatives in flight · "
+      + (data.working_total || 0) + " in progress · "
+      + (data.overdue_total || 0) + " overdue · "
+      + (data.shipped_total || 0) + " shipped in the last " + data.shipped_window_days + "d"
+      + (data.week_plan && data.week_plan.planned_total
+          ? " · " + data.week_plan.shipped + "/" + data.week_plan.planned_total + " of this week's plan shipped"
+          : ""));
+    lines.push("");
+    lines.push("IN FLIGHT");
+    var HEALTH = { on_track: "on track", at_risk: "AT RISK", quiet: "quiet",
+                   ideation: "ideation", done: "done", closed: "closed" };
+    data.initiatives.forEach(function (r) {
+      if (r.status === "closed" && !r.shipped_recent) return;
+      var parts = [(r.title || "Unaligned work"),
+        "[" + (HEALTH[r.health] || r.health) + "]",
+        r.counts.done + "/" + r.counts.total + " shipped",
+        r.counts.in_progress + " in progress"];
+      if (r.overdue) parts.push(r.overdue + " OVERDUE");
+      if (r.next_target) parts.push("next target " + r.next_target);
+      if (r.people.length) parts.push("(" + r.people.slice(0, 3).map(function (p) { return p.name; }).join(", ")
+        + (r.people.length > 3 ? " +" + (r.people.length - 3) : "") + ")");
+      lines.push("- " + parts.join(" · "));
+    });
+    function feed(heading, entries, tail) {
+      if (!entries || !entries.length) return;
+      lines.push("");
+      lines.push(heading);
+      entries.slice(0, 10).forEach(function (e) {
+        var meta = [e.initiative, e.assignee].filter(Boolean).join(", ");
+        lines.push("- " + e.title + (meta ? " (" + meta + ")" : "") + (tail ? tail(e) : ""));
+      });
+      if (entries.length > 10) lines.push("  …and " + (entries.length - 10) + " more");
+    }
+    feed("WORKING NOW", data.working, function (e) {
+      return (e.target_at ? " — due " + e.target_at : "")
+        + (e.idle_days >= 7 ? " — untouched " + e.idle_days + "d" : "");
+    });
+    feed("SHIPPED RECENTLY", data.shipped, function (e) {
+      return " — " + (e.days_ago === 0 ? "today" : e.days_ago + "d ago");
+    });
+    feed("OVERDUE", data.overdue, function (e) { return " — " + e.days_late + "d late"; });
+    feed("GONE QUIET", data.stale, function (e) { return " — untouched " + e.idle_days + "d"; });
+    return lines.join("\n");
+  }
+
   var scopePickerMounted = false;
   function mountScopePicker(data) {
     if (scopePickerMounted || !window.PMNav || !PMNav.ready) return;
@@ -265,10 +336,40 @@
       });
       slot.appendChild(label);
       slot.appendChild(select);
+
+      var copyBtn = document.createElement("button");
+      copyBtn.type = "button";
+      copyBtn.id = "copy-update";
+      copyBtn.className = "pmnav-seg";
+      copyBtn.textContent = "Copy update";
+      copyBtn.title = "Copy this page as paste-ready text for a status update";
+      copyBtn.addEventListener("click", function () {
+        var text = updateAsText(lastData || {initiatives: []});
+        var done = function () {
+          copyBtn.textContent = "Copied ✓";
+          setTimeout(function () { copyBtn.textContent = "Copy update"; }, 2000);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done, function () { fallback(); });
+        } else { fallback(); }
+        function fallback() {
+          var area = document.createElement("textarea");
+          area.value = text;
+          document.body.appendChild(area);
+          area.select();
+          try { document.execCommand("copy"); done(); } finally { area.remove(); }
+        }
+      });
+      slot.appendChild(copyBtn);
     });
   }
 
+  var lastData = null;
+  // Exposed like PMNav: lets automation (and the harness) read the same text the
+  // Copy button produces, without reaching for the permission-gated clipboard.
+  window.PMOverviewExport = function () { return lastData ? updateAsText(lastData) : ""; };
   function render(data) {
+    lastData = data;
     mountScopePicker(data);
     var inflightSub = document.querySelector("#initiatives").parentElement.querySelector(".sub");
     if (data.scope) {
