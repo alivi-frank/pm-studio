@@ -1362,7 +1362,7 @@ def set_costing_entry(user_id: str, request: Request, payload: dict = Body(...))
 
 
 @app.get("/costing/report")
-def costing_report(request: Request, week: str | None = None) -> dict:
+def costing_report(request: Request, week: str | None = None, product: str | None = None) -> dict:
     """A week's distribution, plus the initiative rollup.
 
     Hours are an approximation by construction: a declared capacity split by signal
@@ -1381,6 +1381,35 @@ def costing_report(request: Request, week: str | None = None) -> dict:
     report["rollup"] = costing_store.rollup_to_initiatives(
         report["by_project"], portfolio_store
     )
+    # ?product= does NOT re-slice any figure - an initiative's spend cannot be honestly
+    # split per product. It names which initiatives (and projects) have work in the
+    # family, so the page can show the relevant rows and say the figures stay whole.
+    if product:
+        if product not in PRODUCTS:
+            raise HTTPException(status_code=404, detail=f"Unknown product: {product}")
+        family = set(subtree_products(product))
+        family_projects: set[str] = set()
+        family_unattributed = False
+        for items in roadmap_store.list_all().values():
+            for item in items:
+                if item["product"] in family:
+                    if item.get("project_id"):
+                        family_projects.add(item["project_id"])
+                    else:
+                        family_unattributed = True
+        family_initiatives = set()
+        for project in portfolio_store.list_projects():
+            if project["id"] in family_projects and project.get("initiative_id"):
+                family_initiatives.add(project["initiative_id"])
+        report["scope"] = {
+            "product": product,
+            "label": product_path_label(product),
+            "initiative_ids": sorted(family_initiatives),
+            "project_ids": sorted(family_projects),
+            "include_unattributed": family_unattributed,
+        }
+    else:
+        report["scope"] = None
     # The to-date view beside the weekly one: "what has this cost so far" is the
     # portfolio question, and a week-scoped page structurally couldn't answer it.
     cumulative = costing_store.cumulative_to_date(user_ids=known)

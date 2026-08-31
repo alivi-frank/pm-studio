@@ -253,6 +253,13 @@
 </main>
 <script>
   const UNATTRIBUTED = "__unattributed__";
+  const SCOPE = new URLSearchParams(location.search).get("product") || "";
+  function inScope(initiativeId) {
+    // No scope, or no scope metadata (older payload): show everything.
+    if (!SCOPE || !report || !report.scope) return true;
+    if (initiativeId === UNATTRIBUTED) return report.scope.include_unattributed;
+    return report.scope.initiative_ids.indexOf(initiativeId) !== -1;
+  }
   let week = null;
   let report = null;
   let rosterData = null;
@@ -549,7 +556,14 @@
     document.getElementById("goal-note").textContent = report.rollup.goal_note;
     const body = document.getElementById("by-initiative");
     body.innerHTML = "";
-    const rows = Object.entries(report.rollup.initiatives);
+    let rows = Object.entries(report.rollup.initiatives);
+    if (report.scope) {
+      rows = rows.filter(([initiativeId]) => inScope(initiativeId));
+      document.getElementById("goal-note").textContent =
+        "Scoped to " + report.scope.label + ": showing initiatives with work in this "
+        + "family. Figures stay initiative-wide - an initiative's spend cannot be "
+        + "honestly split per product. " + report.rollup.goal_note;
+    }
     if (!rows.length) {
       body.innerHTML = '<tr><td colspan="5" class="empty">Nothing recorded this week.</td></tr>';
       return;
@@ -582,7 +596,8 @@
       + `week${cumulative.weeks.length === 1 ? "" : "s"}, ${cumulative.weeks[0]} → `
       + `${cumulative.weeks[cumulative.weeks.length - 1]}). Additive: each week `
       + `reconciles to its own capacity, so the sum is exact.`;
-    const rows = Object.entries(cumulative.rollup.initiatives);
+    let rows = Object.entries(cumulative.rollup.initiatives);
+    if (report.scope) rows = rows.filter(([initiativeId]) => inScope(initiativeId));
     rows.sort((a, b) => b[1].labor_cost + b[1].agent_cost - (a[1].labor_cost + a[1].agent_cost));
     rows.forEach(([initiativeId, bucket]) => {
       const tr = document.createElement("tr");
@@ -597,7 +612,7 @@
     // recorded signals, which is a different fact than costing nothing.
     const covered = new Set(Object.keys(cumulative.rollup.initiatives));
     const uncosted = (report.portfolio.initiatives || [])
-      .filter((i) => !covered.has(i.id))
+      .filter((i) => !covered.has(i.id) && inScope(i.id))
       .map((i) => i.title);
     if (uncosted.length) {
       const tr = document.createElement("tr");
@@ -607,7 +622,8 @@
       body.appendChild(tr);
     }
     const totals = document.createElement("tr");
-    totals.innerHTML = `<tr><td><strong>Total</strong></td>`
+    const totalLabel = report.scope ? "Portfolio total (unscoped)" : "Total";
+    totals.innerHTML = `<tr><td><strong>${totalLabel}</strong></td>`
       + `<td class="num">${hours(cumulative.totals.hours)}</td>`
       + `<td class="num">${money(cumulative.totals.labor_cost)}</td>`
       + `<td class="num">${money(cumulative.totals.agent_cost)}</td></tr>`;
@@ -615,7 +631,8 @@
   }
 
   async function load() {
-    report = await api(`/costing/report?week=${encodeURIComponent(week)}`);
+    report = await api(`/costing/report?week=${encodeURIComponent(week)}`
+      + (SCOPE ? `&product=${encodeURIComponent(SCOPE)}` : ""));
     rosterData = await api("/costing/roster");
     week = report.week;
     document.getElementById("week-label").textContent = week;

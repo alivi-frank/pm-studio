@@ -146,7 +146,7 @@
   <div class="stats" id="stats"></div>
 
   <section>
-    <h2>In flight<a href="/roadmap">board →</a><a href="/portfolio">portfolio →</a></h2>
+    <h2>In flight<a href="/roadmap">board →</a><a href="/portfolio">portfolio →</a><a href="/costing" id="costs-link">costs →</a></h2>
     <p class="sub">Initiatives with open or recently shipped work, most active first — maintenance, unaligned and recently finished work trail the list. Health is derived from the board: overdue work means at risk, open work with nothing moving means quiet.</p>
     <table id="initiatives">
       <thead><tr>
@@ -365,6 +365,10 @@
   }
 
   var lastData = null;
+  if (SCOPE) {
+    var costsLink = document.getElementById("costs-link");
+    if (costsLink) costsLink.href = "/costing?product=" + encodeURIComponent(SCOPE);
+  }
   // Exposed like PMNav: lets automation (and the harness) read the same text the
   // Copy button produces, without reaching for the permission-gated clipboard.
   window.PMOverviewExport = function () { return lastData ? updateAsText(lastData) : ""; };
