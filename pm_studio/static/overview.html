@@ -114,6 +114,10 @@
      that contradicts its On-track chip. */
   .bar > span.ip { opacity: 0.45; }
   .fraction { color: var(--ink-secondary); font-size: 0.85em; white-space: nowrap; }
+  .spark { display: flex; align-items: flex-end; gap: 2px; height: 16px; }
+  .spark-bar { width: 6px; border-radius: 1px; background: var(--accent); display: inline-block; }
+  .spark-bar.zero { background: var(--border); }
+  .spark-bar.cur { opacity: 0.5; }
 
   .late { color: var(--error); font-weight: 600; }
   .idle { color: var(--warn); font-size: 0.82em; white-space: nowrap; }
@@ -156,7 +160,7 @@
     <p class="sub">Initiatives with open or recently shipped work, most active first — maintenance, unaligned and recently finished work trail the list. Health is derived from the board: overdue work means at risk, open work with nothing moving means quiet.</p>
     <table id="initiatives">
       <thead><tr>
-        <th>Initiative</th><th>Health</th><th>Progress</th>
+        <th>Initiative</th><th>Health</th><th>Progress</th><th id="momentum-head">Momentum</th>
         <th class="num">In&nbsp;progress</th><th class="num">Overdue</th>
         <th>People</th><th id="target-head">Next&nbsp;target</th>
       </tr></thead>
@@ -492,6 +496,13 @@
     var tbody = document.querySelector("#initiatives tbody");
     tbody.textContent = "";
     var anyTarget = data.initiatives.some(function (row) { return row.next_target; });
+    // The whole momentum column disappears when nothing shipped in the window - a
+    // column of dashes is noise, not information (same rule as the date column).
+    var anyMomentum = data.initiatives.some(function (row) {
+      return (row.shipped_weekly || []).some(function (v) { return v > 0; });
+    });
+    var momentumHead = document.getElementById("momentum-head");
+    if (momentumHead) momentumHead.hidden = !anyMomentum;
     var targetHead = document.getElementById("target-head");
     if (targetHead) targetHead.hidden = !anyTarget;
     data.initiatives.forEach(function (row) {
@@ -539,6 +550,34 @@
       wrap.appendChild(el("span", "fraction", row.counts.done + "/" + row.counts.total));
       prog.appendChild(wrap);
       tr.appendChild(prog);
+
+      /* Momentum: shipped-per-week mini bars for the last 8 ISO weeks - "is this
+         shipping consistently?" answered by shape, not a number. Scaled to the row's
+         own peak so the shape survives rows of very different sizes; all-zero rows
+         show a dim dash instead of eight empty bars (empty-bar noise, judged). */
+      if (anyMomentum) {
+        var mo = td("momentum", null);
+        var series = row.shipped_weekly || [];
+        var peak = Math.max.apply(null, series.concat([0]));
+        if (peak > 0) {
+          var sparkWrap = el("div", "spark");
+          series.forEach(function (v, i) {
+            /* The last bucket is the week we're standing in - render it half-strength
+               and say "(so far)" so a Monday reader doesn't misread the partial week
+               as momentum dying. */
+            var isCurrent = i === series.length - 1;
+            var b = el("span", "spark-bar" + (v ? "" : " zero") + (isCurrent ? " cur" : ""));
+            b.style.height = v ? Math.max(3, Math.round(14 * v / peak)) + "px" : "2px";
+            b.title = (data.momentum_weeks[i] || "") + (isCurrent ? " (so far)" : "")
+              + " · " + v + " shipped";
+            sparkWrap.appendChild(b);
+          });
+          mo.appendChild(sparkWrap);
+        } else {
+          mo.appendChild(el("span", "muted", "—"));
+        }
+        tr.appendChild(mo);
+      }
 
       tr.appendChild(td("num", String(row.counts.in_progress)));
       var overdue = td("num", String(row.overdue));

@@ -75,6 +75,28 @@ class RollupTest(unittest.TestCase):
                             is_maintenance=True)])
         self.assertEqual(data["initiatives"][0]["open_now_next"], 1)
 
+    def test_momentum_buckets_shipped_by_iso_week(self) -> None:
+        # This week's ship lands in the last bucket, one from 2 weeks ago lands two
+        # slots earlier, one older than the window is dropped, and an undated done
+        # change counts nowhere. Labels come back one per bucket.
+        data = build([group("A", [
+            change("a", "done", shipped_at=NOW - 3600),
+            change("b", "done", shipped_at=NOW - 14 * DAY),
+            change("c", "done", shipped_at=NOW - 100 * DAY),
+            change("d", "done"),
+        ])])
+        row = data["initiatives"][0]
+        weekly = row["shipped_weekly"]
+        self.assertEqual(len(weekly), 8)
+        self.assertEqual(len(data["momentum_weeks"]), 8)
+        self.assertEqual(weekly[-1], 1)
+        self.assertEqual(weekly[-3], 1)
+        self.assertEqual(sum(weekly), 2)
+
+    def test_momentum_is_all_zero_when_nothing_shipped(self) -> None:
+        data = build([group("A", [change("a", "in_progress", bucket="now")])])
+        self.assertEqual(sum(data["initiatives"][0]["shipped_weekly"]), 0)
+
     def test_products_and_people_come_from_open_changes(self) -> None:
         data = build([group("A", [
             change("a", "in_progress", product="web", assignee="Ada"),

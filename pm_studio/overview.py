@@ -14,9 +14,10 @@ Three questions, three sections, one payload:
 """
 
 import time
-from datetime import date
+from datetime import date, timedelta
 
 SHIPPED_WINDOW_DAYS = 30
+MOMENTUM_WEEKS = 8
 SHIPPED_FEED_CAP = 25
 OVERDUE_FEED_CAP = 25
 WORKING_FEED_CAP = 25
@@ -60,6 +61,16 @@ def build_overview(
     today = date.fromtimestamp(now)
     window_start = now - shipped_window_days * 86400
 
+    # Momentum = weekly throughput, the glanceable form of "shipping consistently":
+    # a count of shipped changes per ISO week for the last MOMENTUM_WEEKS, derived
+    # from shipped_at at read time (burnup-style scope-over-time needs snapshots and
+    # stays out of scope). The current partial week is the last bucket, honestly low.
+    this_monday = today - timedelta(days=today.isoweekday() - 1)
+    momentum_mondays = [this_monday - timedelta(weeks=i)
+                        for i in range(MOMENTUM_WEEKS - 1, -1, -1)]
+    momentum_index = {d.isocalendar()[:2]: i for i, d in enumerate(momentum_mondays)}
+    momentum_weeks = [f"W{d.isocalendar()[1]:02d}" for d in momentum_mondays]
+
     initiatives = []
     shipped_feed = []
     overdue_feed = []
@@ -82,6 +93,7 @@ def build_overview(
         next_target: str | None = None
         shipped_in_window = 0
         last_shipped_at: float | None = None
+        shipped_weekly = [0] * MOMENTUM_WEEKS
 
         initiative_title = initiative["title"] if initiative else None
         for change in changes:
@@ -95,6 +107,10 @@ def build_overview(
             if status == "done":
                 if shipped_at:
                     last_shipped_at = max(last_shipped_at or 0, shipped_at)
+                    week_slot = momentum_index.get(
+                        date.fromtimestamp(shipped_at).isocalendar()[:2])
+                    if week_slot is not None:
+                        shipped_weekly[week_slot] += 1
                     if shipped_at >= window_start:
                         shipped_in_window += 1
                         shipped_feed.append({
@@ -191,6 +207,7 @@ def build_overview(
             "next_target": next_target,
             "shipped_recent": shipped_in_window,
             "last_shipped_at": last_shipped_at,
+            "shipped_weekly": shipped_weekly,
         }
         # Cost beside the initiative wherever it appears - the mission's own words.
         # None when nothing is recorded: absence and zero are different facts.
@@ -279,6 +296,7 @@ def build_overview(
     return {
         "generated_at": now,
         "shipped_window_days": shipped_window_days,
+        "momentum_weeks": momentum_weeks,
         "initiatives": initiatives,
         "shipped": shipped_feed[:SHIPPED_FEED_CAP],
         "shipped_total": len(shipped_feed),
