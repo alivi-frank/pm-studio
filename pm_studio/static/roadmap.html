@@ -677,7 +677,13 @@
   }
   .controls button:hover { border-color: var(--accent); color: var(--accent); }
   .controls .del { margin-left: auto; }
-  .controls .del.armed { background: var(--error, #c0392b); color: #fff; border-color: transparent; }
+  .inline-confirm { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-secondary); }
+  .inline-confirm .go { font-weight: 600; }
+  /* The most destructive confirmation carries the severity colour its action does. */
+  .del-confirm .go { background: var(--error, #c0392b); color: #fff; border-color: transparent; }
+  .controls .del:disabled { opacity: 0.4; }
+  .controls .del + .del-confirm { margin-left: 0; }
+  #ticket-picker button.armed { font-weight: 600; outline: 2px solid var(--accent); }
   .controls .del:hover { border-color: var(--danger); color: var(--danger); }
 
   /* ---- cross-product suggestions awaiting triage ---- */
@@ -2354,14 +2360,22 @@
     moveSelect.addEventListener("change", () => {
       const target = moveSelect.value;
       if (!target) return;
-      if (!confirm(`Move "${item.title}" to ${productPathLabel(target)}? It keeps its history and lands accepted on their board.`)) {
-        moveSelect.value = "";
-        return;
-      }
-      // A stakeholder acting on the board picked the destination directly, so it
-      // lands already triaged - no extra accept step. A PM's own curl-based move
-      // (see agent.py) omits this and lands untriaged for the destination to review.
-      patchItem(item, { move_to_product: target, triaged: true });
+      inlineConfirm({
+        anchor: moveSelect,
+        extraClass: "move-confirm",
+        message: `Move to ${productPathLabel(target)}? Keeps history, lands accepted.`,
+        confirmLabel: `Confirm — move to ${productLabel(target)}`,
+        // Withdrawing the confirmation withdraws the pick that opened it.
+        onDismiss: () => { moveSelect.value = ""; },
+        focusBack: () => moveSelect.focus(),
+        // A stakeholder acting on the board picked the destination directly, so it
+        // lands already triaged - no extra accept step. A PM's own curl-based move
+        // (see agent.py) omits this and lands untriaged for the destination to review.
+        onConfirm: () => patchItem(item, { move_to_product: target, triaged: true }),
+      });
+      // Re-picking tears the previous confirmation down, and its onDismiss clears
+      // this select - so restate the pick the strip is actually asking about.
+      moveSelect.value = target;
     });
     row.appendChild(moveSelect);
 
@@ -2438,23 +2452,19 @@
 
     const del = el("button", "del", "Delete");
     del.type = "button";
-    /* Two-step inline confirm instead of native confirm(): embedded browser panes
-       auto-dismiss native dialogs, which made Delete a silent no-op there (judged).
-       First click arms the button in place; a second click within 4s deletes;
-       otherwise it disarms itself. Same gesture count, no dialog to lose. */
-    let delArmTimer = null;
+    // The same confirmation every other irreversible control on this card uses.
     del.addEventListener("click", () => {
-      if (!del.classList.contains("armed")) {
-        del.classList.add("armed");
-        del.textContent = "Really delete?";
-        delArmTimer = setTimeout(() => {
-          del.classList.remove("armed");
-          del.textContent = "Delete";
-        }, 4000);
-        return;
-      }
-      clearTimeout(delArmTimer);
-      fetch(`/roadmap/${item.product}/items/${item.id}`, { method: "DELETE" }).catch(() => {});
+      inlineConfirm({
+        anchor: del,
+        extraClass: "del-confirm",
+        message: "Removes it and its history. Cannot be undone.",
+        confirmLabel: "Confirm — delete for good",
+        focusBack: () => del.focus(),
+        onConfirm: () => {
+          fetch(`/roadmap/${item.product}/items/${item.id}`, { method: "DELETE" })
+            .catch(() => {});
+        },
+      });
     });
     row.appendChild(del);
 
@@ -2566,6 +2576,79 @@
         return `<option value="${id}"${id === selected ? " selected" : ""}>${label}</option>`;
       })
       .join("");
+  }
+
+  /* ONE confirmation mechanism for every irreversible control on a card. Native
+     confirm() is unusable here - embedded browser panes auto-dismiss it, which turned
+     Delete and Move into silent no-ops - so the confirmation is rendered in place:
+     a strip stating what will happen, Cancel first (the way out is what tab order
+     reaches first AND what holds focus, so the Enter after an accidental arm cancels),
+     then Confirm.
+
+     This exists as one function because it did not used to: Delete was a hand-rolled
+     near-copy of Move, and every review found the copy missing a fix the original had
+     - an inert Cancel, a focus-scoped Escape, a leaked listener. Divergence was the
+     defect. Callers supply what differs and nothing else.
+
+     Dismissal is one path with three doors - Cancel, Escape (bound on the document, so
+     it works wherever focus wandered), and a click anywhere outside the strip - and all
+     three run the same teardown, which always unbinds both listeners. */
+  let openConfirm = null;
+
+  function inlineConfirm({ anchor, extraClass, message, confirmLabel, onConfirm, onDismiss, focusBack }) {
+    /* One open confirmation ON THE PAGE, enforced here rather than by each caller.
+       Per-control was not enough: arming a second control left the first one's strip
+       standing, so a card could show two contradictory prompts ("Move to X?" beside
+       "Removes it and its history") with both sets of listeners live. A confirmation
+       is a question awaiting an answer - opening another one answers the first with
+       "not now", properly, through its own teardown. */
+    if (openConfirm) openConfirm({ restoreFocus: false });
+    // While a confirmation is open its control is inert, so a second click cannot
+    // stack a second strip - the same guarantee for every caller, by one mechanism.
+    if ("disabled" in anchor) anchor.disabled = true;
+    const strip = el("span", "inline-confirm" + (extraClass ? ` ${extraClass}` : ""));
+    // The consequence appears after a click, so a screen reader has to be told.
+    strip.setAttribute("role", "status");
+    strip.appendChild(el("span", null, message));
+    const cancel = el("button", null, "Cancel");
+    cancel.type = "button";
+    const go = el("button", "go", confirmLabel);
+    go.type = "button";
+
+    const teardown = ({ restoreFocus = true } = {}) => {
+      strip.remove();
+      document.removeEventListener("click", dismiss, true);
+      document.removeEventListener("keydown", onKey, true);
+      if (openConfirm === teardown) openConfirm = null;
+      if ("disabled" in anchor) anchor.disabled = false;
+      if (onDismiss) onDismiss();
+      // Dismissing must not cost a keyboard reader their place on the card.
+      if (restoreFocus && focusBack) focusBack();
+    };
+    // Guards on the STRIP, not on one button inside it: guarding a single element let
+    // this listener fire for the Cancel beside it and tear down the wrong way.
+    const dismiss = (event) => {
+      if (event && strip.contains(event.target)) return;
+      teardown({ restoreFocus: false });
+    };
+    const onKey = (event) => {
+      if (event.key === "Escape") teardown();
+    };
+
+    cancel.addEventListener("click", () => teardown());
+    go.addEventListener("click", () => {
+      teardown({ restoreFocus: false });
+      onConfirm();
+    });
+    strip.appendChild(cancel);
+    strip.appendChild(go);
+    anchor.insertAdjacentElement("afterend", strip);
+    // Deferred: the click that armed this is still propagating and would dismiss it.
+    setTimeout(() => document.addEventListener("click", dismiss, true), 0);
+    document.addEventListener("keydown", onKey, true);
+    cancel.focus();
+    openConfirm = teardown;
+    return teardown;
   }
 
   function addForm(product, bucket, projectId, opts) {
@@ -5053,6 +5136,28 @@
 
     const createBtn = el("button", null, "Create and link");
     createBtn.type = "button";
+    /* Confirmed, not just clicked: this files a real ticket on a board other people
+       work from, and it cannot be undone from here - PM Studio never deletes
+       upstream. The confirmation is the button arming in place (native confirm()
+       gets auto-dismissed in embedded panes, turning the push into a silent
+       cancel). The details land in the picker's own note; touching any field
+       disarms. */
+    const disarmPush = () => {
+      if (!createBtn.classList.contains("armed")) return;
+      createBtn.classList.remove("armed");
+      createBtn.textContent = "Create and link";
+      pickerNote.textContent = "";
+    };
+    for (const node of [trackerSelect, projectSelect, typeInput]) {
+      node.addEventListener("change", disarmPush);
+      node.addEventListener("input", disarmPush);
+    }
+    // Same disarm rule as delete and move: a click anywhere but this button withdraws
+    // the confirmation. Editing a field still disarms too - the details it stated
+    // would otherwise go stale.
+    fields.addEventListener("click", (event) => {
+      if (event.target !== createBtn) disarmPush();
+    }, true);
     createBtn.addEventListener("click", () => {
       const type = typeInput.value.trim();
       if (!type) {
@@ -5062,14 +5167,19 @@
       }
       const t = targets.find((x) => x.id === trackerSelect.value) || targets[0];
       const parent = isEpic ? "" : pushParentKey(target.item || {}, t.id);
-      // Confirmed, not just clicked: this files a real ticket on a board other people
-      // work from, and it cannot be undone from here - PM Studio never deletes upstream.
-      if (!confirm(
-        `Create ${article(type)} ${type} in ${t.label} (${projectSelect.value}) for:\n\n` +
-        `${target.title}\n\n` +
-        (parent ? `It will hang under ${parent}, its project's epic.\n` : "") +
-        "This creates a real ticket on that board and links it here."
-      )) return;
+      if (!createBtn.classList.contains("armed")) {
+        createBtn.classList.add("armed");
+        createBtn.textContent = `Confirm — create in ${t.label}`;
+        pickerNote.classList.remove("error");
+        pickerNote.textContent =
+          `Creates ${article(type)} ${type} in ${t.label} (${projectSelect.value}) for ` +
+          `"${target.title}"` +
+          (parent ? `, under ${parent}, its project's epic` : "") +
+          ". A real ticket on that board, linked here. Click again to confirm.";
+        return;
+      }
+      createBtn.classList.remove("armed");
+      createBtn.textContent = "Create and link";
       pickerNote.textContent = "";
       pickerNote.classList.remove("error");
       runPush(
