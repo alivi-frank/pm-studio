@@ -164,6 +164,12 @@
      not a date that has passed, and painting them alike conflates juggling with late. */
   .num.spread-high { font-weight: 650; }
   .unaligned-mark { color: var(--ink-secondary); font-weight: 400; margin-left: 1px; }
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sortable:hover, th.sortable:focus-visible { color: var(--accent); }
+  th.sorted { color: var(--accent); }
+  /* A pile, not a person: the row reads as a footnote to the roster above it. */
+  .unassigned-row td { border-top: 2px solid var(--border); color: var(--ink-secondary); }
+  .pinned-note { margin-left: 8px; font-size: 0.72em; color: var(--ink-muted); }
   .areas { color: var(--ink-secondary); font-size: 0.86em; }
   .row-actions { display: flex; gap: 6px; justify-content: flex-end; }
 </style>
@@ -279,6 +285,8 @@
      Names come from Jira and ADO, so they are untrusted text and every one of them
      reaches the DOM through textContent - never a template string. */
   let DIRECTORY = { people: [], workload: [], accounts: [] };
+  let sortKey = "name";
+  let sortDesc = false;
 
   function loadFor(personId) {
     return DIRECTORY.workload.find((row) => row.person_id === personId)
@@ -446,16 +454,56 @@
     if (showAreas) headers.push(["Areas", "Where their open work sits — the tracker's own components or area paths"]);
     if (showAccounts) headers.push(["Signs in as", ""]);
     headers.push([""]);
+    /* Sortable where sorting answers something: the load columns. The spread column
+       exists to be scanned for the biggest number, which stops working the moment the
+       roster outgrows one screen - alphabetical order is no help at forty people.
+       Name sorts too, to get back. Sort is view state, so it lives in the page rather
+       than the URL and resets on reload. */
+    const SORT_KEYS = { Name: "name", Open: "open", Now: "now", Late: "overdue",
+                        Initiatives: "spread" };
     headers.forEach(([label, hint]) => {
       const th = document.createElement("th");
       th.textContent = label;
       if (hint) th.title = hint;
+      const key = SORT_KEYS[label];
+      if (key) {
+        th.className = "sortable" + (sortKey === key ? " sorted" : "");
+        th.tabIndex = 0;
+        th.setAttribute("role", "button");
+        th.title = (hint ? hint + " — " : "") + "Click to sort";
+        th.setAttribute("aria-sort", sortKey === key
+          ? (sortDesc ? "descending" : "ascending") : "none");
+        if (sortKey === key) th.textContent = label + (sortDesc ? " ↓" : " ↑");
+        const sortBy = () => {
+          // Same column flips direction; a new column starts where that column is
+          // most useful - biggest first for load, A-Z for a name.
+          if (sortKey === key) sortDesc = !sortDesc;
+          else { sortKey = key; sortDesc = key !== "name"; }
+          renderDirectory();
+        };
+        th.addEventListener("click", sortBy);
+        th.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") { event.preventDefault(); sortBy(); }
+        });
+      }
       hrow.appendChild(th);
     });
     thead.appendChild(hrow);
     table.appendChild(thead);
     const body = document.createElement("tbody");
-    DIRECTORY.people.forEach((person) => {
+    const sortValue = (person) => {
+      const load = loadFor(person.id);
+      if (sortKey === "name") return (person.name || "").toLowerCase();
+      if (sortKey === "spread") return (load.initiatives || []).length;
+      return load[sortKey] || 0;
+    };
+    const ordered = DIRECTORY.people.slice().sort((a, b) => {
+      const va = sortValue(a), vb = sortValue(b);
+      if (va !== vb) return (va < vb ? -1 : 1) * (sortDesc ? -1 : 1);
+      // One stable tiebreak everywhere, so equal loads never shuffle between renders.
+      return (a.name || "").toLowerCase().localeCompare((b.name || "").toLowerCase());
+    });
+    ordered.forEach((person) => {
       const load = loadFor(person.id);
       const row = document.createElement("tr");
 
@@ -569,6 +617,44 @@
 
       body.appendChild(row);
     });
+
+    /* Unassigned work is a row, not a footnote - the Overview's load table has said so
+       for a while, and this page dropped it, so the largest pile on most boards was
+       missing from the one screen a lead reviews load on. It is not a person: no
+       identity chips, no retire, no merge - just the pile and a way into it. */
+    const unassignedKey = DIRECTORY.unassigned_key || "UNASSIGNED";
+    const unassigned = DIRECTORY.workload.find((r) => r.person_id === unassignedKey);
+    if (unassigned && unassigned.open > 0) {
+      const row = document.createElement("tr");
+      row.className = "unassigned-row";
+      const name = document.createElement("td");
+      const link = document.createElement("a");
+      link.textContent = "Unassigned";
+      // The board keys this section "person:none", not the server's sentinel id - the
+      // sentinel lands on the right page but scrolls to nothing, which is worse than
+      // no link at all on a board this long.
+      link.href = "/roadmap?group=person&section=" + encodeURIComponent("person:none");
+      link.title = "Open work with nobody's name on it";
+      name.appendChild(link);
+      // Says why it sits below a sort it does not obey - under Open descending its 6
+      // is the largest number in the column and the exemption would read as a bug.
+      const pinned = document.createElement("span");
+      pinned.className = "pinned-note";
+      pinned.textContent = "always last";
+      pinned.title = "A pile to hand out, not somebody's load — it does not join the sort.";
+      name.appendChild(pinned);
+      row.appendChild(name);
+      cell(row, "—", "second");
+      cell(row, String(unassigned.open), "num");
+      cell(row, String(unassigned.now), "num");
+      cell(row, String(unassigned.overdue), "num" + (unassigned.overdue ? " late" : ""));
+      if (showSpread) cell(row, "—", "num");
+      if (showAreas) cell(row, "—", "areas");
+      if (showAccounts) cell(row, "—", "second");
+      cell(row, "", "");
+      body.appendChild(row);
+    }
+
     table.appendChild(body);
     container.appendChild(table);
   }
