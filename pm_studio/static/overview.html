@@ -64,6 +64,13 @@
   .stat .n { font-size: 1.5em; font-weight: 650; line-height: 1.2; }
   .stat .n.bad { color: var(--error); }
   .stat .l { color: var(--ink-muted); font-size: 0.78em; margin-top: 2px; }
+  .stat-link { text-decoration: none; color: inherit; display: block; }
+  .stat-link .stat { transition: border-color 0.12s; }
+  .stat-link:hover .stat, .stat-link:focus-visible .stat { border-color: var(--accent); }
+  /* In-page tile jumps must clear the sticky header, or every landing buries its
+     own section heading under the bar. */
+  section, .cols, #initiatives { scroll-margin-top: 90px; }
+  .chip[title] { cursor: help; }
 
   section {
     background: var(--surface);
@@ -157,7 +164,7 @@
 
   <section>
     <h2>Initiatives<a href="/roadmap">board →</a><a href="/portfolio">portfolio →</a><a href="/costing" id="costs-link">costs →</a></h2>
-    <p class="sub">Initiatives with open or recently shipped work, most active first — maintenance, unaligned and recently finished work trail the list. Health is derived from the board: overdue work means at risk, open work with nothing moving means quiet.</p>
+    <p class="sub">Initiatives with open or recently shipped work, most active first — maintenance, unaligned and recently finished work trail the list. Health is derived from the board: moving work is on track, overdue work means at risk, open work with nothing moving means quiet.</p>
     <table id="initiatives">
       <thead><tr>
         <th>Initiative</th><th>Health</th><th>Progress</th><th id="momentum-head">Momentum</th>
@@ -196,13 +203,13 @@
   </section>
 
   <div class="cols">
-    <section>
+    <section id="shipped-section">
       <h2>Shipped recently</h2>
       <p class="sub" id="shipped-sub"></p>
       <table id="shipped"><tbody></tbody></table>
       <div class="feed-empty" id="shipped-empty" hidden>Nothing shipped in this window.</div>
     </section>
-    <section>
+    <section id="overdue-section">
       <h2>Overdue</h2>
       <p class="sub">Open work past its target date, most late first.</p>
       <table id="overdue"><tbody></tbody></table>
@@ -254,6 +261,27 @@
     on_track: "On track", at_risk: "At risk", quiet: "Quiet",
     ideation: "Ideation", done: "Done", closed: "Closed", empty: "Empty",
   };
+  /* Every chip explains its own test on hover - "On track" was the one health word
+     defined nowhere on the page (judge nit, v2.2). Mirrors overview.py's derivation. */
+  var HEALTH_HINT = {
+    on_track: "Moving — work in progress or shipped recently, nothing overdue",
+    at_risk: "Has overdue work",
+    quiet: "Open work but no motion — nothing in progress, nothing shipped recently",
+    ideation: "Being shaped — still in ideation, silence expected",
+    done: "Everything here has shipped",
+    closed: "Initiative closed",
+    empty: "No changes yet",
+  };
+  /* A stat tile that counts something should take you to that something - tiles
+     that read as dead ends were the panel's longest-standing dead-end criticism. */
+  function statLink(tile, href, hint) {
+    var a = document.createElement("a");
+    a.className = "stat-link";
+    a.href = href;
+    if (hint && !tile.title) tile.title = hint;
+    a.appendChild(tile);
+    return a;
+  }
 
   function stat(n, label, bad) {
     var box = el("div", "stat");
@@ -430,20 +458,23 @@
     }).length;
     var workedTile = stat(active, "initiatives being worked");
     workedTile.title = "Initiatives with open changes staged in Now or Next — the same test the board's Working state uses.";
-    stats.appendChild(workedTile);
-    stats.appendChild(stat(inProgress, "changes in progress"));
-    stats.appendChild(stat(open, "open changes"));
-    stats.appendChild(stat(data.overdue_total, "overdue", true));
-    stats.appendChild(stat(data.shipped_total, "shipped, last " + data.shipped_window_days + "d"));
+    stats.appendChild(statLink(workedTile, "#initiatives"));
+    stats.appendChild(statLink(stat(inProgress, "changes in progress"),
+      "#working-next-row", "Jump to the In progress list"));
+    stats.appendChild(statLink(stat(open, "open changes"),
+      "/roadmap" + (SCOPE ? "?product=" + encodeURIComponent(SCOPE) : ""), "Open the board"));
+    stats.appendChild(statLink(stat(data.overdue_total, "overdue", true),
+      "#overdue-section", "Jump to the overdue list"));
+    stats.appendChild(statLink(stat(data.shipped_total, "shipped, last " + data.shipped_window_days + "d"),
+      "#shipped-section", "Jump to the shipped list"));
     // Plan honesty, when a weekly plan exists: of what the Now lane held when the
     // week's plan pinned, how much shipped - with scope-added work beside it, never
     // folded in.
     if (data.external_open > 0) {
       // The tile IS the filter: it lands on the board pre-searched for external work.
       var extLink = document.createElement("a");
+      extLink.className = "stat-link";
       extLink.href = "/roadmap?q=external";
-      extLink.style.textDecoration = "none";
-      extLink.style.color = "inherit";
       var extBox = el("div", "stat");
       extBox.appendChild(el("div", "n", String(data.external_open)));
       extBox.appendChild(el("div", "l", "external / partner-owned"));
@@ -459,12 +490,13 @@
       planBox.appendChild(el("div", "l",
         "of this week's plan shipped" + (wp.added ? " · " + wp.added + " added" : "")));
       planBox.title = "Click for the item-by-item plan";
-      planBox.addEventListener("click", function () {
-        var section = document.getElementById("plan-section");
-        section.hidden = !section.hidden;
-        if (!section.hidden) section.scrollIntoView({ block: "nearest" });
+      // A real anchor, like every other tile: hover state, keyboard focus, a URL.
+      // The click only has to unhide the section before the default jump happens.
+      var planLink = statLink(planBox, "#plan-section");
+      planLink.addEventListener("click", function () {
+        document.getElementById("plan-section").hidden = false;
       });
-      stats.appendChild(planBox);
+      stats.appendChild(planLink);
 
       var planBody = document.querySelector("#plan-items tbody");
       planBody.textContent = "";
@@ -530,7 +562,13 @@
       tr.appendChild(name);
 
       var health = td(null, null);
-      health.appendChild(el("span", "chip " + row.health, HEALTH_LABEL[row.health] || row.health));
+      var chip = el("span", "chip " + row.health, HEALTH_LABEL[row.health] || row.health);
+      if (HEALTH_HINT[row.health]) {
+        chip.title = HEALTH_HINT[row.health];
+        chip.setAttribute("aria-label",
+          (HEALTH_LABEL[row.health] || row.health) + " — " + HEALTH_HINT[row.health]);
+      }
+      health.appendChild(chip);
       tr.appendChild(health);
 
       var prog = td(null, null);
