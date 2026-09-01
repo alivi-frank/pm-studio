@@ -751,6 +751,8 @@
     color: var(--ink-primary);
     resize: vertical;
   }
+  .add-form .dest-note { font-size: 11px; color: var(--ink-secondary); margin: 2px 0 4px; }
+  .add-form .dest-note .muted { color: var(--ink-muted, var(--ink-secondary)); }
   .add-form .buttons { display: flex; gap: 5px; justify-content: flex-end; }
   .add-form button {
     font: inherit;
@@ -2551,7 +2553,8 @@
       .join("");
   }
 
-  function addForm(product, bucket, projectId) {
+  function addForm(product, bucket, projectId, opts) {
+    opts = opts || {};
     const form = el("form", "add-form");
     // Required, not optional: a change is contained within exactly one system, so the
     // picker has no blank option and the server refuses a create without one. Absent
@@ -2595,6 +2598,21 @@
         assigneeSelect.appendChild(option);
       }
     }
+    // Say where the change will land BEFORE the user commits - the destination used
+    // to be implicit (project or catch-all), and an add from an initiative section
+    // could materialize under a different heading than the "+" implied. The title is
+    // tracker-sourced text, so it reaches the DOM via textContent, never markup.
+    {
+      const project = projectId && PROJECTS_BY_ID[projectId];
+      const destTitle = project ? project.title : "Unplanned work (the product's catch-all)";
+      const note = el("div", "dest-note");
+      note.appendChild(el("span", "muted", "Lands in: "));
+      note.appendChild(document.createTextNode(destTitle));
+      // The suffix ties the project to the container whose "+" was clicked ("in this
+      // initiative") - the product form's variant already explains itself.
+      if (project && opts.destSuffix) note.appendChild(el("span", "muted", " " + opts.destSuffix));
+      form.insertBefore(note, form.querySelector(".buttons"));
+    }
     form.querySelector(".cancel").addEventListener("click", () => form.classList.remove("open"));
     form.addEventListener("submit", (e) => {
       e.preventDefault();
@@ -2630,8 +2648,16 @@
             alert(body.detail || "That change could not be created.");
           });
         }
-        form.reset();
-        form.classList.remove("open");
+        return r.json().catch(() => null).then((created) => {
+          form.reset();
+          form.classList.remove("open");
+          if (opts.onCreated) opts.onCreated(created);
+          // Post-add confirmation: a created change used to land silently inside a
+          // folded row. Reveal it with the same machinery a deep link uses - expand
+          // its section and project row, open the card, flash it, scroll to it.
+          if (created && created.id) pendingReveal = { change: created.id };
+          loadBoard();
+        });
       }).catch(() => {});
     });
     return form;
@@ -3757,7 +3783,30 @@
     const body = el("div", "group-body");
     const fillBody = buildOnce(() => {
       if (group.product && sectionAddOpen.has(group.key)) {
-        const form = addForm(group.product, "now", null);
+        /* An add from an initiative's section belongs to that initiative - route it
+           onto one of ITS projects instead of the product catch-all, which lives
+           under a different heading and made the new card materialize two sections
+           away from the "+" that was clicked (judged). Preference order: the
+           initiative's own catch-all, else its only open project, else its first
+           open project alphabetically (deterministic, and the form states it). */
+        let sectionProjectId = null;
+        if (group.kind === "initiative") {
+          const initiativeId = group.key.slice("initiative:".length);
+          const open = (group.projectIds || [])
+            .map((id) => PROJECTS_BY_ID[id])
+            .filter((p) => p && p.status !== "closed")
+            .sort((a, b) => a.title.localeCompare(b.title));
+          const own = open.find((p) => p.catch_all_for_initiative === initiativeId)
+            || (open.length === 1 ? open[0] : null)
+            || open[0] || null;
+          sectionProjectId = own ? own.id : null;
+        }
+        const form = addForm(group.product, "now", sectionProjectId, {
+          destSuffix: group.kind === "initiative" ? "(in this initiative)" : "",
+          // A successful add closes the section form for good - it used to survive
+          // re-renders and even group-by switches because only the flag kept it open.
+          onCreated: () => sectionAddOpen.delete(group.key),
+        });
         form.classList.add("open", "section-add-form");
         // The form's own Cancel only hides it; at section level it should also drop
         // the flag, or the next re-render would bring it straight back.
