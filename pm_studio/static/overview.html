@@ -70,6 +70,8 @@
   /* In-page tile jumps must clear the sticky header, or every landing buries its
      own section heading under the bar. */
   section, .cols, #initiatives { scroll-margin-top: 90px; }
+  #initiatives tbody tr { transition: opacity 0.3s; }
+  #initiatives tbody tr.dim-uncounted { opacity: 0.25; }
   .chip[title] { cursor: help; }
 
   section {
@@ -191,7 +193,7 @@
   </div>
 
   <section id="plan-section" hidden>
-    <h2>This week's plan</h2>
+    <h2>This week's plan — planned vs. actual</h2>
     <p class="sub" id="plan-sub"></p>
     <table id="plan-items"><tbody></tbody></table>
   </section>
@@ -458,7 +460,21 @@
     }).length;
     var workedTile = stat(active, "initiatives being worked");
     workedTile.title = "Initiatives with open changes staged in Now or Next — the same test the board's Working state uses.";
-    stats.appendChild(statLink(workedTile, "#initiatives"));
+    var workedLink = statLink(workedTile, "#initiatives");
+    // The tile says 7, the table shows more rows (quiet/at-risk/closed history) -
+    // judged as "nothing marking which 7". Landing from the tile briefly dims the
+    // rows it did NOT count, so the counted set is visible exactly when the reader
+    // asked for it, and the table stays clean the rest of the time.
+    workedLink.addEventListener("click", function () {
+      var rows = document.querySelectorAll("#initiatives tbody tr");
+      rows.forEach(function (tr) {
+        if (tr.dataset.working !== "1") tr.classList.add("dim-uncounted");
+      });
+      setTimeout(function () {
+        rows.forEach(function (tr) { tr.classList.remove("dim-uncounted"); });
+      }, 4000);
+    });
+    stats.appendChild(workedLink);
     stats.appendChild(statLink(stat(inProgress, "changes in progress"),
       "#working-next-row", "Jump to the In progress list"));
     stats.appendChild(statLink(stat(open, "open changes"),
@@ -541,6 +557,8 @@
       var tr = document.createElement("tr");
 
       var name = td(null, null);
+      // Lets the "being worked" tile show exactly which rows it counted (see below).
+      tr.dataset.working = row.status !== "closed" && row.id !== null && row.open_now_next > 0 ? "1" : "0";
       var sectionKey = "initiative:" + (row.id || "none");
       var titleLink = boardLink("group=initiative&section=" + encodeURIComponent(sectionKey),
         null, row.title || "Unaligned work");
