@@ -210,7 +210,7 @@ def effective_assignee(item: dict, ticket: dict | None, resolve) -> dict:
     }
 
 
-def workload(changes: Iterable[dict]) -> list[dict]:
+def workload(changes: Iterable[dict], initiative_of: dict | None = None) -> list[dict]:
     """Load per person, out of changes already joined by `effective_assignee`.
 
     Open work only. A shipped change is history: counting it would make the person who
@@ -226,6 +226,13 @@ def workload(changes: Iterable[dict]) -> list[dict]:
 
     Unassigned open work comes back as its own row (`UNASSIGNED`) rather than being
     dropped. On most boards it is the largest row, and it is the one worth acting on.
+
+    `initiative_of` maps project id -> initiative title, and is what lets the row answer
+    the third question a team lead asks after "how much" and "where": *how many separate
+    things* is this person carrying. Someone with four open changes across four
+    initiatives is in a different position from someone with four in one, and the count
+    alone cannot tell them apart. Optional, because the pivot is a portfolio fact and
+    this function is passed changes; without it `initiatives` is simply empty.
     """
     rows: dict[str, dict] = {}
 
@@ -244,6 +251,7 @@ def workload(changes: Iterable[dict]) -> list[dict]:
                 "products": {},
                 "systems": {},
                 "areas": {},
+                "initiatives": {},
             }
         # A person named by one change and unnamed by another (an id that no longer
         # resolves) keeps whichever spelling was resolvable.
@@ -279,6 +287,12 @@ def workload(changes: Iterable[dict]) -> list[dict]:
         for area in (change.get("ticket") or {}).get("components") or []:
             if area:
                 entry["areas"][area] = entry["areas"].get(area, 0) + 1
+        # Unaligned work is deliberately not counted as an initiative: it is the absence
+        # of one, and folding it in would inflate the spread of whoever holds the most
+        # untriaged work - the opposite of what this number is read for.
+        title = (initiative_of or {}).get(change.get("project_id"))
+        if title:
+            entry["initiatives"][title] = entry["initiatives"].get(title, 0) + 1
 
     def spread(counts: dict[str, int]) -> list[dict]:
         return [
@@ -294,6 +308,7 @@ def workload(changes: Iterable[dict]) -> list[dict]:
                 "products": spread(entry["products"]),
                 "systems": spread(entry["systems"]),
                 "areas": spread(entry["areas"]),
+                "initiatives": spread(entry["initiatives"]),
             }
         )
     # Heaviest first, so the table reads as a queue to rebalance; the unassigned row sorts

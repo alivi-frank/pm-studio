@@ -171,6 +171,21 @@ def _lookup_person(person_id: str) -> str:
     return person.name if person else ""
 
 
+def _initiative_titles_by_project() -> dict[str, str]:
+    """project id -> the title of the initiative it serves, for the load rollup.
+
+    Projects with no initiative are absent rather than mapped to a placeholder: a
+    person's initiative spread should count the things they are actually carrying,
+    and unaligned work is the absence of one.
+    """
+    titles = {i["id"]: i["title"] for i in portfolio_store.list_initiatives()}
+    return {
+        project["id"]: titles[project["initiative_id"]]
+        for project in portfolio_store.list_projects()
+        if project.get("initiative_id") in titles
+    }
+
+
 def _with_ticket(item: dict) -> dict:
     """Joins a roadmap change - or a project, which carries the same two link fields -
     to its linked ticket for the wire.
@@ -973,7 +988,7 @@ def list_directory() -> dict:
     ]
     return {
         "people": people_store.list_people(),
-        "workload": workload(changes),
+        "workload": workload(changes, _initiative_titles_by_project()),
         "unassigned_key": UNASSIGNED,
         # So the page can offer "this person signs in as ..." without a second request.
         # Empty in personal mode, where there are no accounts at all.
@@ -1720,7 +1735,8 @@ def overview_data(product: str | None = None) -> dict:
         cumulative["by_project"], portfolio_store
     )["initiatives"]
     payload = build_overview(
-        groups, workload(changes), cost_by_initiative=cost_rollup
+        groups, workload(changes, _initiative_titles_by_project()),
+        cost_by_initiative=cost_rollup,
     )
     payload["currency"] = costing_store.currency
     payload["scope"] = scope

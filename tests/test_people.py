@@ -456,6 +456,40 @@ class WorkloadTest(unittest.TestCase):
         # Finished work is reported, never counted as load.
         self.assertEqual(row["shipped"], 1)
 
+    def test_initiative_spread_counts_distinct_initiatives(self) -> None:
+        # Two changes in one initiative and one in another is a spread of two, ordered
+        # biggest first - the count is what "how many things are you carrying" means.
+        rows = workload(
+            [
+                self._change("dana", "now", project_id="p1"),
+                self._change("dana", "next", project_id="p2"),
+                self._change("dana", "now", project_id="p3"),
+            ],
+            {"p1": "Telemetry", "p2": "Telemetry", "p3": "Billing"},
+        )
+        self.assertEqual(
+            rows[0]["initiatives"],
+            [{"id": "Telemetry", "count": 2}, {"id": "Billing", "count": 1}],
+        )
+
+    def test_initiative_spread_ignores_unaligned_and_shipped_work(self) -> None:
+        # An unmapped project is unaligned work: absence of an initiative, not one more.
+        # Shipped work is history and never counts as load, here as everywhere else.
+        rows = workload(
+            [
+                self._change("dana", "now", project_id="p1"),
+                self._change("dana", "now", project_id="orphan"),
+                self._change("dana", "now", project_id=None),
+                self._change("dana", "later", project_id="p2", status="done"),
+            ],
+            {"p1": "Telemetry", "p2": "Billing"},
+        )
+        self.assertEqual(rows[0]["initiatives"], [{"id": "Telemetry", "count": 1}])
+
+    def test_initiative_spread_is_empty_without_the_map(self) -> None:
+        rows = workload([self._change("dana", "now", project_id="p1")])
+        self.assertEqual(rows[0]["initiatives"], [])
+
     def test_overdue_and_in_progress(self) -> None:
         row = workload(
             [self._change("dana", "now", status="in_progress", is_overdue=True)]

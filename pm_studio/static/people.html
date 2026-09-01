@@ -160,6 +160,10 @@
   }
   .num { text-align: right; font-variant-numeric: tabular-nums; }
   .num.late { color: var(--error); }
+  /* Not the overdue red: being spread across many initiatives is a shape to look at,
+     not a date that has passed, and painting them alike conflates juggling with late. */
+  .num.spread-high { font-weight: 650; }
+  .unaligned-mark { color: var(--ink-secondary); font-weight: 400; margin-left: 1px; }
   .areas { color: var(--ink-secondary); font-size: 0.86em; }
   .row-actions { display: flex; gap: 6px; justify-content: flex-end; }
 </style>
@@ -430,10 +434,15 @@
     // personal mode nobody signs in, and until a tracker sync brings components there
     // are no areas. A column of em-dashes is noise pretending to be information.
     const showAreas = DIRECTORY.people.some((p) => (loadFor(p.id).areas || []).length);
+    // Same omit-when-empty rule: a portfolio with no initiatives yet gets no column.
+    const showSpread = DIRECTORY.people.some((p) => (loadFor(p.id).initiatives || []).length);
     const showAccounts = DIRECTORY.accounts.length > 0;
     const headers = [["Name", ""], ["Known as", "How each tracker spells this person"],
      ["Open", "Open changes assigned to them"], ["Now", "Of those, in the Now horizon"],
      ["Late", "Past their target date"]];
+    if (showSpread) headers.push(["Initiatives",
+      "How many separate initiatives their open work spans — four changes in four initiatives is a different week from four in one. "
+      + "Work no initiative is carrying is not counted; the cell says how much of it there is."]);
     if (showAreas) headers.push(["Areas", "Where their open work sits — the tracker's own components or area paths"]);
     if (showAccounts) headers.push(["Signs in as", ""]);
     headers.push([""]);
@@ -480,6 +489,42 @@
       cell(row, String(load.open), "num");
       cell(row, String(load.now), "num");
       cell(row, String(load.overdue), "num" + (load.overdue ? " late" : ""));
+      /* The count is the signal a lead scans for; the names are what makes it
+         actionable, so they ride along as the cell's own tooltip rather than a second
+         column.
+
+         Three states, deliberately distinguished: no open work at all is "—" (nothing
+         to say), open work that no initiative is carrying is 0 (a real answer - their
+         week has no shape yet), and a dash for both would make an idle person and a
+         person holding three untriaged items look identical. Unaligned work is never
+         folded into the count (see people.workload) but IS disclosed underneath, or
+         the number would quietly describe only half of what they carry. */
+      if (showSpread) {
+        const spread = load.initiatives || [];
+        const aligned = spread.reduce((sum, i) => sum + i.count, 0);
+        const unaligned = Math.max(0, load.open - aligned);
+        const cellNode = cell(row, load.open ? String(spread.length) : "—",
+          "num" + (spread.length >= 4 ? " spread-high" : ""));
+        if (cellNode && load.open) {
+          const lines = spread.map((i) => `${i.id} (${i.count})`);
+          if (unaligned) {
+            lines.push(`${unaligned} not in any initiative — not counted here`);
+            /* Visible, not hover-only: a number covering half a person's work must not
+               look identical to one covering all of it, and a tooltip says nothing to
+               a touch or keyboard reader. The mark is the disclosure; the tooltip and
+               the accessible name carry the wording. */
+            const mark = document.createElement("sup");
+            mark.className = "unaligned-mark";
+            mark.textContent = `+${unaligned}`;
+            cellNode.appendChild(mark);
+          }
+          if (spread.length >= 4) lines.push("Four or more is worth a look.");
+          cellNode.title = lines.join("\n");
+          cellNode.setAttribute("aria-label",
+            `${spread.length} initiatives`
+            + (unaligned ? `, plus ${unaligned} not in any initiative` : ""));
+        }
+      }
       // The tracker's areas, then the products, capped - the same hint the board's load
       // table gives, in the same order: coarse before fine.
       if (showAreas) {
