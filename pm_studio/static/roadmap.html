@@ -2126,10 +2126,16 @@
   /* The activity glyph a section heading carries and the Show filter's vocabulary -
      label and meaning in one place so the icon tooltip, the filter button and the
      hidden-note all say the same thing. */
+  /* One ontology across pages (Overview, board, exports): Working / Parked / Done.
+     "Working" is the same test the Overview's "initiatives being worked" tile uses
+     (open changes staged in Now or Next), so the two screens can never disagree.
+     "Parked" deliberately avoids "quiet" - the Overview's health vocabulary owns that
+     word for a different test (open work with no motion), and one word must not carry
+     two incompatible meanings across pages. */
   const STATE_META = {
-    active: { label: "Active", hint: "Working — open changes in Now or Next" },
-    inactive: { label: "Inactive", hint: "Inactive — nothing in Now or Next" },
-    completed: { label: "Completed", hint: "Completed — an initiative all of whose work is done" },
+    active: { label: "Working", hint: "Working — open changes staged in Now or Next" },
+    inactive: { label: "Parked", hint: "Parked — nothing staged in Now or Next" },
+    completed: { label: "Done", hint: "Done — everything underneath is finished" },
   };
   const STATE_SHAPES = {
     // A play triangle: this board is being worked right now.
@@ -2787,6 +2793,9 @@
     const open = changes.filter(isOutstanding);
     if (open.some((c) => c.bucket === "now" || c.bucket === "next")) return "active";
     if (group.kind !== "initiative") return "inactive";
+    // A closed initiative with nothing outstanding is finished, full stop - without
+    // this it falls through to "parked", whose hint promises open work it doesn't have.
+    if (group.closed && !open.length) return "completed";
     // An initiative in ideation that sessions touched recently IS being worked -
     // capturing ideas, researching, checking data. It has no changes by definition,
     // so this is the one active state the roadmap cannot testify to itself; the

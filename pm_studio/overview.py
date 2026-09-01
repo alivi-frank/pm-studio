@@ -74,6 +74,9 @@ def build_overview(
         changes = [c for entry in group["projects"] for c in entry["changes"]]
         counts = {"total": len(changes), "pending": 0, "in_progress": 0, "done": 0}
         overdue = 0
+        # Open work staged in the Now/Next lanes - the board's "Working" state uses
+        # exactly this test, so any count shown beside it must share the definition.
+        open_now_next = 0
         products: dict[str, int] = {}
         people: dict[str, int] = {}
         next_target: str | None = None
@@ -125,6 +128,8 @@ def build_overview(
             }
             if change.get("owner"):
                 external_open += 1
+            if change.get("bucket") in ("now", "next"):
+                open_now_next += 1
             if status == "in_progress":
                 working_feed.append(entry)
             elif change.get("bucket") == "next":
@@ -175,6 +180,7 @@ def build_overview(
             "health": health,
             "counts": counts,
             "open": counts["pending"] + counts["in_progress"],
+            "open_now_next": open_now_next,
             "pct_done": round(100 * counts["done"] / counts["total"]) if counts["total"] else 0,
             "overdue": overdue,
             "products": sorted(products, key=products.get, reverse=True),

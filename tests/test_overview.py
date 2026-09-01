@@ -17,7 +17,7 @@ DAY = 86400.0
 
 
 def change(change_id, status="pending", *, product="web", shipped_at=None,
-           target_at=None, is_overdue=False, assignee=None):
+           target_at=None, is_overdue=False, assignee=None, bucket=None):
     return {
         "id": change_id,
         "product": product,
@@ -27,6 +27,7 @@ def change(change_id, status="pending", *, product="web", shipped_at=None,
         "target_at": target_at,
         "is_overdue": is_overdue,
         "assigned": {"name": assignee} if assignee else None,
+        "bucket": bucket,
     }
 
 
@@ -54,6 +55,25 @@ class RollupTest(unittest.TestCase):
         self.assertEqual(row["counts"], {"total": 3, "pending": 1, "in_progress": 1, "done": 1})
         self.assertEqual(row["open"], 2)
         self.assertEqual(row["pct_done"], 33)
+
+    def test_open_now_next_shares_the_boards_working_test(self) -> None:
+        # Open changes staged in Now or Next count; Later, unstaged, and done work
+        # never does - the Overview tile and the board's "Working" state must agree.
+        data = build([group("A", [
+            change("a", "in_progress", bucket="now"),
+            change("b", "pending", bucket="next"),
+            change("c", "pending", bucket="later"),
+            change("d", "pending"),
+            change("e", "done", bucket="now", shipped_at=NOW - DAY),
+        ])])
+        row = data["initiatives"][0]
+        self.assertEqual(row["open_now_next"], 2)
+        self.assertEqual(row["open"], 4)
+
+    def test_open_now_next_counts_maintenance_too(self) -> None:
+        data = build([group("Upkeep", [change("a", "in_progress", bucket="now")],
+                            is_maintenance=True)])
+        self.assertEqual(data["initiatives"][0]["open_now_next"], 1)
 
     def test_products_and_people_come_from_open_changes(self) -> None:
         data = build([group("A", [

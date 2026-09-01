@@ -152,7 +152,7 @@
   <div class="stats" id="stats"></div>
 
   <section>
-    <h2>In flight<a href="/roadmap">board →</a><a href="/portfolio">portfolio →</a><a href="/costing" id="costs-link">costs →</a></h2>
+    <h2>Initiatives<a href="/roadmap">board →</a><a href="/portfolio">portfolio →</a><a href="/costing" id="costs-link">costs →</a></h2>
     <p class="sub">Initiatives with open or recently shipped work, most active first — maintenance, unaligned and recently finished work trail the list. Health is derived from the board: overdue work means at risk, open work with nothing moving means quiet.</p>
     <table id="initiatives">
       <thead><tr>
@@ -166,8 +166,8 @@
 
   <div class="cols" id="working-next-row">
     <section>
-      <h2>Working now</h2>
-      <p class="sub" id="working-sub">Changes in progress, dated commitments first.</p>
+      <h2>In progress</h2>
+      <p class="sub" id="working-sub">Changes someone is working on right now, dated commitments first.</p>
       <table id="working"><tbody></tbody></table>
       <div class="feed-empty" id="working-empty" hidden>Nothing is in progress.</div>
     </section>
@@ -186,7 +186,7 @@
   </section>
 
   <section id="stale-section" hidden>
-    <h2>Gone quiet</h2>
+    <h2>Stalled</h2>
     <p class="sub" id="stale-sub">In progress, but untouched for a week or more — stalest first.</p>
     <table id="stale"><tbody></tbody></table>
   </section>
@@ -268,9 +268,9 @@
     lines.push("");
     var bits = [];
     data.initiatives.forEach(function (r) {
-      if (r.status !== "closed" && r.id !== null && !r.is_maintenance && r.open > 0) bits.push(1);
+      if (r.status !== "closed" && r.id !== null && r.open_now_next > 0) bits.push(1);
     });
-    lines.push(bits.length + " initiatives in flight · "
+    lines.push(bits.length + " initiatives being worked · "
       + (data.working_total || 0) + " in progress · "
       + (data.overdue_total || 0) + " overdue · "
       + (data.shipped_total || 0) + " shipped in the last " + data.shipped_window_days + "d"
@@ -278,7 +278,7 @@
           ? " · " + data.week_plan.shipped + "/" + data.week_plan.planned_total + " of this week's plan shipped"
           : ""));
     lines.push("");
-    lines.push("IN FLIGHT");
+    lines.push("INITIATIVES");
     var HEALTH = { on_track: "on track", at_risk: "AT RISK", quiet: "quiet",
                    ideation: "ideation", done: "done", closed: "closed" };
     data.initiatives.forEach(function (r) {
@@ -304,7 +304,7 @@
       });
       if (entries.length > 10) lines.push("  …and " + (entries.length - 10) + " more");
     }
-    feed("WORKING NOW", data.working, function (e) {
+    feed("IN PROGRESS", data.working, function (e) {
       return (e.target_at ? " — due " + e.target_at : "")
         + (e.idle_days >= 7 ? " — untouched " + e.idle_days + "d" : "");
     });
@@ -312,7 +312,7 @@
       return " — " + (e.days_ago === 0 ? "today" : e.days_ago + "d ago");
     });
     feed("OVERDUE", data.overdue, function (e) { return " — " + e.days_late + "d late"; });
-    feed("GONE QUIET", data.stale, function (e) { return " — untouched " + e.idle_days + "d"; });
+    feed("STALLED", data.stale, function (e) { return " — untouched " + e.idle_days + "d"; });
     return lines.join("\n");
   }
 
@@ -418,10 +418,15 @@
     });
     var stats = document.getElementById("stats");
     stats.textContent = "";
+    /* "Being worked" shares the board's Working test exactly (open changes staged in
+       Now or Next, maintenance included) so this number and the board's Working count
+       can never disagree - the vocabulary drift stakeholders actually tripped on. */
     var active = data.initiatives.filter(function (r) {
-      return r.status !== "closed" && r.id !== null && !r.is_maintenance && r.open > 0;
+      return r.status !== "closed" && r.id !== null && r.open_now_next > 0;
     }).length;
-    stats.appendChild(stat(active, "initiatives in flight"));
+    var workedTile = stat(active, "initiatives being worked");
+    workedTile.title = "Initiatives with open changes staged in Now or Next — the same test the board's Working state uses.";
+    stats.appendChild(workedTile);
     stats.appendChild(stat(inProgress, "changes in progress"));
     stats.appendChild(stat(open, "open changes"));
     stats.appendChild(stat(data.overdue_total, "overdue", true));
@@ -582,7 +587,7 @@
     planList("next", "next-empty", "next-sub",
       data.next_up || [], data.next_total || 0, "Planned next, not yet started");
 
-    // Only present when there is something to say - an empty "gone quiet" section
+    // Only present when there is something to say - an empty "stalled" section
     // would itself be noise.
     var staleSection = document.getElementById("stale-section");
     var staleEntries = data.stale || [];
