@@ -677,6 +677,7 @@
   }
   .controls button:hover { border-color: var(--accent); color: var(--accent); }
   .controls .del { margin-left: auto; }
+  .controls .del.armed { background: var(--error, #c0392b); color: #fff; border-color: transparent; }
   .controls .del:hover { border-color: var(--danger); color: var(--danger); }
 
   /* ---- cross-product suggestions awaiting triage ---- */
@@ -2437,8 +2438,22 @@
 
     const del = el("button", "del", "Delete");
     del.type = "button";
+    /* Two-step inline confirm instead of native confirm(): embedded browser panes
+       auto-dismiss native dialogs, which made Delete a silent no-op there (judged).
+       First click arms the button in place; a second click within 4s deletes;
+       otherwise it disarms itself. Same gesture count, no dialog to lose. */
+    let delArmTimer = null;
     del.addEventListener("click", () => {
-      if (!confirm(`Delete "${item.title}"?`)) return;
+      if (!del.classList.contains("armed")) {
+        del.classList.add("armed");
+        del.textContent = "Really delete?";
+        delArmTimer = setTimeout(() => {
+          del.classList.remove("armed");
+          del.textContent = "Delete";
+        }, 4000);
+        return;
+      }
+      clearTimeout(delArmTimer);
       fetch(`/roadmap/${item.product}/items/${item.id}`, { method: "DELETE" }).catch(() => {});
     });
     row.appendChild(del);
