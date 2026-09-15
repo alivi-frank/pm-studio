@@ -322,6 +322,40 @@ class SystemSpec:
 
 
 @dataclass(frozen=True)
+class SignalsConfig:
+    """Engineering-intelligence inputs (the `[signals]` table). Optional: with no
+    table the layer still runs over git and the configured trackers with these
+    defaults; every threshold and weight can be tuned per deployment, and the judge's
+    own suggestions are layered on top at runtime (signals/tuning.json)."""
+
+    # Earliest activity pulled, ISO date. History before it is never fetched.
+    since: str = "2024-01-01"
+    # A day someone was active counts for this many hours, split across what they
+    # touched by signal weight; explicit worklogs override the split.
+    capacity_hours_per_day: float = 8.0
+    # IANA zone used to bucket instants into working days and hours.
+    timezone: str = "America/New_York"
+    # Background refresh cadence; 0 disables the loop (manual refresh only).
+    auto_refresh_minutes: float = 180.0
+    # Extra repo-root-relative git checkouts to scan beyond every [systems] path.
+    extra_repos: tuple[str, ...] = ()
+    # Model for the intelligence judge; empty = strongest declared (opus tier).
+    judge_model: str = ""
+    # Run the judge automatically after each refresh.
+    auto_judge: bool = False
+    # Rule thresholds and signal weights, merged over the package defaults.
+    thresholds: dict[str, float] = field(default_factory=dict)
+    weights: dict[str, float] = field(default_factory=dict)
+    # ADO projects whose pull requests are pulled (needs the ADO tracker's PAT).
+    ado_pr_projects: tuple[str, ...] = ()
+    # "observed": a person's hours are exactly their active days x capacity (nothing is
+    # invented for days with no signal). "scaled": each person's week is brought up to
+    # the full weekly capacity (5 x capacity_hours_per_day), keeping the activity split -
+    # the timesheet-replacement stance finance usually wants. The page can preview either.
+    allocation_mode: str = "observed"
+
+
+@dataclass(frozen=True)
 class Config:
     repo_root: Path
     project_name: str
@@ -391,6 +425,8 @@ class Config:
     # Empty unless the deployment declared [[trackers]]; the whole Jira/ADO feature is
     # dormant in that case and the board looks exactly as it did before.
     trackers: tuple[TrackerConfig, ...] = ()
+    # Optional [signals] table - see SignalsConfig. Always present with defaults.
+    signals: SignalsConfig = field(default_factory=SignalsConfig)
 
     def tracker(self, tracker_id: str) -> TrackerConfig | None:
         return next((t for t in self.trackers if t.id == tracker_id), None)
@@ -848,6 +884,54 @@ def _parse_costing(raw: dict) -> CostingConfig:
     )
 
 
+def _parse_signals(raw: dict) -> SignalsConfig:
+    """Reads the optional [signals] table. Lenient on purpose: a bad number falls back
+    to its default rather than refusing to start, because this layer is read-only
+    intelligence over data the rest of the tool owns."""
+    table = raw.get("signals")
+    if not isinstance(table, dict):
+        return SignalsConfig()
+
+    def num(key: str, default: float) -> float:
+        try:
+            return float(table.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def mapping(key: str) -> dict[str, float]:
+        value = table.get(key)
+        if not isinstance(value, dict):
+            return {}
+        out: dict[str, float] = {}
+        for k, v in value.items():
+            try:
+                out[str(k)] = float(v)
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    def strings(key: str) -> tuple[str, ...]:
+        value = table.get(key)
+        if not isinstance(value, list):
+            return ()
+        return tuple(str(v).strip() for v in value if str(v).strip())
+
+    since = str(table.get("since", "2024-01-01")).strip() or "2024-01-01"
+    return SignalsConfig(
+        since=since,
+        capacity_hours_per_day=num("capacity_hours_per_day", 8.0),
+        timezone=str(table.get("timezone", "America/New_York")).strip() or "America/New_York",
+        auto_refresh_minutes=num("auto_refresh_minutes", 180.0),
+        extra_repos=strings("extra_repos"),
+        judge_model=str(table.get("judge_model", "")).strip(),
+        auto_judge=bool(table.get("auto_judge", False)),
+        thresholds=mapping("thresholds"),
+        weights=mapping("weights"),
+        ado_pr_projects=strings("ado_pr_projects"),
+        allocation_mode=str(table.get("allocation_mode", "observed")).strip() if str(table.get("allocation_mode", "observed")).strip() in ("observed", "scaled") else "observed",
+    )
+
+
 def _parse_smtp(raw: dict) -> SmtpConfig | None:
     """Reads the optional [smtp] table. The password may be given inline, but
     `password_env` (the name of an environment variable to read it from) is preferred
@@ -1286,6 +1370,7 @@ def load_config(repo_root: Path | None = None) -> Config:
         mode=_parse_mode(raw, config_path),
         smtp=_parse_smtp(raw),
         costing=_parse_costing(raw),
+        signals=_parse_signals(raw),
         trackers=_parse_trackers(raw, config_path, products, product_systems, systems),
     )
 

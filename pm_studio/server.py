@@ -72,6 +72,8 @@ from .roadmap import (
     systems_declared,
 )
 from .sessions import DEFAULT_SESSION_ID, SessionManager, SessionRuntime
+from .signals import api as signals_api
+from .signals.service import IntelligenceService
 from .tasks import validate_dispatch_system
 from .trackers import (
     TYPE_EPIC,
@@ -134,6 +136,48 @@ costing_store = CostingStore(
     currency=CONFIG.costing.currency,
 )
 plan_store = PlanStore(CONFIG.workspace_dir / "plans")
+
+
+def _signals_rate_for(person_id: str) -> tuple[float | None, str]:
+    """The costing roster is keyed by account; a directory person reaches it through
+    account_id. Everyone else gets the blended rate, or nothing."""
+    person = people_store.get(person_id)
+    account_id = getattr(person, "account_id", None) if person is not None else None
+    entry = costing_store.entry_for(account_id or person_id)
+    return costing_store._resolve_rate(entry)
+
+
+# The engineering-intelligence layer (pm_studio.signals): the ledger of every commit,
+# ticket transition, worklog and agent turn, attributed up the work model. Built from
+# callables onto the stores above so the package never imports them. Read-only over
+# everything the rest of this file owns.
+intelligence_service = IntelligenceService(
+    repo_root=CONFIG.repo_root,
+    workspace_dir=CONFIG.workspace_dir,
+    config=CONFIG.signals,
+    trackers=list(CONFIG.trackers),
+    systems=CONFIG.systems,
+    product_systems=CONFIG.product_systems,
+    routes=[
+        {"tracker_id": t.id, "component": r.component, "project": r.project, "product": r.product, "system": r.system}
+        for t in CONFIG.trackers for r in t.routes
+    ],
+    stores={
+        "tickets": lambda: [t.to_dict() for tc in CONFIG.trackers for t in tracker_store.tickets_of(tc.id)],
+        "changes": lambda: [item for items in roadmap_store.list_all().values() for item in items],
+        "projects": portfolio_store.list_projects,
+        "initiatives": portfolio_store.list_initiatives,
+        "goals": portfolio_store.list_goals,
+        "people": people_store.list_people,
+        "accounts": (lambda: account_store.list_users()) if CONFIG.is_enterprise else (lambda: []),
+        "releases": lambda: tracker_store.list_releases(),
+        "trackers": lambda: list(CONFIG.trackers),
+        "product_labels": lambda: dict(CONFIG.products),
+    },
+    rate_for=_signals_rate_for,
+    currency=CONFIG.costing.currency,
+    fallback_model=CONFIG.default_model or "",
+)
 
 # task_id -> the user who dispatched it. A dev task's token spend is only known when it
 # finishes, by which time the request that started it is long gone, so the dispatcher is
@@ -578,6 +622,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # runs no extra thread at all.
     if tracker_store.is_configured:
         threading.Thread(target=_tracker_sync_loop, daemon=True).start()
+    # The intelligence ledger refreshes on its own cadence ([signals]
+    # auto_refresh_minutes); 0 leaves it to the page's Refresh button.
+    if CONFIG.signals.auto_refresh_minutes > 0:
+        threading.Thread(target=intelligence_service.background_loop, daemon=True).start()
     yield
 
 
@@ -4347,3 +4395,21 @@ async def chat_ws_alias(websocket: WebSocket) -> None:
 @app.websocket("/ws/tasks")
 async def tasks_ws_alias(websocket: WebSocket) -> None:
     await _run_tasks_ws(websocket, DEFAULT_SESSION_ID)
+
+
+def _can(request: Request, capability: Capability) -> bool:
+    """Non-raising twin of _require, for shaping a payload by role."""
+    if not CONFIG.is_enterprise:
+        return True
+    user = _current_user(request)
+    return user is not None and role_has(user.role, capability)
+
+
+signals_api.mount(
+    app,
+    intelligence_service,
+    require=_require,
+    can=_can,
+    audit=_audit,
+    static_dir=STATIC_DIR,
+)

@@ -1,5 +1,11 @@
 # Architecture Specification
 
+> The engineering-intelligence layer (`pm_studio/signals/`, the `/intelligence` page)
+> is specified separately in [INTELLIGENCE.md](INTELLIGENCE.md): a ledger of every
+> commit, ticket transition, worklog and agent turn, attributed up the work model below
+> and judged by an independent read-only agent. It reads the stores described here and
+> writes none of them.
+
 Complete technical spec of PM Studio (~6,100 lines of Python + 11 static HTML pages):
 the package `pm_studio/` with modules `config.py`, `models.py`, `gitsnapshot.py`,
 `roadmap.py`, `portfolio.py`, `tasks.py`, `judge.py`, `agent.py`, `sessions.py`, `accounts.py`,

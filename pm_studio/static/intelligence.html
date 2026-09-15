@@ -1,0 +1,539 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PM Studio — Intelligence</title>
+<link rel="stylesheet" href="/static/nav.css" />
+<script src="/static/nav.js"></script>
+<style>
+  :root {
+    color-scheme: light dark;
+    --surface: #fcfcfb; --page: #f9f9f7;
+    --ink-primary: #0b0b0b; --ink-secondary: #52514e; --ink-muted: #898781;
+    --border: rgba(11, 11, 11, 0.10); --accent: #2a78d6; --accent-fg: #fff;
+    --note-bg: rgba(42, 120, 214, 0.07); --track: rgba(11, 11, 11, 0.06); --hover: rgba(11,11,11,0.04);
+    /* categorical slots (dataviz reference palette, fixed order) */
+    --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300; --s7: #4a3aa7; --s8: #e34948; --s-other: #a9a79f;
+    /* sequential blue ramp */
+    --q1: #cde2fb; --q2: #9ec5f4; --q3: #6da7ec; --q4: #3987e5; --q5: #256abf; --q6: #184f95; --q7: #0d366b;
+    /* status (never themed) */
+    --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+    --chip-ok-bg: rgba(12,163,12,0.10); --chip-warn-bg: rgba(250,178,25,0.16); --chip-serious-bg: rgba(236,131,90,0.16); --chip-crit-bg: rgba(208,59,59,0.12); --chip-quiet-bg: rgba(11,11,11,0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface: #1a1a19; --page: #0d0d0d;
+      --ink-primary: #fff; --ink-secondary: #c3c2b7; --ink-muted: #898781;
+      --border: rgba(255,255,255,0.10); --accent: #3987e5; --note-bg: rgba(57,135,229,0.12); --track: rgba(255,255,255,0.08); --hover: rgba(255,255,255,0.05);
+      --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767; --s-other: #6f6e68;
+      --q1: #184f95; --q2: #1c5cab; --q3: #256abf; --q4: #2a78d6; --q5: #3987e5; --q6: #6da7ec; --q7: #9ec5f4;
+      --chip-quiet-bg: rgba(255,255,255,0.08);
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; background: var(--page); color: var(--ink-primary); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 14px; }
+  main { padding: 20px 24px 60px; max-width: 1360px; margin: 0 auto; }
+  section { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin-bottom: 18px; }
+  h2 { font-size: 1.0em; margin: 0 0 2px; display: flex; align-items: baseline; gap: 12px; }
+  h2 .count { color: var(--ink-muted); font-weight: 400; font-size: 0.85em; }
+  h2 a { font-size: 0.8em; font-weight: 400; color: var(--accent); text-decoration: none; margin-left: auto; }
+  h3 { font-size: 0.86em; margin: 14px 0 6px; color: var(--ink-secondary); font-weight: 600; }
+  p.sub { margin: 0 0 14px; color: var(--ink-muted); font-size: 0.84em; line-height: 1.5; }
+  .muted { color: var(--ink-muted); } .second { color: var(--ink-secondary); }
+  .note { padding: 10px 13px; margin: 0 0 14px; font-size: 0.84em; line-height: 1.5; color: var(--ink-secondary); background: var(--note-bg); border-radius: 8px; }
+  .note.warn { background: var(--chip-warn-bg); }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .cols-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; }
+  .cols-32 { display: grid; grid-template-columns: 3fr 2fr; gap: 20px; }
+  @media (max-width: 960px) { .cols, .cols-3, .cols-32 { grid-template-columns: 1fr; } }
+  /* controls in the nav slot: scoped under #pm-nav .pmnav-slot so they win against the
+     nav's defensive reset; the period switch uses the nav's own segmented control. */
+  #pm-nav .pmnav-slot .ctl { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 0.92em; }
+  #pm-nav .pmnav-slot .ctl select, #pm-nav .pmnav-slot .ctl input, #pm-nav .pmnav-slot .ctl button.ctl-btn { font: inherit; font-size: 0.95em; padding: 4px 9px; border-radius: 7px; border: 1px solid var(--border); background: var(--surface); color: var(--ink-primary); cursor: pointer; }
+  #pm-nav .pmnav-slot .ctl button.ctl-btn:hover { background: var(--hover); }
+  #pm-nav .pmnav-slot .ctl button.ctl-btn:disabled { opacity: 0.6; cursor: default; }
+  #pm-nav .pmnav-slot .ctl input[type=date] { width: 138px; cursor: text; }
+  #pm-nav .pmnav-slot .ctl select { max-width: 260px; }
+  #pm-nav .pmnav-slot .ctl .arrow { color: var(--ink-muted); }
+  .btn { font: inherit; font-size: 0.95em; padding: 5px 9px; border-radius: 7px; border: 1px solid var(--border); background: var(--surface); color: var(--ink-primary); }
+  .btn { cursor: pointer; } .btn:hover { background: var(--hover); }
+  .btn.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+  .btn.small { padding: 2px 8px; font-size: 0.8em; }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; background: transparent; padding: 5px 9px; cursor: pointer; color: var(--ink-secondary); }
+  .seg button[aria-pressed=true] { background: var(--accent); color: var(--accent-fg); }
+  /* KPI tiles */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
+  .stat .v { font-size: 1.6em; font-weight: 600; letter-spacing: -0.01em; line-height: 1.1; }
+  .stat .l { color: var(--ink-muted); font-size: 0.78em; margin-top: 3px; }
+  .stat .d { color: var(--ink-secondary); font-size: 0.76em; margin-top: 4px; }
+  .stat.warn .v { color: var(--critical); }
+  /* tables */
+  table { width: 100%; border-collapse: collapse; font-size: 0.87em; }
+  th { text-align: left; font-weight: 500; font-size: 0.82em; color: var(--ink-muted); padding: 0 10px 7px 0; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  tr:last-child td { border-bottom: 0; }
+  tr.click { cursor: pointer; } tr.click:hover td { background: var(--hover); }
+  td a { color: inherit; text-decoration: none; } td a:hover { color: var(--accent); text-decoration: underline; }
+  .bar { display: inline-block; height: 8px; border-radius: 4px; background: var(--track); overflow: hidden; vertical-align: middle; width: 120px; margin-right: 8px; }
+  .bar > span { display: block; height: 100%; background: var(--s1); border-radius: 4px; }
+  .bar > span.capex { background: var(--s3); }
+  .chip { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 0.76em; font-weight: 550; white-space: nowrap; }
+  .chip.high { background: var(--chip-crit-bg); color: var(--critical); }
+  .chip.medium { background: var(--chip-serious-bg); color: var(--serious); }
+  .chip.low { background: var(--chip-warn-bg); color: #8a5a00; } @media (prefers-color-scheme: dark) { .chip.low { color: var(--warning); } }
+  .chip.info, .chip.quiet, .chip.maint { background: var(--chip-quiet-bg); color: var(--ink-secondary); }
+  .chip.ok { background: var(--chip-ok-bg); color: var(--good); }
+  .chip.confirm { background: var(--chip-ok-bg); color: var(--good); } .chip.noise { background: var(--chip-quiet-bg); color: var(--ink-muted); } .chip.needs_data { background: var(--chip-warn-bg); color: #8a5a00; }
+  /* charts */
+  .chart { width: 100%; height: auto; display: block; overflow: visible; }
+  .chart text { fill: var(--ink-secondary); font-size: 11px; font-family: inherit; }
+  .chart .axis { stroke: var(--border); }
+  .chart .grid { stroke: var(--border); stroke-dasharray: 2 3; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 0.8em; color: var(--ink-secondary); margin: 6px 0 0; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  #tip { position: fixed; pointer-events: none; z-index: 50; background: var(--ink-primary); color: var(--page); padding: 6px 9px; border-radius: 6px; font-size: 0.8em; max-width: 320px; line-height: 1.4; display: none; }
+  /* findings */
+  .finding { display: grid; grid-template-columns: 90px 1fr auto; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); align-items: start; }
+  .finding:last-child { border-bottom: 0; }
+  .finding .t { font-weight: 550; } .finding .d { color: var(--ink-secondary); font-size: 0.88em; margin-top: 2px; line-height: 1.45; }
+  .finding .ev { font-size: 0.8em; color: var(--ink-muted); margin-top: 4px; } .finding .ev div { margin-top: 1px; }
+  .finding .acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  .finding .rule { font-size: 0.76em; color: var(--ink-muted); }
+  .facets { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+  .facet { border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px; font-size: 0.8em; cursor: pointer; background: transparent; color: var(--ink-secondary); }
+  .facet[aria-pressed=true] { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+  details summary { cursor: pointer; color: var(--accent); font-size: 0.86em; margin: 8px 0; }
+  .scores { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .score .l { font-size: 0.78em; color: var(--ink-muted); } .score .v { font-size: 1.25em; font-weight: 600; }
+  .score .bar { width: 100%; margin: 4px 0 0; }
+  .heat td { padding: 1px; border: 0; } .heat .cell { width: 100%; height: 14px; border-radius: 2px; background: var(--q1); }
+  .heat th { padding: 0 4px 2px 0; font-size: 0.7em; }
+  dialog { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: var(--ink-primary); max-width: 900px; width: 92vw; padding: 18px 20px; }
+  dialog::backdrop { background: rgba(0,0,0,0.35); }
+  .empty { color: var(--ink-muted); font-size: 0.86em; padding: 8px 0; }
+  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--ink-muted); }
+  .status-dot.ok { background: var(--good); } .status-dot.error, .status-dot.partial { background: var(--critical); } .status-dot.cached { background: var(--warning); }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; font-size: 0.85em; }
+  .kv dt { color: var(--ink-muted); } .kv dd { margin: 0; }
+  .inline-list { font-size: 0.86em; line-height: 1.6; }
+  .toc { display: flex; gap: 12px; flex-wrap: wrap; font-size: 0.82em; margin: 0 0 14px; }
+  .toc a { color: var(--accent); text-decoration: none; } .toc a:hover { text-decoration: underline; }
+  .spin { display: inline-block; width: 10px; height: 10px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.9s linear infinite; vertical-align: -1px; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="pm-nav" data-page="intelligence"></div>
+<div id="tip"></div>
+<main>
+  <div id="banner"></div>
+  <nav class="toc" aria-label="Sections">
+    <a href="#investment">Investment</a><a href="#impact">Impact</a><a href="#flow">Flow</a><a href="#work">How we work</a><a href="#radar">Radar</a><a href="#judge">Judge</a><a href="#finance">Capitalization</a><a href="#sources">Sources</a>
+  </nav>
+  <div class="stats" id="stats"></div>
+
+  <section id="investment">
+    <h2>Where the effort went <span class="count" id="inv-count"></span><a href="/portfolio">portfolio →</a></h2>
+    <p class="sub">Activity-weighted hours: each person's active day is worth the configured capacity, worklogs are booked where logged, and the rest is split across what they actually touched — commits, transitions, comments — not across what is merely assigned. Unattributed is effort the portfolio cannot place: unkeyed commits, unlinked tickets, unknown people.</p>
+    <div class="cols-32">
+      <div>
+        <h3 id="series-title">Hours per week, by initiative</h3>
+        <svg class="chart" id="series-chart"></svg>
+        <div class="legend" id="series-legend"></div>
+      </div>
+      <div>
+        <h3>Investment mix</h3>
+        <div id="mix"></div>
+        <h3>By goal <span class="muted">(overlapping — an initiative serving two goals counts under both)</span></h3>
+        <div id="goals"></div>
+      </div>
+    </div>
+    <h3 style="display:flex;align-items:center;gap:10px">Breakdown
+      <span class="seg" id="dim-seg">
+        <button data-dim="by_initiative" aria-pressed="true">Initiatives</button><button data-dim="by_project">Projects</button><button data-dim="by_person">People</button><button data-dim="by_product">Products</button><button data-dim="by_system">Systems</button>
+      </span>
+    </h3>
+    <div id="breakdown"></div>
+  </section>
+
+  <section id="impact">
+    <h2>Effort → outcomes <span class="count" id="impact-count"></span></h2>
+    <p class="sub">What each initiative's hours produced in the window: tickets that reached done (by the tracker's own transitions), changes shipped, commits — and the agent spend beside the human effort. "Done per 100h" is the crude yield; read it with the nature of the work in mind.</p>
+    <div class="cols-32">
+      <div id="impact-table"></div>
+      <div>
+        <h3>Hours in vs tickets done</h3>
+        <svg class="chart" id="impact-scatter"></svg>
+        <p class="sub" id="releases-note"></p>
+      </div>
+    </div>
+  </section>
+
+  <section id="flow">
+    <h2>Flow <span class="count" id="flow-count"></span></h2>
+    <p class="sub">From the tickets' own transitions, for work that finished in the window. Cycle = first "in progress" to done; lead = created to done; review = time spent in review/QA-type statuses.</p>
+    <div class="stats" id="flow-stats"></div>
+    <div class="cols">
+      <div><h3>Cycle time distribution</h3><svg class="chart" id="cycle-hist"></svg></div>
+      <div><h3>Started · finished · in flight, per week</h3><svg class="chart" id="flow-lines"></svg><div class="legend" id="flow-legend"></div></div>
+    </div>
+    <div id="cycle-nature"></div>
+  </section>
+
+  <section id="work">
+    <h2>How we work <span class="count" id="work-count"></span></h2>
+    <p class="sub">Behaviours visible in the ledger: when commits land (author-local time), how fragmented days are across projects, how consistently work is tagged, how much is AI-assisted, how long pull requests wait.</p>
+    <div class="stats" id="work-stats"></div>
+    <div class="cols">
+      <div><h3>Commits by weekday and hour</h3><div id="heatmap"></div></div>
+      <div><h3>Repositories</h3><div id="repos"></div></div>
+    </div>
+  </section>
+
+  <section id="radar">
+    <h2>Radar <span class="count" id="radar-count"></span></h2>
+    <p class="sub">Problems the ledger surfaces on its own: work the board thinks is moving but isn't, work that is moving but the board doesn't know, effort landing nowhere, unhealthy patterns. Confirm or dismiss — the rules learn from it, and the judge reads your verdicts as ground truth.</p>
+    <div class="facets" id="radar-facets"></div>
+    <div id="findings"></div>
+    <details><summary>Rules and thresholds</summary><div id="rules"></div></details>
+    <details><summary id="hidden-summary">Hidden findings</summary><div id="hidden"></div></details>
+  </section>
+
+  <section id="judge">
+    <h2>Independent judge <span class="count" id="judge-count"></span></h2>
+    <p class="sub">A read-only agent scores the whole picture — attribution, plausibility of the hours, precision of the findings — reviews each finding, and proposes calibration and data fixes. Nothing it proposes applies until someone accepts it; the loop closes through people. The self-assessment beside it is computed deterministically and always exists.</p>
+    <div id="judge-body"></div>
+  </section>
+
+  <section id="finance">
+    <h2>Capitalization &amp; R&amp;D time <span class="count" id="fin-count"></span></h2>
+    <p class="sub" id="fin-method"></p>
+    <p class="sub" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span class="seg" id="mode-seg"><button data-mode="observed">Observed days</button><button data-mode="scaled">Full weeks</button></span><span id="mode-note"></span></p>
+    <div class="stats" id="fin-stats"></div>
+    <div class="cols">
+      <div><h3>By initiative</h3><div id="fin-init"></div></div>
+      <div><h3>Statement (person × project)</h3><div id="fin-rows"></div></div>
+    </div>
+  </section>
+
+  <section id="sources">
+    <h2>Sources <span class="count" id="src-count"></span></h2>
+    <p class="sub">What feeds the ledger and how fresh it is. Calendar, email and chat plug in through the inbox drop folder — any exporter that writes JSON becomes a source.</p>
+    <div id="sources-table"></div>
+    <details><summary>Repositories scanned</summary><div id="repo-facts"></div></details>
+  </section>
+</main>
+
+<dialog id="dlg"><div id="dlg-body"></div><p style="text-align:right;margin:12px 0 0"><button class="btn" onclick="document.getElementById('dlg').close()">Close</button></p></dialog>
+
+<script>
+(function () {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const SLOTS = ["--s1", "--s2", "--s3", "--s4", "--s5", "--s6", "--s7", "--s8"];
+  const state = { from: null, to: null, preset: "90", filters: {}, dim: "by_initiative", facet: "all", data: null, can: false, canCost: false, mode: "" };
+  let tipEl = $("tip");
+
+  // ---- helpers ----
+  const fmt = (n, d = 0) => n == null ? "—" : Number(n).toLocaleString(undefined, { maximumFractionDigits: d, minimumFractionDigits: d });
+  const pct = (n) => n == null ? "—" : fmt(n, n < 10 ? 1 : 0) + "%";
+  const hours = (h) => h == null ? "—" : (h >= 1000 ? fmt(h / 1000, 1) + "k h" : fmt(h, h < 10 ? 1 : 0) + " h");
+  const money = (v, cur) => v == null ? "—" : new Intl.NumberFormat(undefined, { style: "currency", currency: cur || "USD", maximumFractionDigits: 0 }).format(v);
+  const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const dayStr = (d) => d.toISOString().slice(0, 10);
+  const ago = (t) => { if (!t) return "never"; const s = Date.now() / 1000 - t; if (s < 90) return "just now"; if (s < 5400) return Math.round(s / 60) + " min ago"; if (s < 172800) return Math.round(s / 3600) + " h ago"; return Math.round(s / 86400) + " d ago"; };
+  const when = (t) => t ? new Date(t * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
+  const color = (i) => i < 8 ? `var(${SLOTS[i]})` : "var(--s-other)";
+  function tip(evt, html) { if (!html) { tipEl.style.display = "none"; return; } tipEl.innerHTML = html; tipEl.style.display = "block"; const x = Math.min(evt.clientX + 12, window.innerWidth - 330); tipEl.style.left = x + "px"; tipEl.style.top = (evt.clientY + 14) + "px"; }
+  function svgEl(tag, attrs, parent) { const n = document.createElementNS("http://www.w3.org/2000/svg", tag); for (const k in attrs) n.setAttribute(k, attrs[k]); if (parent) parent.appendChild(n); return n; }
+  function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); }
+  function qs(extra) { const p = new URLSearchParams(); if (state.from) p.set("from", state.from); if (state.to) p.set("to", state.to); if (state.mode) p.set("mode", state.mode); for (const k in state.filters) if (state.filters[k]) p.set(k, state.filters[k]); for (const k in (extra || {})) p.set(k, extra[k]); return p.toString(); }
+  async function post(url, body) { const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) }); if (!r.ok) { let d = ""; try { d = (await r.json()).detail; } catch (e) {} throw new Error(d || r.statusText); } return r.json(); }
+  function initTitle(id) { const l = state.data.lookup; if (id == null) return "Unattributed"; return (l.initiatives[id] || {}).title || id; }
+  function projTitle(id) { const l = state.data.lookup; if (id == null) return "Unattributed"; return (l.projects[id] || {}).title || id; }
+
+  // ---- period & filters (mounted in the nav slot) ----
+  function applyPreset(days) {
+    state.preset = days; const to = new Date(); const from = new Date(); 
+    if (days === "ytd") from.setMonth(0, 1); else if (days === "q") { from.setMonth(Math.floor(from.getMonth() / 3) * 3, 1); } else from.setDate(to.getDate() - (parseInt(days, 10) - 1));
+    state.from = dayStr(from); state.to = dayStr(to);
+  }
+  function mountControls(slot) {
+    const wrap = document.createElement("div"); wrap.className = "ctl";
+    const seg = document.createElement("div"); seg.className = "pmnav-seg"; seg.setAttribute("role", "group"); seg.setAttribute("aria-label", "Period");
+    [["7", "7d"], ["30", "30d"], ["90", "90d"], ["q", "Quarter"], ["ytd", "YTD"], ["365", "1y"]].forEach(([v, l]) => { const b = document.createElement("button"); b.type = "button"; b.textContent = l; b.dataset.p = v; b.setAttribute("aria-pressed", String(v === state.preset)); b.onclick = () => { applyPreset(v); syncDates(); load(); }; seg.appendChild(b); });
+    wrap.appendChild(seg);
+    const from = document.createElement("input"); from.type = "date"; from.id = "from"; from.value = state.from; const to = document.createElement("input"); to.type = "date"; to.id = "to"; to.value = state.to;
+    from.onchange = to.onchange = () => { state.from = from.value; state.to = to.value; state.preset = ""; syncDates(); load(); };
+    const arrow = document.createElement("span"); arrow.className = "arrow"; arrow.textContent = "→";
+    wrap.appendChild(from); wrap.appendChild(arrow); wrap.appendChild(to);
+    const sel = document.createElement("select"); sel.id = "scope"; sel.innerHTML = '<option value="">Everything</option>'; sel.onchange = () => { state.filters = {}; if (sel.value) { const [k, v] = sel.value.split("="); state.filters[k] = v; } load(); };
+    wrap.appendChild(sel);
+    const refresh = document.createElement("button"); refresh.className = "ctl-btn"; refresh.type = "button"; refresh.id = "refresh-btn"; refresh.textContent = "Refresh sources"; refresh.title = "Re-read git, Jira, ADO and agent activity"; refresh.onclick = async () => { refresh.disabled = true; try { await post("/intelligence/refresh"); pollRefresh(); } catch (e) { alert(e.message); refresh.disabled = false; } };
+    wrap.appendChild(refresh);
+    slot.appendChild(wrap);
+    function syncDates() { from.value = state.from; to.value = state.to; seg.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.p === state.preset))); }
+  }
+  function fillScope() {
+    const sel = $("scope"); if (!sel || sel.dataset.filled) return; const l = state.data.lookup; sel.dataset.filled = "1";
+    const add = (label, items) => { if (!items.length) return; const g = document.createElement("optgroup"); g.label = label; items.forEach(([v, t]) => { const o = document.createElement("option"); o.value = v; o.textContent = t; g.appendChild(o); }); sel.appendChild(g); };
+    add("Goals", Object.entries(l.goals).map(([id, t]) => ["goal_id=" + id, t]));
+    add("Initiatives", Object.entries(l.initiatives).filter(([, v]) => v.status !== "closed").sort((a, b) => (a[1].title || "").localeCompare(b[1].title || "")).map(([id, v]) => ["initiative_id=" + id, v.title]));
+    add("Products", Object.entries(l.products).map(([id, t]) => ["product=" + id, t]));
+    add("Systems", Object.entries(l.systems).map(([id, t]) => ["system=" + id, t]));
+    add("People", Object.entries(l.people).sort((a, b) => a[1].localeCompare(b[1])).map(([id, t]) => ["person_id=" + id, t]));
+    const cur = Object.entries(state.filters).find(([, v]) => v); if (cur) sel.value = cur.join("=");
+  }
+  let pollTimer = null;
+  function pollRefresh() {
+    clearTimeout(pollTimer);
+    fetch("/intelligence/sources").then((r) => r.json()).then((d) => {
+      const btn = $("refresh-btn"); if (d.refreshing) { if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin"></span>Refreshing…'; } renderBanner(d); pollTimer = setTimeout(pollRefresh, 4000); }
+      else { if (btn) { btn.disabled = false; btn.textContent = "Refresh sources"; } load(); }
+    }).catch(() => {});
+  }
+  function renderBanner(d) {
+    const b = $("banner"); const running = (d.sources || []).filter((s) => s.refreshing).map((s) => s.label);
+    b.innerHTML = running.length ? `<div class="note"><span class="spin"></span>Refreshing ${esc(running.join(", "))} — the figures below are from the previous run.</div>` : "";
+  }
+
+  // ---- charts ----
+  function stackedBars(svg, periods, series, opts) {
+    clear(svg); const W = 640, H = 240, L = 44, B = 34, T = 8, R = 8; svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    if (!periods.length) { svgEl("text", { x: W / 2, y: H / 2, "text-anchor": "middle" }, svg).textContent = "No activity in this window"; return; }
+    const totals = periods.map((_, i) => series.reduce((a, s) => a + (s.values[i] || 0), 0)); const max = Math.max(1, ...totals);
+    const iw = (W - L - R) / periods.length; const bw = Math.max(2, iw - Math.max(2, iw * 0.25)); const y = (v) => T + (H - T - B) * (1 - v / max);
+    for (let g = 0; g <= 4; g++) { const v = max * g / 4; svgEl("line", { x1: L, x2: W - R, y1: y(v), y2: y(v), class: "grid" }, svg); svgEl("text", { x: L - 6, y: y(v) + 4, "text-anchor": "end" }, svg).textContent = fmt(v); }
+    periods.forEach((p, i) => {
+      let acc = 0; const x = L + i * iw + (iw - bw) / 2;
+      series.forEach((s, si) => { const v = s.values[i] || 0; if (v <= 0) return; const y0 = y(acc + v), y1 = y(acc); const h = Math.max(0, y1 - y0 - 2);
+        const r = svgEl("rect", { x, y: y0, width: bw, height: h, rx: si === series.length - 1 || acc + v >= totals[i] - 1e-6 ? 3 : 0, fill: s.key === "__other__" ? "var(--s-other)" : color(si) }, svg);
+        r.addEventListener("mousemove", (e) => tip(e, `<b>${esc(s.title)}</b><br>${esc(p)}: ${hours(v)} of ${hours(totals[i])}`)); r.addEventListener("mouseleave", (e) => tip(e, null)); acc += v; });
+      if (periods.length <= 16 || i % Math.ceil(periods.length / 12) === 0) svgEl("text", { x: x + bw / 2, y: H - B + 14, "text-anchor": "middle" }, svg).textContent = p.replace(/^\d{4}-/, "");
+      if (totals[i] > 0 && periods.length <= 20) svgEl("text", { x: x + bw / 2, y: y(totals[i]) - 4, "text-anchor": "middle" }, svg).textContent = fmt(totals[i]);
+    });
+    svgEl("line", { x1: L, x2: W - R, y1: y(0), y2: y(0), class: "axis" }, svg);
+  }
+  function legend(el, series) { clear(el); series.forEach((s, i) => { const span = document.createElement("span"); span.innerHTML = `<i style="background:${s.key === "__other__" ? "var(--s-other)" : color(i)}"></i>${esc(s.title)}${s.folded ? ` (${s.folded} more)` : ""} <span class="muted">${hours(s.total)}</span>`; el.appendChild(span); }); }
+  function histogram(svg, buckets) {
+    clear(svg); const W = 640, H = 200, L = 36, B = 30, T = 10; svg.setAttribute("viewBox", `0 0 ${W} ${H}`); const max = Math.max(1, ...buckets.map((b) => b.count)); const iw = (W - L - 8) / buckets.length; const bw = iw * 0.7;
+    buckets.forEach((b, i) => { const h = (H - T - B) * b.count / max; const x = L + i * iw + (iw - bw) / 2; const r = svgEl("rect", { x, y: H - B - h, width: bw, height: h, rx: 3, fill: "var(--s1)" }, svg); r.addEventListener("mousemove", (e) => tip(e, `${esc(b.label)}: ${b.count} tickets`)); r.addEventListener("mouseleave", (e) => tip(e, null)); svgEl("text", { x: x + bw / 2, y: H - B + 14, "text-anchor": "middle" }, svg).textContent = b.label; if (b.count) svgEl("text", { x: x + bw / 2, y: H - B - h - 4, "text-anchor": "middle" }, svg).textContent = b.count; });
+    svgEl("line", { x1: L, x2: W - 8, y1: H - B, y2: H - B, class: "axis" }, svg);
+  }
+  function lines(svg, periods, seriesList, legendEl) {
+    clear(svg); const W = 640, H = 220, L = 36, B = 30, T = 10, R = 8; svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    if (!periods.length) { svgEl("text", { x: W / 2, y: H / 2, "text-anchor": "middle" }, svg).textContent = "No transitions in this window"; clear(legendEl); return; }
+    const max = Math.max(1, ...seriesList.flatMap((s) => s.values)); const x = (i) => L + (W - L - R) * (periods.length === 1 ? 0.5 : i / (periods.length - 1)); const y = (v) => T + (H - T - B) * (1 - v / max);
+    for (let g = 0; g <= 4; g++) { const v = max * g / 4; svgEl("line", { x1: L, x2: W - R, y1: y(v), y2: y(v), class: "grid" }, svg); svgEl("text", { x: L - 6, y: y(v) + 4, "text-anchor": "end" }, svg).textContent = fmt(v); }
+    seriesList.forEach((s, si) => { const d = s.values.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" "); svgEl("path", { d, fill: "none", stroke: color(si), "stroke-width": 2, "stroke-linejoin": "round" }, svg); s.values.forEach((v, i) => { const c = svgEl("circle", { cx: x(i), cy: y(v), r: 4, fill: color(si), stroke: "var(--surface)", "stroke-width": 2 }, svg); c.addEventListener("mousemove", (e) => tip(e, `<b>${esc(s.title)}</b><br>${esc(periods[i])}: ${v}`)); c.addEventListener("mouseleave", (e) => tip(e, null)); }); });
+    periods.forEach((p, i) => { if (periods.length <= 14 || i % Math.ceil(periods.length / 10) === 0) svgEl("text", { x: x(i), y: H - B + 14, "text-anchor": "middle" }, svg).textContent = p.replace(/^\d{4}-/, ""); });
+    svgEl("line", { x1: L, x2: W - R, y1: y(0), y2: y(0), class: "axis" }, svg);
+    clear(legendEl); seriesList.forEach((s, i) => { const span = document.createElement("span"); span.innerHTML = `<i style="background:${color(i)}"></i>${esc(s.title)}`; legendEl.appendChild(span); });
+  }
+  function scatter(svg, rows) {
+    clear(svg); const W = 420, H = 240, L = 40, B = 30, T = 10, R = 10; svg.setAttribute("viewBox", `0 0 ${W} ${H}`); const pts = rows.filter((r) => r.initiative_id && r.hours > 0);
+    if (!pts.length) { svgEl("text", { x: W / 2, y: H / 2, "text-anchor": "middle" }, svg).textContent = "Nothing placed on an initiative yet"; return; }
+    const mx = Math.max(1, ...pts.map((p) => p.hours)), my = Math.max(1, ...pts.map((p) => p.tickets_done)); const x = (v) => L + (W - L - R) * v / mx, y = (v) => T + (H - T - B) * (1 - v / my);
+    svgEl("line", { x1: L, x2: W - R, y1: y(0), y2: y(0), class: "axis" }, svg); svgEl("line", { x1: L, x2: L, y1: T, y2: y(0), class: "axis" }, svg);
+    svgEl("text", { x: W - R, y: H - 6, "text-anchor": "end" }, svg).textContent = "hours →"; svgEl("text", { x: L + 4, y: T + 10 }, svg).textContent = "tickets done ↑";
+    pts.forEach((p) => { const c = svgEl("circle", { cx: x(p.hours), cy: y(p.tickets_done), r: 6, fill: p.is_maintenance ? "var(--s-other)" : "var(--s1)", stroke: "var(--surface)", "stroke-width": 2 }, svg); c.addEventListener("mousemove", (e) => tip(e, `<b>${esc(p.title)}</b><br>${hours(p.hours)} · ${p.tickets_done} done · ${p.commits} commits`)); c.addEventListener("mouseleave", (e) => tip(e, null)); });
+    const top = pts.slice().sort((a, b) => b.hours - a.hours).slice(0, 3); top.forEach((p) => svgEl("text", { x: x(p.hours) + 8, y: y(p.tickets_done) + 4 }, svg).textContent = p.title.slice(0, 22));
+  }
+  function heatmap(el, grid) {
+    clear(el); const max = Math.max(1, ...grid.flat()); const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]; const ramp = ["--q1", "--q2", "--q3", "--q4", "--q5", "--q6", "--q7"];
+    const t = document.createElement("table"); t.className = "heat"; const head = t.insertRow(); head.insertCell(); for (let h = 0; h < 24; h++) { const th = document.createElement("th"); th.textContent = h % 3 === 0 ? h : ""; head.appendChild(th); }
+    grid.forEach((row, d) => { const tr = t.insertRow(); const th = document.createElement("th"); th.textContent = days[d]; tr.appendChild(th); row.forEach((v, h) => { const td = tr.insertCell(); const cell = document.createElement("div"); cell.className = "cell"; const step = v <= 0 ? 0 : Math.min(6, Math.ceil(6 * v / max)); cell.style.background = v <= 0 ? "var(--track)" : `var(${ramp[step]})`; cell.addEventListener("mousemove", (e) => tip(e, `${days[d]} ${h}:00 — ${fmt(v)} commits`)); cell.addEventListener("mouseleave", (e) => tip(e, null)); td.appendChild(cell); }); });
+    el.appendChild(t);
+  }
+  function hbars(rows, opts) {
+    const max = Math.max(1, ...rows.map((r) => r.hours)); const total = rows.reduce((a, r) => a + r.hours, 0) || 1;
+    return `<table><thead><tr><th>${esc(opts.label)}</th><th></th><th class="num">Hours</th><th class="num">Share</th>${opts.extra ? opts.extra.map((e) => `<th class="num">${esc(e.label)}</th>`).join("") : ""}</tr></thead><tbody>` +
+      rows.map((r) => `<tr class="${opts.onclick ? "click" : ""}" data-key="${esc(r.key == null ? "" : r.key)}"><td>${opts.title(r)}</td><td><span class="bar"><span style="width:${100 * r.hours / max}%${opts.capex && r.capex_hours != null ? `;background:linear-gradient(90deg,var(--s3) ${100 * r.capex_hours / Math.max(r.hours, 0.001)}%,var(--s1) 0)` : ""}"></span></span></td><td class="num">${hours(r.hours)}</td><td class="num muted">${pct(100 * r.hours / total)}</td>${opts.extra ? opts.extra.map((e) => `<td class="num">${e.value(r)}</td>`).join("") : ""}</tr>`).join("") + "</tbody></table>";
+  }
+
+  // ---- render ----
+  function render(d) {
+    state.data = d; fillScope(); renderBanner({ sources: d.sources });
+    const k = d.kpis; const w = d.window;
+    $("stats").innerHTML = [
+      ["hours", hours(k.hours), "activity-weighted hours", `${k.active_people} people · ${k.active_days} person-days`],
+      ["placed", pct(k.placed_pct), "of effort placed on a project", `${pct(100 - k.placed_pct)} unattributed`, k.placed_pct < 60],
+      ["commits", fmt(k.commits), "commits", `${pct(k.ai_commits_pct)} AI-assisted`],
+      ["done", fmt(k.tickets_done), "tickets reached done", `${fmt(k.tickets_touched)} touched · cycle p50 ${k.cycle_p50 == null ? "—" : k.cycle_p50 + "d"}`],
+      ["shipped", fmt(k.changes_shipped), "changes shipped", `${fmt(k.releases)} releases`],
+      ["capex", pct(k.capex_pct), "of hours capitalizable", `${pct(k.maintenance_pct)} maintenance`],
+      ["findings", fmt(k.findings_high), "high-severity findings", `${fmt(k.findings_total)} open in total`, k.findings_high > 0],
+      ["ai", money(k.ai_cost_usd), "agent spend", `${fmt(k.signals)} signals in window`],
+    ].map(([id, v, l, dd, warn]) => `<div class="stat${warn ? " warn" : ""}"><div class="v">${v}</div><div class="l">${esc(l)}</div><div class="d">${esc(dd)}</div></div>`).join("");
+    const fl = Object.entries(d.filters || {}).map(([kk, v]) => `${kk.replace(/_id$/, "")}: ${esc(kk === "initiative_id" ? initTitle(v) : kk === "person_id" ? (d.lookup.people[v] || v) : v)}`).join(" · ");
+    $("inv-count").textContent = `${w.from} → ${w.to} (${w.days} days)${fl ? " · " + fl : ""}`;
+
+    // investment
+    const s = d.allocation.series; $("series-title").textContent = `Hours per ${d.period}, by initiative`;
+    stackedBars($("series-chart"), s.periods, s.series); legend($("series-legend"), s.series);
+    const nat = d.allocation.by_nature; const natTotal = nat.reduce((a, r) => a + r.hours, 0) || 1;
+    $("mix").innerHTML = `<div class="bar" style="width:100%;height:14px;display:flex;gap:2px;background:transparent">${nat.map((r, i) => `<span style="width:${100 * r.hours / natTotal}%;background:${color(i)};display:block" title="${esc(r.key || "other")}: ${hours(r.hours)}"></span>`).join("")}</div><div class="legend">${nat.map((r, i) => `<span><i style="background:${color(i)}"></i>${esc(r.key || "other")} <span class="muted">${pct(100 * r.hours / natTotal)}</span></span>`).join("")}</div>` +
+      `<div class="kv" style="margin-top:10px"><dt>Capitalizable</dt><dd>${pct(k.capex_pct)} of hours</dd><dt>Maintenance</dt><dd>${pct(k.maintenance_pct)}</dd><dt>Explicitly logged</dt><dd>${pct(k.logged_pct)} — the rest is inferred from activity</dd><dt>Placed via</dt><dd>${Object.entries(d.coverage.by_via_pct).slice(0, 5).map(([kk, v]) => `${esc(kk)} ${pct(v)}`).join(" · ")}</dd></div>`;
+    $("goals").innerHTML = d.allocation.by_goal.length ? hbars(d.allocation.by_goal, { label: "Goal", title: (r) => esc(r.title) }) : '<div class="empty">No goals declared.</div>';
+    renderBreakdown();
+
+    // impact
+    const imp = d.impact.initiatives; $("impact-count").textContent = `${imp.filter((r) => r.initiative_id).length} initiatives with activity`;
+    $("impact-table").innerHTML = imp.length ? `<table><thead><tr><th>Initiative</th><th class="num">Hours</th><th class="num">People</th><th class="num">Commits</th><th class="num">Touched</th><th class="num">Done</th><th class="num">Shipped</th><th class="num">Done/100h</th><th class="num">Agent $</th></tr></thead><tbody>${imp.slice(0, 25).map((r) => `<tr class="click" data-init="${esc(r.initiative_id || "")}"><td>${esc(r.title)}${r.is_maintenance ? ' <span class="chip maint">maintenance</span>' : ""}${r.initiative_id ? "" : ' <span class="chip quiet">unplaced</span>'}</td><td class="num">${hours(r.hours)} <span class="muted">${pct(r.hours_pct)}</span></td><td class="num">${r.people}</td><td class="num">${fmt(r.commits)}</td><td class="num">${fmt(r.tickets_touched)}</td><td class="num">${fmt(r.tickets_done)}</td><td class="num">${fmt(r.changes_shipped)}</td><td class="num">${r.done_per_100h == null ? "—" : fmt(r.done_per_100h, 1)}</td><td class="num">${r.agent_cost_usd ? money(r.agent_cost_usd) : "—"}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">No activity in this window.</div>';
+    $("impact-table").querySelectorAll("tr.click").forEach((tr) => tr.onclick = () => { if (tr.dataset.init) { state.filters = { initiative_id: tr.dataset.init }; const sel = $("scope"); if (sel) sel.value = "initiative_id=" + tr.dataset.init; load(); } });
+    scatter($("impact-scatter"), imp);
+    $("releases-note").textContent = d.impact.releases ? `${d.impact.releases} release(s) in the window: ${d.impact.release_names.join(", ")}` : "No tracker releases dated in this window.";
+
+    // flow
+    const f = d.flow; $("flow-count").textContent = `${f.finished} tickets finished`;
+    $("flow-stats").innerHTML = [[f.cycle_days.p50 == null ? "—" : f.cycle_days.p50 + "d", "cycle time p50", `p85 ${f.cycle_days.p85 == null ? "—" : f.cycle_days.p85 + "d"} · n=${f.cycle_days.n}`], [f.lead_days.p50 == null ? "—" : f.lead_days.p50 + "d", "lead time p50", `p85 ${f.lead_days.p85 == null ? "—" : f.lead_days.p85 + "d"}`], [f.review_days.p50 == null ? "—" : f.review_days.p50 + "d", "in review / QA, p50", `p85 ${f.review_days.p85 == null ? "—" : f.review_days.p85 + "d"} · n=${f.review_days.n}`], [f.blocked_days.p50 == null ? "—" : f.blocked_days.p50 + "d", "blocked, p50", `n=${f.blocked_days.n}`], [pct(f.reopen_rate_pct), "reopened after done", ""]].map(([v, l, dd]) => `<div class="stat"><div class="v">${v}</div><div class="l">${esc(l)}</div><div class="d">${esc(dd)}</div></div>`).join("");
+    histogram($("cycle-hist"), f.cycle_days.histogram);
+    lines($("flow-lines"), f.weekly.map((r) => r.week), [{ title: "started", values: f.weekly.map((r) => r.started) }, { title: "finished", values: f.weekly.map((r) => r.finished) }, { title: "in flight (WIP)", values: f.weekly.map((r) => r.wip) }], $("flow-legend"));
+    const cn = Object.entries(f.cycle_by_nature); $("cycle-nature").innerHTML = cn.length ? `<h3>Cycle time by nature of work</h3><div class="inline-list">${cn.map(([kk, v]) => `<span class="chip quiet">${esc(kk)}</span> p50 ${v.p50}d (n=${v.n}) &nbsp; `).join("")}</div>` : "";
+
+    // work
+    const wf = d.workflow; $("work-count").textContent = `${wf.active_people} active people`;
+    $("work-stats").innerHTML = [[pct(wf.after_hours_pct), "commits after hours", "before 8:00 or after 19:00, weekdays"], [pct(wf.weekend_pct), "weekend commits", ""], [fmt(wf.context.avg_projects_per_day, 2), "projects per person-day", `${pct(wf.context.fragmented_days_pct)} of days on 3+`], [pct(wf.keyed_pct), "commits with a ticket key", ""], [pct(wf.ai_assisted_pct), "AI-assisted commits", `${wf.ai_commits} with an AI co-author trailer`], [wf.pull_requests.hours_open_p50 == null ? "—" : fmt(wf.pull_requests.hours_open_p50) + "h", "PR open time p50", `${wf.pull_requests.merged} merged · ${wf.pull_requests.reviews} reviews`]].map(([v, l, dd]) => `<div class="stat"><div class="v">${v}</div><div class="l">${esc(l)}</div><div class="d">${esc(dd)}</div></div>`).join("");
+    heatmap($("heatmap"), wf.heatmap);
+    $("repos").innerHTML = wf.repos.length ? `<table><thead><tr><th>Repository</th><th class="num">Commits</th><th class="num">Keyed</th><th class="num">Merges</th><th class="num">Authors</th><th class="num">AI</th></tr></thead><tbody>${wf.repos.slice(0, 18).map((r) => `<tr><td title="${esc(r.repo)}">${esc(r.repo.replace(/^src\//, ""))}</td><td class="num">${fmt(r.commits)}</td><td class="num${r.keyed_pct != null && r.keyed_pct < 60 ? " " : ""}" style="${r.keyed_pct != null && r.keyed_pct < 60 ? "color:var(--critical)" : ""}">${pct(r.keyed_pct)}</td><td class="num">${fmt(r.merges)}</td><td class="num">${r.authors}</td><td class="num">${pct(r.ai_pct)}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">No commits in this window.</div>';
+
+    // radar
+    renderRadar();
+    // judge
+    renderJudge();
+    // finance
+    renderFinance();
+    // sources
+    renderSources();
+  }
+
+  function renderBreakdown() {
+    const d = state.data; const rows = d.allocation[state.dim] || []; const dim = state.dim;
+    const l = d.lookup; const title = (r) => { if (dim === "by_initiative") return `${esc(r.title)}${r.maintenance ? ' <span class="chip maint">maintenance</span>' : ""}`; if (dim === "by_project") return `${esc(r.title)} <span class="muted">${esc(r.initiative_id ? initTitle(r.initiative_id) : "")}</span>`; if (dim === "by_person") return `${esc(r.title)}${r.external ? ' <span class="chip low">not in directory</span>' : ""} <span class="muted">${r.projects} project(s)</span>`; if (dim === "by_product") return esc(r.key == null ? "No product" : (l.products[r.key] || r.key)); return esc(r.key == null ? "No system" : (l.systems[r.key] || r.key)); };
+    const extra = dim === "by_initiative" ? [{ label: "Capex h", value: (r) => hours(r.capex_hours) }, { label: "People", value: (r) => r.people }] : dim === "by_person" ? [{ label: "Days", value: (r) => r.days }, { label: "Signals", value: (r) => fmt(r.signals) }] : [{ label: "People", value: (r) => r.people }, { label: "Days", value: (r) => r.days }];
+    $("breakdown").innerHTML = rows.length ? hbars(rows.slice(0, 30), { label: dim.replace("by_", "").replace(/^\w/, (c) => c.toUpperCase()), title, extra, onclick: true, capex: dim === "by_initiative" }) : '<div class="empty">Nothing here.</div>';
+    $("breakdown").querySelectorAll("tr.click").forEach((tr) => tr.onclick = () => { const key = tr.dataset.key; const map = { by_initiative: "initiative_id", by_project: "project_id", by_person: "person_id", by_product: "product", by_system: "system" }; if (!key) return; state.filters = {}; state.filters[map[dim]] = key; const sel = $("scope"); if (sel) sel.value = map[dim] + "=" + key; load(); });
+  }
+  $("dim-seg").querySelectorAll("button").forEach((b) => b.onclick = () => { state.dim = b.dataset.dim; $("dim-seg").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(x === b))); renderBreakdown(); });
+
+  function renderRadar() {
+    const d = state.data; const all = d.findings; const c = d.finding_counts;
+    $("radar-count").textContent = `${c.visible} open · ${c.hidden} hidden`;
+    const fam = {}; all.forEach((f) => { fam[f.family] = (fam[f.family] || 0) + 1; });
+    const facets = [["all", `All ${all.length}`], ["high", `High ${all.filter((f) => f.severity === "high").length}`], ...Object.entries(fam).map(([k, v]) => [k, `${k} ${v}`])];
+    $("radar-facets").innerHTML = facets.map(([v, l]) => `<button class="facet" data-f="${esc(v)}" aria-pressed="${String(v === state.facet)}">${esc(l)}</button>`).join("");
+    $("radar-facets").querySelectorAll("button").forEach((b) => b.onclick = () => { state.facet = b.dataset.f; renderRadar(); });
+    const shown = all.filter((f) => state.facet === "all" || f.severity === state.facet || f.family === state.facet).slice(0, 80);
+    $("findings").innerHTML = shown.length ? shown.map(findingHtml).join("") : '<div class="empty">Nothing to show — either the window is quiet or everything has been triaged.</div>';
+    $("findings").querySelectorAll("button[data-act]").forEach((b) => b.onclick = () => feedback(b.dataset.id, b.dataset.act));
+    $("findings").querySelectorAll("a[data-signals]").forEach((a) => a.onclick = (e) => { e.preventDefault(); showSignals(a.dataset.signals, a.dataset.kind); });
+    $("findings").querySelectorAll("button[data-alias]").forEach((b) => b.onclick = () => addAlias(b.dataset.alias, b.dataset.pid));
+    const rules = d.rules; $("rules").innerHTML = `<table><thead><tr><th>Rule</th><th>What it catches</th><th class="num">Open</th><th>Thresholds</th><th></th></tr></thead><tbody>${rules.map((r) => `<tr><td><b>${esc(r.title)}</b><div class="muted" style="font-size:0.8em">${esc(r.family)}</div></td><td class="second" style="font-size:0.85em">${esc(r.what)}</td><td class="num">${r.count}</td><td style="font-size:0.85em">${thresholdsFor(r.rule).map((k) => `<div>${esc(k)}: ${state.can ? `<input type="number" step="any" value="${d.thresholds[k]}" data-th="${esc(k)}" style="width:70px;font:inherit;border:1px solid var(--border);border-radius:5px;padding:1px 4px;background:var(--surface);color:inherit">` : `<b>${d.thresholds[k]}</b>`}${d.thresholds[k] !== d.threshold_defaults[k] ? ` <span class="muted">(default ${d.threshold_defaults[k]})</span>` : ""}</div>`).join("")}</td><td>${state.can ? `<button class="btn small" data-mute="${esc(r.rule)}" data-on="${r.muted ? "0" : "1"}">${r.muted ? "Unmute" : "Mute"}</button>` : (r.muted ? '<span class="chip quiet">muted</span>' : "")}</td></tr>`).join("")}</tbody></table>`;
+    $("rules").querySelectorAll("input[data-th]").forEach((inp) => inp.onchange = async () => { try { await post("/intelligence/tuning", { kind: "thresholds", key: inp.dataset.th, value: parseFloat(inp.value), reason: "edited on the Radar" }); load(); } catch (e) { alert(e.message); } });
+    $("rules").querySelectorAll("button[data-mute]").forEach((b) => b.onclick = async () => { try { await post("/intelligence/tuning", { kind: "muted_rules", key: b.dataset.mute, value: b.dataset.on === "1" }); load(); } catch (e) { alert(e.message); } });
+    const hidden = d.hidden_findings || []; $("hidden-summary").textContent = `Hidden findings (${hidden.length}) — dismissed, snoozed or muted`;
+    $("hidden").innerHTML = hidden.length ? hidden.slice(0, 40).map((f) => `<div class="finding"><div><span class="chip quiet">${esc((f.state || "hidden"))}</span></div><div><div class="t">${esc(f.title)}</div><div class="d">${esc(f.detail)}</div></div><div class="acts">${state.can ? `<button class="btn small" data-act="open" data-id="${f.id}">Reopen</button>` : ""}</div></div>`).join("") : '<div class="empty">None.</div>';
+    $("hidden").querySelectorAll("button[data-act]").forEach((b) => b.onclick = () => feedback(b.dataset.id, b.dataset.act));
+  }
+  function thresholdsFor(rule) { const map = { stale_in_progress: ["stale_in_progress_days"], zombie_in_progress: ["zombie_in_progress_days"], stale_project: ["stale_project_days"], silent_initiative: ["silent_initiative_days"], work_after_done: ["work_after_done_days"], status_lag: ["status_lag_days"], review_dwell: ["review_dwell_days"], reopened: ["reopen_count"], unkeyed_commits: ["unkeyed_commit_pct", "unkeyed_min_commits"], unresolved_author: ["unresolved_author_min_signals"], unplanned_work: ["unplanned_share_pct"], maintenance_share: ["maintenance_share_pct"], fragmentation: ["fragmentation_projects_per_week"], bus_factor: ["bus_factor_min_commits", "bus_factor_pct"], idle_assignee: ["idle_assignee_days"], ideation_with_commits: [] }; return map[rule] || []; }
+  function findingHtml(f) {
+    const links = f.links || {}; const d = state.data;
+    let where = "";
+    if (links.url) where += ` <a href="${esc(links.url)}" target="_blank" rel="noopener">open ticket ↗</a>`;
+    if (links.ref) where += ` <a href="#" data-signals="${esc(links.ref)}" data-kind="ref">signals</a>`;
+    if (links.project_id) where += ` <a href="#" data-signals="${esc(links.project_id)}" data-kind="project">signals</a> <a href="/portfolio">portfolio</a>`;
+    if (links.initiative_id && !links.project_id) where += ` <span class="muted">${esc(initTitle(links.initiative_id))}</span>`;
+    const judged = f.judged ? `<span class="chip ${esc(f.judged.verdict)}" title="${esc(f.judged.reason)}">judge: ${esc(f.judged.verdict.replace("_", " "))}</span> ` : "";
+    const ev = (f.evidence || []).slice(0, 4).map((e) => `<div>${e.at ? when(e.at) + " · " : ""}${esc(e.who || "")}${e.what ? " — " + esc(e.what) : ""}${e.repo ? ` <span class="muted">${esc(e.repo.replace(/^src\//, ""))}</span>` : ""}${e.ref ? `${esc(e.ref)} ${esc(e.title || "")}` : ""}</div>`).join("");
+    const alias = f.rule === "unresolved_author" && state.can && links.candidates && links.candidates.length ? links.candidates.map((c) => `<button class="btn small" data-alias="${esc(links.handle)}" data-pid="${esc(c)}">= ${esc(d.lookup.people[c] || c)}</button>`).join("") : "";
+    const acts = state.can ? `${alias}<button class="btn small" data-act="confirmed" data-id="${f.id}" title="Real problem">Confirm</button><button class="btn small" data-act="snoozed" data-id="${f.id}" title="Hide for two weeks">Snooze</button><button class="btn small" data-act="dismissed" data-id="${f.id}" title="Not a problem — teaches the rule">Dismiss</button>` : "";
+    return `<div class="finding"><div><span class="chip ${esc(f.severity)}">${esc(f.severity)}</span><div class="rule">${esc(f.rule_title)}</div>${f.state === "confirmed" ? '<span class="chip ok">confirmed</span>' : ""}</div><div><div class="t">${esc(f.title)}</div><div class="d">${judged}${esc(f.detail)}${where}</div>${ev ? `<div class="ev">${ev}</div>` : ""}</div><div class="acts">${acts}</div></div>`;
+  }
+  async function feedback(id, act) { try { await post(`/intelligence/findings/${id}/feedback`, { state: act }); load(); } catch (e) { alert(e.message); } }
+  async function addAlias(handle, pid) { if (!confirm(`Map "${handle}" to ${state.data.lookup.people[pid] || pid}?`)) return; try { await post("/intelligence/aliases", { handle, person_id: pid }); load(); } catch (e) { alert(e.message); } }
+  async function showSignals(key, kind) {
+    const r = await fetch(`/intelligence/signals?${qs(kind === "ref" ? { ref: key } : { project_id: key })}`); const d = await r.json();
+    $("dlg-body").innerHTML = `<h2>Signals · ${esc(kind === "ref" ? key : projTitle(key))} <span class="count">${d.signals.length} in window</span></h2>` + (d.signals.length ? `<table><thead><tr><th>When</th><th>Who</th><th>What</th><th>Where</th></tr></thead><tbody>${d.signals.map((s) => `<tr><td class="muted" style="white-space:nowrap">${when(s.at)}</td><td>${esc(s.person_name)}</td><td>${esc(s.kind)}${s.meta.subject ? " — " + esc(s.meta.subject) : ""}${s.meta.from != null ? ` ${esc(s.meta.from)} → ${esc(s.meta.to)}` : ""}${s.meta.field ? " " + esc(s.meta.field) : ""}${s.minutes ? ` <b>${fmt(s.minutes / 60, 1)}h logged</b>` : ""}</td><td class="muted">${esc(s.repo ? s.repo.replace(/^src\//, "") : s.source)}${s.ref ? " · " + esc(s.ref) : ""}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">No signals in the window.</div>');
+    $("dlg").showModal();
+  }
+
+  function renderJudge() {
+    const j = state.data.judge; const latest = j.latest; const self = j.self_assessment;
+    $("judge-count").textContent = latest ? `last run ${ago(latest.at)}` : "never run";
+    const scoreRow = (label, scores, cls) => `<div class="scores">${Object.entries(scores || {}).map(([k, v]) => `<div class="score"><div class="l">${esc(k.replace(/_/g, " "))}</div><div class="v">${v}</div><span class="bar"><span class="${cls}" style="width:${v}%"></span></span></div>`).join("")}</div>`;
+    let html = "";
+    html += `<div class="cols"><div><h3>Self-assessment (deterministic)</h3>${scoreRow("self", self && self.scores, "")}${self && self.notes.length ? `<ul class="inline-list muted" style="margin:8px 0 0;padding-left:18px">${self.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}</div>`;
+    html += `<div><h3>Judge's scores${latest ? ` <span class="muted">${esc(latest.model || "")}${latest.agent_usage && latest.agent_usage.cost_usd ? ` · ${money(latest.agent_usage.cost_usd)}` : ""}</span>` : ""}</h3>`;
+    if (j.running) html += '<div class="note"><span class="spin"></span>The judge is reading the dossier…</div>';
+    else if (!latest) html += `<div class="empty">No judgment yet.</div>`;
+    else if (latest.verdict !== "ok") html += `<div class="note warn">Last run was inconclusive: ${esc(latest.reason)}</div>`;
+    else html += scoreRow("judge", latest.scores, "capex");
+    if (j.error && !j.running) html += `<div class="note warn">${esc(j.error)}</div>`;
+    html += state.can ? `<p style="margin:10px 0 0"><button class="btn primary" id="run-judge" ${j.running ? "disabled" : ""}>Run the judge now</button> <span class="muted" style="font-size:0.82em">reads the current window's report; several minutes</span></p>` : "";
+    html += `</div></div>`;
+    if (latest && latest.verdict === "ok") {
+      html += `<h3>Summary</h3><div class="note">${esc(latest.summary)}</div>`;
+      if (latest.threshold_suggestions && latest.threshold_suggestions.length) html += `<h3>Calibration suggestions</h3><table><thead><tr><th>Threshold</th><th class="num">Current</th><th class="num">Suggested</th><th>Why</th><th></th></tr></thead><tbody>${latest.threshold_suggestions.map((s, i) => `<tr><td>${esc(s.key)}</td><td class="num">${s.current == null ? "—" : s.current}</td><td class="num"><b>${s.suggested}</b></td><td class="second" style="font-size:0.86em">${esc(s.reason)}</td><td>${s.applied_at ? '<span class="chip ok">applied</span>' : (state.can ? `<button class="btn small" data-apply="${i}">Apply</button>` : "")}</td></tr>`).join("")}</tbody></table>`;
+      if (latest.data_fixes && latest.data_fixes.length) html += `<h3>Data fixes</h3><div class="inline-list">${latest.data_fixes.map((f) => `<div><span class="chip quiet">${esc(f.kind)}</span> ${esc(f.detail)} ${f.kind === "alias" && f.handle && f.person_id && state.can ? `<button class="btn small" data-alias="${esc(f.handle)}" data-pid="${esc(f.person_id)}">Add alias</button>` : ""}</div>`).join("")}</div>`;
+      if (latest.next_metrics && latest.next_metrics.length) html += `<h3>What to measure next</h3><div class="inline-list">${latest.next_metrics.map((m) => `<div><b>${esc(m.title)}</b> — ${esc(m.why)} <span class="muted">needs: ${esc(m.needs)}</span></div>`).join("")}</div>`;
+      const reviewed = (latest.findings_review || []); if (reviewed.length) { const cnt = {}; reviewed.forEach((r) => cnt[r.verdict] = (cnt[r.verdict] || 0) + 1); html += `<p class="sub" style="margin-top:12px">Reviewed ${reviewed.length} findings: ${Object.entries(cnt).map(([k, v]) => `${v} ${k.replace("_", " ")}`).join(", ")} — each verdict is shown on its finding in the Radar.</p>`; }
+    }
+    if (j.history && j.history.length > 1) { html += `<h3>Overall score over time</h3><svg class="chart" id="judge-spark" style="max-width:420px"></svg>`; }
+    $("judge-body").innerHTML = html;
+    if (j.history && j.history.length > 1) lines($("judge-spark"), j.history.map((h) => new Date(h.at * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" })), [{ title: "overall", values: j.history.map((h) => (h.scores || {}).overall || 0) }], document.createElement("div"));
+    const run = $("run-judge"); if (run) run.onclick = async () => { run.disabled = true; try { await post("/intelligence/judge"); setTimeout(load, 3000); pollJudge(); } catch (e) { alert(e.message); run.disabled = false; } };
+    $("judge-body").querySelectorAll("button[data-apply]").forEach((b) => b.onclick = async () => { try { await post(`/intelligence/judge/suggestions/${b.dataset.apply}/apply`); load(); } catch (e) { alert(e.message); } });
+    $("judge-body").querySelectorAll("button[data-alias]").forEach((b) => b.onclick = () => addAlias(b.dataset.alias, b.dataset.pid));
+  }
+  let judgeTimer = null;
+  function pollJudge() { clearTimeout(judgeTimer); judgeTimer = setTimeout(async () => { await load(); if (state.data.judge.running) pollJudge(); }, 15000); }
+
+  function renderFinance() {
+    const fin = state.data.finance; const cur = fin.currency; const t = fin.totals; const mode = state.data.allocation_mode;
+    $("mode-seg").querySelectorAll("button").forEach((b) => { b.setAttribute("aria-pressed", String(b.dataset.mode === mode)); b.onclick = () => { state.mode = b.dataset.mode; load(); }; });
+    $("mode-note").textContent = mode === "scaled" ? `Full weeks: every person active in a week is booked ${state.data.config.capacity_hours_per_day * 5} h for that week, split by their activity — the timesheet stance. Deployment default: ${state.data.config.allocation_mode}.` : `Observed days: only days with a signal count, ${state.data.config.capacity_hours_per_day} h each — nothing is invented for quiet days. Deployment default: ${state.data.config.allocation_mode}.`;
+    $("fin-count").textContent = `${fin.rows.length} person × project cells`;
+    $("fin-method").textContent = fin.methodology;
+    const tiles = [[hours(t.hours), "hours in the window", `${pct(fin.logged_pct)} explicitly logged`], [hours(t.capex_hours), "capitalizable hours", `${pct(fin.capex_pct)} of the total`], [hours(t.opex_hours), "expensed hours", "maintenance, defects, unplanned"]];
+    if (!fin.money_hidden) tiles.push([t.capex_amount != null ? money(t.capex_amount, cur) : "—", "capitalizable amount", t.unpriced_hours ? `${hours(t.unpriced_hours)} without a rate` : "at roster / blended rates"], [t.opex_amount != null ? money(t.opex_amount, cur) : "—", "expensed amount", ""]);
+    $("fin-stats").innerHTML = tiles.map(([v, l, dd]) => `<div class="stat"><div class="v">${v}</div><div class="l">${esc(l)}</div><div class="d">${esc(dd)}</div></div>`).join("") + (state.canCost ? `<div class="stat" style="display:flex;align-items:center;justify-content:center"><a class="btn primary" href="/intelligence/finance.csv?${qs()}">Export CSV</a></div>` : "");
+    $("fin-init").innerHTML = fin.by_initiative.length ? `<table><thead><tr><th>Initiative</th><th class="num">Hours</th><th class="num">Capex h</th><th class="num">Capex %</th>${fin.money_hidden ? "" : '<th class="num">Capex amount</th>'}<th class="num">People</th></tr></thead><tbody>${fin.by_initiative.map((r) => `<tr><td>${esc(r.title)}${r.maintenance ? ' <span class="chip maint">maintenance</span>' : ""}</td><td class="num">${hours(r.hours)}</td><td class="num">${hours(r.capex_hours)}</td><td class="num">${pct(r.capex_pct)}</td>${fin.money_hidden ? "" : `<td class="num">${r.capex_amount ? money(r.capex_amount, cur) : "—"}</td>`}<td class="num">${r.people}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">No hours in the window.</div>';
+    const rows = fin.rows.slice(0, 60);
+    $("fin-rows").innerHTML = rows.length ? `<table><thead><tr><th>Person</th><th>Project</th><th class="num">Hours</th><th class="num">Capex</th><th>Treatment</th>${fin.money_hidden ? "" : '<th class="num">Amount</th>'}<th class="num">Evidence</th></tr></thead><tbody>${rows.map((r, i) => `<tr class="click" data-i="${i}"><td>${esc(r.person_name)}${r.person_external ? ' <span class="chip low" title="not in the people directory">?</span>' : ""}</td><td>${esc(r.project_title)}<div class="muted" style="font-size:0.8em">${esc(r.initiative_title)}</div></td><td class="num">${hours(r.hours)}<div class="muted" style="font-size:0.78em">${pct(100 * r.logged_hours / Math.max(r.hours, 0.001))} logged</div></td><td class="num">${hours(r.capex_hours)}</td><td><span class="chip ${r.treatment === "capitalize" ? "ok" : r.treatment === "split" ? "low" : "quiet"}">${esc(r.treatment)}</span></td>${fin.money_hidden ? "" : `<td class="num">${r.capex_amount != null ? money((r.capex_amount || 0) + (r.opex_amount || 0), cur) : `<span class="muted" title="${esc(r.rate_basis)}">no rate</span>`}</td>`}<td class="num">${r.signals} <span class="muted">/ ${r.days}d</span></td></tr>`).join("")}</tbody></table>${fin.rows.length > rows.length ? `<p class="sub" style="margin-top:8px">${fin.rows.length - rows.length} more rows in the CSV export.</p>` : ""}` : '<div class="empty">No hours in the window.</div>';
+    $("fin-rows").querySelectorAll("tr.click").forEach((tr) => tr.onclick = () => showTrace(rows[parseInt(tr.dataset.i, 10)]));
+  }
+  async function showTrace(row) {
+    const r = await fetch(`/intelligence/trace?${qs({ person_id: row.person_id, project_id: row.project_id || "" })}`); const d = await r.json();
+    $("dlg-body").innerHTML = `<h2>Audit trail · ${esc(row.person_name)} → ${esc(row.project_title)} <span class="count">${hours(d.hours)} across ${d.days.length} day(s), ${d.signals.length} signals</span></h2><p class="sub">Each day row is one allocation; the signals below are what earned it. Logged hours came from worklogs; inferred hours are the day's remaining capacity split by signal weight.</p>` +
+      `<table><thead><tr><th>Day</th><th class="num">Hours</th><th class="num">Logged</th><th class="num">Inferred</th><th>Method</th><th>Basis</th><th class="num">Signals</th></tr></thead><tbody>${d.days.map((x) => `<tr><td>${esc(x.day)}</td><td class="num">${fmt(x.hours, 2)}</td><td class="num">${fmt(x.logged_hours, 2)}</td><td class="num">${fmt(x.inferred_hours, 2)}</td><td>${esc(x.method)}</td><td class="muted">${esc(x.via)}</td><td class="num">${x.signals}</td></tr>`).join("")}</tbody></table>` +
+      `<h3>Signals</h3><table><thead><tr><th>When</th><th>Kind</th><th>What</th><th>Where</th></tr></thead><tbody>${d.signals.slice(0, 300).map((s) => `<tr><td class="muted" style="white-space:nowrap">${when(s.at)}</td><td>${esc(s.kind)}${s.minutes ? ` <b>${fmt(s.minutes / 60, 1)}h</b>` : ""}</td><td>${esc((s.meta || {}).subject || (s.meta || {}).title || ((s.meta || {}).from != null ? `${s.meta.from} → ${s.meta.to}` : (s.meta || {}).field || ""))}</td><td class="muted">${esc(s.repo ? s.repo.replace(/^src\//, "") : s.source)}${s.refs && s.refs.length ? " · " + esc(s.refs.join(", ")) : ""}</td></tr>`).join("")}</tbody></table>`;
+    $("dlg").showModal();
+  }
+
+  function renderSources() {
+    const src = state.data.sources; $("src-count").textContent = `${src.filter((s) => s.configured).length} of ${src.length} configured · last refresh ${ago(state.data.last_refresh_at)}`;
+    $("sources-table").innerHTML = `<table><thead><tr><th>Source</th><th>Kind</th><th>Status</th><th class="num">Signals</th><th>Collected</th><th>Detail</th></tr></thead><tbody>${src.map((s) => `<tr><td><b>${esc(s.label)}</b></td><td class="muted">${esc(s.category)}</td><td><span class="status-dot ${esc(s.refreshing ? "cached" : (s.state || ""))}"></span>${s.refreshing ? "refreshing…" : (!s.configured ? "not configured" : esc(s.state || "never"))}${s.error ? `<div class="muted" style="font-size:0.8em;color:var(--critical)">${esc(s.error)}</div>` : ""}${s.notes && s.notes.length ? `<div class="muted" style="font-size:0.8em">${esc(s.notes.slice(0, 3).join(" · "))}</div>` : ""}</td><td class="num">${fmt(s.signals || 0)}</td><td class="muted">${s.collected_at ? `${ago(s.collected_at)}${s.seconds ? ` (${fmt(s.seconds)}s)` : ""}` : "—"}</td><td class="second" style="font-size:0.85em">${esc(s.detail || "")}${s.summary && s.summary.issues != null ? ` · ${fmt(s.summary.issues)} tickets with history` : ""}${s.summary && s.summary.repos != null ? ` · ${s.summary.repos} repos` : ""}${s.summary && s.summary.pull_requests != null ? ` · ${fmt(s.summary.pull_requests)} PRs` : ""}${s.summary && s.summary.agent_cost_usd != null ? ` · ${money(s.summary.agent_cost_usd)} agent spend` : ""}</td></tr>`).join("")}</tbody></table>`;
+    const git = src.find((s) => s.id === "git"); const repos = (git && git.summary && git.summary.repo_rows) || [];
+    $("repo-facts").innerHTML = repos.length ? `<table><thead><tr><th>Repository</th><th>System</th><th class="num">Commits since ${esc(state.data.config.since)}</th><th class="num">Keyed</th><th class="num">Authors</th><th>Newest commit</th></tr></thead><tbody>${repos.map((r) => `<tr><td>${esc(r.repo)}</td><td class="muted">${esc(r.system || "—")}</td><td class="num">${fmt(r.commits)}</td><td class="num">${r.human_commits ? pct(100 * r.keyed_commits / r.human_commits) : "—"}</td><td class="num">${r.authors || 0}</td><td class="muted">${r.newest_at ? new Date(r.newest_at * 1000).toLocaleDateString() : (r.error ? esc(r.error) : "—")}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">No repositories scanned yet.</div>';
+  }
+
+  // ---- load ----
+  async function load() {
+    try {
+      const r = await fetch(`/intelligence/data?${qs()}`); if (!r.ok) throw new Error(`HTTP ${r.status}`); const d = await r.json(); render(d);
+      if (d.refreshing) pollRefresh();
+    } catch (e) { $("banner").innerHTML = `<div class="note warn">Could not load the intelligence report: ${esc(e.message)}</div>`; }
+  }
+  applyPreset("90");
+  if (window.PMNav && PMNav.ready) {
+    PMNav.ready.then(mountControls);
+    PMNav.auth.then((info) => { const caps = (info && info.capabilities) || []; state.can = !(info && info.enterprise) || caps.indexOf("manage_roadmap") !== -1; state.canCost = !(info && info.enterprise) || caps.indexOf("view_cost") !== -1; load(); });
+  } else { load(); }
+})();
+</script>
+</body>
+</html>

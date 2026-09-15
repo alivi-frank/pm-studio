@@ -857,6 +857,41 @@ type the project doesn't have, or a required field nobody configured. And if the
 was created but could not be linked, the error names the key: a created ticket is never
 left with nothing pointing at it.
 
+## Engineering intelligence (`[signals]`)
+
+Optional. Turns on nothing by itself - the `/intelligence` page and its ledger run over
+git and whatever `[[trackers]]` are declared, with these defaults - but this is where a
+deployment sets the window, the capacity a day is worth, and the calibration. Full
+design in [INTELLIGENCE.md](INTELLIGENCE.md).
+
+```toml
+[signals]
+since = "2024-01-01"              # earliest activity ever pulled (git, Jira, ADO)
+capacity_hours_per_day = 8.0      # what one active person-day is worth
+timezone = "America/New_York"     # working days and hours are bucketed in this zone
+auto_refresh_minutes = 180        # background re-pull cadence; 0 = only the page's button
+extra_repos = []                  # repo-root-relative checkouts beyond the [systems] paths
+judge_model = ""                  # empty = the strongest declared model (opus tier)
+auto_judge = false                # run the judge after every refresh
+ado_pr_projects = ["Proj"]        # ADO projects whose pull requests are pulled (needs the ADO tracker)
+
+[signals.thresholds]              # any key from findings.DEFAULT_THRESHOLDS
+stale_in_progress_days = 10
+unkeyed_commit_pct = 40
+
+[signals.weights]                 # minutes-equivalent per signal kind, for the daily split
+commit = 45
+comment = 10
+```
+
+Credentials are the trackers' own (`email_env` / `token_env`); the layer adds none.
+Everything it writes lives under `<workspace>/signals/`: `cache/` (each source's last
+result - large, rebuildable, ignore it in git), `feedback.json`, `tuning.json`,
+`aliases.json` and `judgments.jsonl` (small, worth committing), `judge/` dossiers and
+the `inbox/` drop folder for calendar / email / chat exports. Thresholds edited on the
+page and suggestions accepted from the judge land in `tuning.json`, layered over this
+table - so the file is the calibration history, and this table the starting point.
+
 ## `PM_INSTRUCTIONS.md`
 
 Appended to the PM agent's system prompt for every session, framed as

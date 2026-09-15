@@ -33,6 +33,14 @@
     what: "in flight · shipped recently · who's on what",
   };
 
+  // The evidence behind the work model: every commit, transition and worklog,
+  // attributed up the same chain - where effort actually went, what it produced,
+  // and what is drifting. Read-first like the Overview, so it sits beside it.
+  var INTELLIGENCE_TAB = {
+    page: "intelligence", href: "/intelligence", label: "Intelligence",
+    what: "where effort goes · what it produced · what's off",
+  };
+
   var CORE_TABS = [
     { page: "portfolio", href: "/portfolio", label: "Portfolio", what: "goals · initiatives · projects" },
     { page: "roadmap", href: "/roadmap", label: "Roadmap", what: "changes · now / next / later" },
@@ -72,6 +80,7 @@
   // light up "Sessions", because that is where they live).
   var PAGES = {
     overview: { tab: "overview" },
+    intelligence: { tab: "intelligence" },
     sessions: { tab: "sessions" },
     portfolio: { tab: "portfolio" },
     roadmap: { tab: "roadmap" },
@@ -143,6 +152,7 @@
 
     var tabs = el("div", "pmnav-tabs");
     tabs.appendChild(makeTab(OVERVIEW_TAB, current, "pmnav-tab"));
+    tabs.appendChild(makeTab(INTELLIGENCE_TAB, current, "pmnav-tab"));
     tabs.appendChild(el("span", "pmnav-group-sep"));
     CORE_TABS.forEach(function (tab, i) {
       // The work model, drawn where the destinations already are: intent narrowing into
@@ -206,7 +216,7 @@
   // set - the bar above is the only place destinations are listed.
   function buildPageContext(spec) {
     var row = el("div", "pmnav-context");
-    var all = [OVERVIEW_TAB].concat(CORE_TABS, REFERENCE_TABS, ADMIN_TABS);
+    var all = [OVERVIEW_TAB, INTELLIGENCE_TAB].concat(CORE_TABS, REFERENCE_TABS, ADMIN_TABS);
     var here = null;
     all.forEach(function (tab) { if (tab.page === spec.tab) here = tab; });
 
