@@ -17,7 +17,7 @@ import time
 from collections import defaultdict
 
 from .attribution import VIA_CHANGE, VIA_EPIC_PROJECT, VIA_OWN_EPIC, VIA_PARENT_CHANGE, VIA_SESSION
-from .model import KIND_COMMIT, KIND_STATUS, Clock
+from .model import KIND_COMMIT, KIND_PR_MERGED, KIND_PR_REVIEW, KIND_STATUS, Clock
 
 DEFAULT_THRESHOLDS: dict[str, float] = {
     "stale_in_progress_days": 10,
@@ -37,6 +37,9 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "reopen_count": 2,
     "unresolved_author_min_signals": 25,
     "idle_assignee_days": 14,
+    "abandoned_after_days": 180,        # stale this long -> folded into one backlog finding per project
+    "unreviewed_merge_pct": 50,
+    "unreviewed_min_merges": 10,
 }
 
 SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2, "info": 3}
@@ -58,6 +61,8 @@ RULES: dict[str, dict] = {
     "bus_factor": {"title": "Single-person project", "family": "workflow", "what": "Projects with meaningful commit volume where one person wrote almost all of it."},
     "ideation_with_commits": {"title": "Ideation project already being built", "family": "lifecycle", "what": "Projects declared in ideation that have commits - the phase should be open."},
     "idle_assignee": {"title": "Assigned in-progress ticket, assignee inactive", "family": "lifecycle", "what": "Active tickets whose assignee has produced no signal anywhere for N days."},
+    "abandoned_backlog": {"title": "Abandoned in-progress backlog", "family": "lifecycle", "what": "Tickets the tracker still shows in progress that nobody has touched for more than N days, one finding per tracker project - a cleanup, not 500 alarms."},
+    "unreviewed_merges": {"title": "Pull requests merged without review", "family": "workflow", "what": "Repositories where most merged pull requests carried no reviewer vote - or were merged within minutes of opening."},
 }
 
 PLACED = (VIA_CHANGE, VIA_PARENT_CHANGE, VIA_EPIC_PROJECT, VIA_OWN_EPIC, VIA_SESSION)
@@ -114,6 +119,7 @@ def detect(*, slices: list[dict], alloc_rows: list[dict], timelines: dict[str, d
     assignee_of = {ref: t.get("assignee", "") for ref, t in tickets.items()}
 
     # ---- ticket-level rules ----
+    abandoned: dict[str, list[dict]] = defaultdict(list)
     for ref, tl in timelines.items():
         ticket = tickets.get(ref) or {}
         title = ticket_title.get(ref) or ref
@@ -123,8 +129,13 @@ def detect(*, slices: list[dict], alloc_rows: list[dict], timelines: dict[str, d
             last = last_signal_by_ref.get(ref)
             idle = (now - last) / day if last else None
             stale = idle is not None and idle >= T["stale_in_progress_days"]
+            if stale and idle >= T["abandoned_after_days"]:
+                # Not an alarm each: a ticket nobody touched for half a year is backlog
+                # rot, and hundreds of them are one cleanup. Grouped per tracker project.
+                abandoned[ticket.get("project") or ref.split(":", 1)[0]].append({"ref": ref, "title": title[:70], "url": ticket_url.get(ref, ""), "idle": round(idle), "status": tl["status"], "who": assignee_of.get(ref, "")})
+                continue
             if stale:
-                # One finding per abandoned ticket: staleness is the root cause, so the
+                # One finding per stale ticket: staleness is the root cause, so the
                 # review-queue and long-running rules stay quiet for it below.
                 findings.append(_finding("stale_in_progress", ref, "high" if idle >= 2 * T["stale_in_progress_days"] else "medium", f"{ref.split(':', 1)[1]} · {title[:80]}", f"Status {tl['status']!r}, last signal {idle:.0f} days ago" + (f", assigned to {assignee_of.get(ref)}" if assignee_of.get(ref) else "") + ".", links=links, value=round(idle, 1), unit="days idle"))
             if not stale and tl.get("first_start") and (now - tl["first_start"]) / day >= T["zombie_in_progress_days"]:
@@ -149,6 +160,17 @@ def detect(*, slices: list[dict], alloc_rows: list[dict], timelines: dict[str, d
                 findings.append(_finding("work_after_done", ref, "medium" if len(late) < 5 else "high", f"{ref.split(':', 1)[1]} · {title[:80]}", f"{len(late)} commit(s) landed {(late[-1]['at'] - done_at) / day:.0f}+ days after the ticket was done ({clock.day(done_at)}).", evidence=[{"at": c["at"], "who": c["person_name"], "what": c["meta"].get("subject", "")[:100], "repo": c["repo"]} for c in late[:5]], links=links, value=len(late), unit="commits after done"))
         if tl.get("reopens", 0) >= T["reopen_count"] and tl.get("last_done") and start <= tl["last_done"] < end:
             findings.append(_finding("reopened", ref, "low", f"{ref.split(':', 1)[1]} · {title[:80]}", f"Reopened {tl['reopens']} times.", links=links, value=tl["reopens"], unit="reopens"))
+
+    for project_name, items in abandoned.items():
+        items.sort(key=lambda i: -i["idle"])
+        by_who: dict[str, int] = defaultdict(int)
+        by_status: dict[str, int] = defaultdict(int)
+        for i in items:
+            by_who[i["who"] or "unassigned"] += 1
+            by_status[i["status"]] += 1
+        who = ", ".join(f"{n} {w}" for w, n in sorted(by_who.items(), key=lambda kv: -kv[1])[:5])
+        statuses = ", ".join(f"{n} {st}" for st, n in sorted(by_status.items(), key=lambda kv: -kv[1])[:4])
+        findings.append(_finding("abandoned_backlog", project_name, "high" if len(items) >= 20 else "medium", f"{len(items)} in-progress tickets untouched for {T['abandoned_after_days']:.0f}+ days in {project_name}", f"Oldest idle {items[0]['idle']} days. By status: {statuses}. By assignee: {who}. Close or remove them so the board stops reporting them as in flight.", evidence=[{"ref": i["ref"], "title": f"{i['title']} — {i['status']}, {i['idle']}d idle, {i['who'] or 'unassigned'}", "url": i["url"]} for i in items[:8]], links={"tracker_project": project_name}, value=len(items), unit="tickets"))
 
     # ---- project / initiative rules ----
     open_changes_by_project: dict[str, int] = defaultdict(int)
@@ -203,6 +225,29 @@ def detect(*, slices: list[dict], alloc_rows: list[dict], timelines: dict[str, d
             unkeyed_pct = 100.0 * (r["commits"] - r["keyed"]) / r["commits"]
             if unkeyed_pct > T["unkeyed_commit_pct"]:
                 findings.append(_finding("unkeyed_commits", repo, "medium" if unkeyed_pct < 80 else "high", repo, f"{unkeyed_pct:.0f}% of {r['commits']:.0f} commits in the window name no ticket.", links={"repo": repo}, value=round(unkeyed_pct, 0), unit="% unkeyed"))
+
+    reviewed_prs: set = {(s["repo"], s["meta"].get("pr")) for s in in_window if s["kind"] == KIND_PR_REVIEW}
+    merges_by_repo: dict[str, dict] = defaultdict(lambda: {"merged": 0, "unreviewed": 0, "quick": 0})
+    seen_prs: set = set()
+    for s in in_window:
+        if s["kind"] != KIND_PR_MERGED:
+            continue
+        key = (s["repo"], s["meta"].get("pr"))
+        if key in seen_prs:
+            continue
+        seen_prs.add(key)
+        repo = s["repo"] or s["meta"].get("repo_name") or "?"
+        m = merges_by_repo[repo]
+        m["merged"] += 1
+        if key not in reviewed_prs:
+            m["unreviewed"] += 1
+        if (s["meta"].get("hours_open") or 0) < 0.25:
+            m["quick"] += 1
+    for repo, m in merges_by_repo.items():
+        if m["merged"] >= T["unreviewed_min_merges"]:
+            share = 100.0 * m["unreviewed"] / m["merged"]
+            if share > T["unreviewed_merge_pct"]:
+                findings.append(_finding("unreviewed_merges", repo, "medium", repo.replace("src/", ""), f"{m['unreviewed']} of {m['merged']} merged pull requests had no reviewer vote; {m['quick']} were merged within 15 minutes of opening.", links={"repo": repo}, value=round(share), unit="% unreviewed"))
 
     # ---- people ----
     for sug in sorted(resolver_suggestions, key=lambda x: -x["signals"])[:25]:

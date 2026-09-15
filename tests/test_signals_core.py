@@ -166,6 +166,25 @@ class FindingsTest(unittest.TestCase):
         self.assertEqual(lag["evidence"][0]["who"], "Ada Lovelace")
         self.assertEqual(found[0]["severity"], "high")
 
+    def test_ancient_stale_tickets_fold_into_one_backlog_finding(self) -> None:
+        c = ctx()
+        now = T0 + 400 * DAY
+        timelines = {}
+        for i in range(3):
+            key = f"jira:NDT-{100 + i}"
+            c.tickets[key] = {"tracker_id": "jira", "key": f"NDT-{100 + i}", "type": "task", "state_category": "In Progress", "parent_key": None, "components": [], "project": "NDT", "title": f"old {i}", "url": "", "assignee": "Ada Lovelace"}
+            timelines[key] = {"created": T0 - DAY, "status": "In Progress", "status_cat": "in_progress", "status_since": T0, "transitions": [{"at": T0, "from": "To Do", "to": "In Progress", "from_cat": "todo", "to_cat": "in_progress"}], "first_start": T0, "last_done": None, "reopens": 0, "review_secs": 0, "blocked_secs": 0, "type": "task"}
+        slices = Attributor(c, resolver()).slices(commit("s", T0, "Ada", "ada@x.com", ["jira:NDT-100", "jira:NDT-101", "jira:NDT-102"]))
+        found = detect(slices=slices, alloc_rows=[], timelines=timelines, tickets=c.tickets, changes=[], projects={}, initiatives={}, resolver_suggestions=[], thresholds=DEFAULT_THRESHOLDS, clock=CLOCK, now=now, start=now - 90 * DAY, end=now + DAY)
+        rules = [f["rule"] for f in found]
+        self.assertEqual(rules.count("abandoned_backlog"), 1)
+        self.assertNotIn("stale_in_progress", rules)
+        self.assertNotIn("zombie_in_progress", rules)
+        backlog = next(f for f in found if f["rule"] == "abandoned_backlog")
+        self.assertEqual(backlog["value"], 3)
+        self.assertEqual(backlog["entity"], "NDT")
+        self.assertEqual(len(backlog["evidence"]), 3)
+
     def test_feedback_overlay_hides_but_counts(self) -> None:
         findings = [{"id": "a", "rule": "stale_in_progress", "severity": "high"}, {"id": "b", "rule": "bus_factor", "severity": "low"}, {"id": "c", "rule": "reopened", "severity": "low"}]
         visible, counts = overlay_feedback(findings, {"a": {"state": "dismissed"}, "c": {"state": "snoozed", "until": 1.0}}, {"bus_factor"}, now=100.0)

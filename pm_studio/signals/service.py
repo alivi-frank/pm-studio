@@ -203,7 +203,13 @@ class IntelligenceService:
         mode = self.allocation_mode(mode)
         key = f"{window['from']}|{window['to']}|{sorted(filters.items())}|{mode}|{self.ledger.generation}|{len(self.tuning.data['history'])}|{len(self.feedback.data)}|{int(now // 300)}"
         if key in self._report_cache:
-            return self._report_cache[key]
+            cached = self._report_cache[key]
+            # Live state rides on top of the cached figures: whether the judge or a
+            # refresh is running changes by the second, the report does not.
+            cached["judge"]["running"] = self.judge_running
+            cached["judge"]["error"] = self.judge_error
+            cached["refreshing"] = self.ledger.is_refreshing
+            return cached
         slices_all, cov_all, resolver = self.ledger.slices()
         ctx, _ = self.context()
         slices = [s for s in slices_all if self._matches(s, filters)] if any(filters.values()) else slices_all

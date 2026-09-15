@@ -35,7 +35,7 @@ class JiraSourceTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self.calls = []
-        self.source = JiraHistorySource("jira", "https://x.atlassian.net", ("NDT",), "me@x", "tok", fetch=self.fetch)
+        self.source = JiraHistorySource("jira", "https://jira.example", ("NDT",), "me@x", "tok", fetch=self.fetch)
 
     def test_history_becomes_signals(self) -> None:
         result = self.source.collect(0.0)
@@ -61,7 +61,7 @@ class JiraSourceTest(unittest.TestCase):
             if "/search/jql" in url:
                 return {"issues": [], "isLast": True}
             return self.fetch(url, headers)
-        second_source = JiraHistorySource("jira", "https://x.atlassian.net", ("NDT",), "me@x", "tok", fetch=fetch_empty)
+        second_source = JiraHistorySource("jira", "https://jira.example", ("NDT",), "me@x", "tok", fetch=fetch_empty)
         second = second_source.collect(0.0, first)
         self.assertEqual(len(second.signals), len(first.signals))
         self.assertEqual(second.facts["issues"], first.facts["issues"])
@@ -91,7 +91,7 @@ class AdoSourceTest(unittest.TestCase):
         raise AssertionError(url)
 
     def test_revisions_are_diffed(self) -> None:
-        source = AdoHistorySource("ado", "https://dev.azure.com/org", ("Proj",), "pat", fetch=self.fetch)
+        source = AdoHistorySource("ado", "https://ado.example/org", ("Proj",), "pat", fetch=self.fetch)
         result = source.collect(0.0)
         kinds = [s.kind for s in sorted(result.signals, key=lambda s: s.at)]
         self.assertEqual(kinds, [KIND_CREATED, KIND_STATUS, KIND_ASSIGNEE, KIND_WORKLOG, KIND_COMMENT, KIND_STATUS])
@@ -106,7 +106,7 @@ class AdoSourceTest(unittest.TestCase):
         self.assertEqual(len(fact["transitions"]), 2)
 
     def test_second_run_uses_the_continuation_and_keeps_history(self) -> None:
-        source = AdoHistorySource("ado", "https://dev.azure.com/org", ("Proj",), "pat", fetch=self.fetch)
+        source = AdoHistorySource("ado", "https://ado.example/org", ("Proj",), "pat", fetch=self.fetch)
         first = source.collect(0.0)
         self.assertNotIn("raw", first.facts)  # only the last state per item is kept
         self.assertEqual(first.facts["items"]["Proj\x1f7"]["rev"], 4)
@@ -115,14 +115,14 @@ class AdoSourceTest(unittest.TestCase):
         self.assertEqual(second.facts["touched"], 0)
 
     def test_new_revision_diffs_against_stored_state(self) -> None:
-        source = AdoHistorySource("ado", "https://dev.azure.com/org", ("Proj",), "pat", fetch=self.fetch)
+        source = AdoHistorySource("ado", "https://ado.example/org", ("Proj",), "pat", fetch=self.fetch)
         first = source.collect(0.0)
         reopened = {"id": 7, "rev": 5, "fields": {**REVISIONS[3]["fields"], "System.State": "Active", "System.ChangedDate": "2026-02-05T10:00:00Z", "System.ChangedBy": "Ada Lovelace <ada@x.com>"}}
         def fetch(url, headers):
             if "workitemrevisions" in url:
                 return {"values": [reopened], "isLastBatch": True, "continuationToken": "tok-3"}
             return self.fetch(url, headers)
-        again = AdoHistorySource("ado", "https://dev.azure.com/org", ("Proj",), "pat", fetch=fetch)
+        again = AdoHistorySource("ado", "https://ado.example/org", ("Proj",), "pat", fetch=fetch)
         second = again.collect(0.0, first)
         self.assertEqual(len(second.signals), len(first.signals) + 1)
         newest = max(second.signals, key=lambda s: s.at)
@@ -144,7 +144,7 @@ class AdoPullRequestTest(unittest.TestCase):
                                "creationDate": "2026-03-01T10:00:00Z", "closedDate": "2026-03-02T10:00:00Z", "createdBy": {"displayName": "Ada", "uniqueName": "ada@x.com"},
                                "repository": {"name": "Services.Claims"},
                                "reviewers": [{"displayName": "Bob", "uniqueName": "bob@x.com", "vote": 10}, {"displayName": "Ada", "uniqueName": "ada@x.com", "vote": 10}, {"displayName": "Team", "uniqueName": "t", "vote": 10, "isContainer": True}]}]}
-        source = AdoPullRequestSource("ado", "https://dev.azure.com/org", ("Proj",), "pat", repo_resolver=lambda name: ("src/capadmin/" + name, "capadmin-stack"), fetch=fetch)
+        source = AdoPullRequestSource("ado", "https://ado.example/org", ("Proj",), "pat", repo_resolver=lambda name: ("src/capadmin/" + name, "capadmin-stack"), fetch=fetch)
         result = source.collect(0.0)
         kinds = sorted(s.kind for s in result.signals)
         self.assertEqual(kinds, sorted([KIND_PR_OPENED, KIND_PR_MERGED, KIND_PR_REVIEW]))
