@@ -20,6 +20,7 @@ A signal with no reference at all is attributed to its repository's system only.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -40,6 +41,19 @@ VIA_NONE = "none"
 TICKET_NATURE = {"bug": "defect", "story": "feature", "feature": "feature", "epic": "feature", "task": "task", "subtask": "task", "spike": "discovery", "other": "other"}
 
 UNATTRIBUTED_PROJECT = "__unattributed__"
+
+# Automation posing as a person, whatever the source called it. Checked at attribution
+# time (not only at collection) so a cache written before a name was known is still
+# judged right, and so the people directory is never asked to adopt a connector.
+BOT_ACTOR_RE = re.compile(
+    r"automation for jira|checklists for jira|herocoders|service accounts?|project collection|"
+    r"build service|azure pipelines|wrike|\.sync@|snyk|dependabot|renovate|\[bot\]|jira outlook|atlassian assist",
+    re.IGNORECASE,
+)
+
+
+def is_bot_actor(name: str, email: str) -> bool:
+    return bool(BOT_ACTOR_RE.search(f"{name} {email}"))
 
 
 @dataclass
@@ -180,7 +194,7 @@ class Attributor:
 
     def person_for(self, signal: Signal) -> dict:
         meta = signal.meta or {}
-        if meta.get("bot"):
+        if meta.get("bot") or is_bot_actor(signal.actor, signal.actor_email):
             # Automation is repository/tracker motion, never anyone's effort - and never
             # an "unresolved person" for the directory to adopt.
             return {"id": "bot", "name": signal.actor or "automation", "email": signal.actor_email, "external": False, "matched_by": "bot"}
@@ -198,7 +212,7 @@ class Attributor:
             "signal_id": signal.id, "at": signal.at, "source": signal.source, "kind": signal.kind,
             "person_id": person["id"], "person_name": person.get("name") or signal.actor or "unknown",
             "person_external": bool(person.get("external")), "matched_by": person.get("matched_by", ""),
-            "repo": signal.repo, "bot": bool(signal.meta.get("bot")), "ai": bool(signal.meta.get("ai")),
+            "repo": signal.repo, "bot": bool(signal.meta.get("bot")) or person.get("matched_by") == "bot", "ai": bool(signal.meta.get("ai")),
         }
         meta = signal.meta or {}
         targets: list[dict] = []

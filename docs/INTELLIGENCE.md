@@ -97,9 +97,15 @@ Rules over the same slices, each firing on an entity with evidence; ids are stab
 `stale_project`, `ideation_with_commits`, `idle_assignee`), investment
 (`silent_initiative`, `unplanned_work`, `maintenance_share`), hygiene
 (`work_after_done`, `status_lag`, `unkeyed_commits`), flow (`review_dwell`,
-`reopened`), workflow (`fragmentation`, `bus_factor`), data (`unresolved_author`).
+`reopened`, `closure_lag`), workflow (`fragmentation`, `bus_factor`,
+`unreviewed_merges`), data (`unresolved_author`).
 A stale ticket produces one finding: the long-running and review rules stay quiet for
-it. Thresholds: package defaults <- `[signals.thresholds]` <- `signals/tuning.json`.
+it; tickets idle 180+ days fold into one `abandoned_backlog` per tracker project, and
+tickets whose status *name* says finished ("Resolved", "UAT Completed", "QA Passed")
+are treated as awaiting closure whatever category the tracker declared - they feed
+`closure_lag`, never the stale rules. Service accounts and marketplace apps are bots
+at attribution time (`attribution.is_bot_actor`), so their motion is never anyone's
+effort and never an unresolved person. Thresholds: package defaults <- `[signals.thresholds]` <- `signals/tuning.json`.
 
 Feedback (`state.FeedbackStore`, `signals/feedback.json`): confirm / dismiss / snooze /
 reopen per finding, plus the judge's verdict. Dismissed and snoozed findings leave the

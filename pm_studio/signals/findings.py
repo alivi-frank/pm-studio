@@ -40,6 +40,8 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "abandoned_after_days": 180,        # stale this long -> folded into one backlog finding per project
     "unreviewed_merge_pct": 50,
     "unreviewed_min_merges": 10,
+    "closure_lag_days": 14,
+    "closure_lag_min_tickets": 10,
 }
 
 SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2, "info": 3}
@@ -63,6 +65,7 @@ RULES: dict[str, dict] = {
     "idle_assignee": {"title": "Assigned in-progress ticket, assignee inactive", "family": "lifecycle", "what": "Active tickets whose assignee has produced no signal anywhere for N days."},
     "abandoned_backlog": {"title": "Abandoned in-progress backlog", "family": "lifecycle", "what": "Tickets the tracker still shows in progress that nobody has touched for more than N days, one finding per tracker project - a cleanup, not 500 alarms."},
     "unreviewed_merges": {"title": "Pull requests merged without review", "family": "workflow", "what": "Repositories where most merged pull requests carried no reviewer vote - or were merged within minutes of opening."},
+    "closure_lag": {"title": "Finished but never closed", "family": "flow", "what": "Tickets resolved / UAT-complete for more than N days without being closed, one finding per tracker project - the hygiene gap that makes WIP and cycle time read worse than they are."},
 }
 
 PLACED = (VIA_CHANGE, VIA_PARENT_CHANGE, VIA_EPIC_PROJECT, VIA_OWN_EPIC, VIA_SESSION)
@@ -160,6 +163,22 @@ def detect(*, slices: list[dict], alloc_rows: list[dict], timelines: dict[str, d
                 findings.append(_finding("work_after_done", ref, "medium" if len(late) < 5 else "high", f"{ref.split(':', 1)[1]} · {title[:80]}", f"{len(late)} commit(s) landed {(late[-1]['at'] - done_at) / day:.0f}+ days after the ticket was done ({clock.day(done_at)}).", evidence=[{"at": c["at"], "who": c["person_name"], "what": c["meta"].get("subject", "")[:100], "repo": c["repo"]} for c in late[:5]], links=links, value=len(late), unit="commits after done"))
         if tl.get("reopens", 0) >= T["reopen_count"] and tl.get("last_done") and start <= tl["last_done"] < end:
             findings.append(_finding("reopened", ref, "low", f"{ref.split(':', 1)[1]} · {title[:80]}", f"Reopened {tl['reopens']} times.", links=links, value=tl["reopens"], unit="reopens"))
+
+    awaiting: dict[str, list[dict]] = defaultdict(list)
+    for ref, tl in timelines.items():
+        if tl.get("status_cat") == "resolved" and tl.get("status_since") and (now - tl["status_since"]) / day >= T["closure_lag_days"]:
+            ticket = tickets.get(ref) or {}
+            awaiting[ticket.get("project") or ref.split(":", 1)[0]].append({"ref": ref, "title": (ticket_title.get(ref) or ref)[:70], "url": ticket_url.get(ref, ""), "age": round((now - tl["status_since"]) / day), "status": tl["status"], "who": assignee_of.get(ref, "")})
+    for project_name, items in awaiting.items():
+        if len(items) < T["closure_lag_min_tickets"]:
+            continue
+        items.sort(key=lambda i: -i["age"])
+        ages = sorted(i["age"] for i in items)
+        median = ages[len(ages) // 2]
+        by_status: dict[str, int] = defaultdict(int)
+        for i in items:
+            by_status[i["status"]] += 1
+        findings.append(_finding("closure_lag", project_name, "medium" if len(items) < 50 else "high", f"{len(items)} tickets finished but not closed in {project_name}", f"Median {median} days since they reached {', '.join(f'{n} {st}' for st, n in sorted(by_status.items(), key=lambda kv: -kv[1])[:3])}; oldest {items[0]['age']} days. Closing them fixes WIP, cycle time and the board's in-flight count in one move.", evidence=[{"ref": i["ref"], "title": f"{i['title']} — {i['status']}, {i['age']}d, {i['who'] or 'unassigned'}", "url": i["url"]} for i in items[:8]], links={"tracker_project": project_name}, value=len(items), unit="tickets"))
 
     for project_name, items in abandoned.items():
         items.sort(key=lambda i: -i["idle"])

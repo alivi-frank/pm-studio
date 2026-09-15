@@ -234,6 +234,43 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(flow["reopen_rate_pct"], 100.0)
 
 
+class StatusNormalizationTest(unittest.TestCase):
+    def test_resolved_by_name_is_not_in_progress(self) -> None:
+        from pm_studio.signals.metrics import normalize_cat
+        self.assertEqual(normalize_cat("Resolved", "in_progress"), "resolved")
+        self.assertEqual(normalize_cat("UAT Completed", "in_progress"), "resolved")
+        self.assertEqual(normalize_cat("Rejected", "in_progress"), "removed")
+        self.assertEqual(normalize_cat("Active", "in_progress"), "in_progress")
+        self.assertEqual(normalize_cat("Closed", "done"), "done")
+
+    def test_closure_lag_folds_resolved_tickets_and_keeps_stale_quiet(self) -> None:
+        c = ctx()
+        now = T0 + 100 * DAY
+        timelines = {}
+        for i in range(12):
+            key = f"ado:{900 + i}"
+            c.tickets[key] = {"tracker_id": "ado", "key": str(900 + i), "type": "task", "state_category": "In Progress", "parent_key": None, "components": [], "project": "Arizona", "title": f"res {i}", "url": ""}
+            timelines[key] = {"created": T0, "status": "Resolved", "status_cat": "in_progress", "status_since": T0 + 10 * DAY, "transitions": [{"at": T0 + 10 * DAY, "from": "Active", "to": "Resolved", "from_cat": "in_progress", "to_cat": "in_progress"}]}
+        tl = ticket_timelines(timelines, now=now)
+        self.assertTrue(all(v["status_cat"] == "resolved" for v in tl.values()))
+        found = detect(slices=[], alloc_rows=[], timelines=tl, tickets=c.tickets, changes=[], projects={}, initiatives={}, resolver_suggestions=[], thresholds=DEFAULT_THRESHOLDS, clock=CLOCK, now=now, start=now - 90 * DAY, end=now + DAY)
+        rules = [f["rule"] for f in found]
+        self.assertEqual(rules.count("closure_lag"), 1)
+        self.assertNotIn("stale_in_progress", rules)
+        self.assertNotIn("abandoned_backlog", rules)
+        self.assertEqual(next(f for f in found if f["rule"] == "closure_lag")["value"], 12)
+        flow = flow_metrics(tl, [], start=now - 90 * DAY, end=now, clock=CLOCK)
+        self.assertEqual(flow["awaiting_closure"]["count"], 12)
+
+    def test_service_accounts_are_bots_at_attribution_time(self) -> None:
+        a = Attributor(ctx(), resolver())
+        for name, email in (("[arizonaproject]\\Project Collection Service Accounts", ""), ("Checklists for Jira (Pro) by HeroCoders", ""), ("wrike.sync@alivi.com", "wrike.sync@alivi.com")):
+            s = a.slices(commit("b", T0, name, email, ["jira:NDT-1"]))[0]
+            self.assertTrue(s["bot"], name)
+            self.assertEqual(s["person_id"], "bot")
+        self.assertEqual(a.resolver.suggestions(), [])
+
+
 class JudgeParsingTest(unittest.TestCase):
     def test_parse_accepts_fenced_json_and_rejects_shapes(self) -> None:
         good = parse_judgment('```json\n{"scores": {"overall": "72.4", "attribution": 130}, "findings_review": [{"id": "x", "verdict": "noise", "reason": "bot"}, {"id": "y", "verdict": "maybe"}], "threshold_suggestions": [{"key": "stale_in_progress_days", "current": 10, "suggested": 14, "reason": "r"}], "summary": "ok"}\n```')

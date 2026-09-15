@@ -28,7 +28,27 @@ from .model import (
     Clock,
 )
 
+import re
+
 REVIEW_MARKERS = ("review", "qa", "uat", "test", "verify", "validation")
+# A tracker's own category can call "Resolved" or "UAT Completed" in-progress (ADO's
+# Agile process does, for Feature and Task). By name these are finished work awaiting
+# closure, and counting them as in flight was the single largest source of false
+# findings on the first real run - the judge caught it. Names win over categories.
+RESOLVED_NAME_RE = re.compile(r"resolved|uat completed|qa passed|ready for (release|prod|deploy)|awaiting (release|closure)|verified|accepted", re.IGNORECASE)
+REMOVED_NAME_RE = re.compile(r"rejected|cancel+ed|removed|won'?t (do|fix)|declined|duplicate|obsolete", re.IGNORECASE)
+
+
+def normalize_cat(status: str, cat: str) -> str:
+    """The category a status name really means, whatever the tracker declared."""
+    name = status or ""
+    if cat == "done":
+        return cat
+    if REMOVED_NAME_RE.search(name):
+        return "removed"
+    if RESOLVED_NAME_RE.search(name):
+        return "resolved"
+    return cat
 BLOCKED_MARKERS = ("block", "hold", "wait")
 DONE_CATS = ("done",)
 ACTIVE_CATS = ("in_progress", "resolved")
@@ -91,7 +111,7 @@ def ticket_timelines(issue_facts: dict[str, dict], *, now: float) -> dict[str, d
         for t in transitions:
             if prev_state is not None and prev_at is not None:
                 dwell[prev_state] += max(0.0, t["at"] - prev_at)
-            to_cat = t.get("to_cat") or ""
+            to_cat = normalize_cat(t.get("to") or "", t.get("to_cat") or "")
             if to_cat in ACTIVE_CATS and first_start is None:
                 first_start = t["at"]
             if to_cat in DONE_CATS:
@@ -111,7 +131,7 @@ def ticket_timelines(issue_facts: dict[str, dict], *, now: float) -> dict[str, d
         out[ref] = {
             "created": created, "first_start": first_start, "first_done": first_done, "last_done": last_done or fact.get("resolved"),
             "reopens": reopens, "review_secs": review_secs, "blocked_secs": blocked_secs,
-            "status": current, "status_cat": fact.get("status_cat") or "", "status_since": fact.get("status_since") or prev_at,
+            "status": current, "status_cat": normalize_cat(current, fact.get("status_cat") or ""), "status_since": fact.get("status_since") or prev_at,
             "type": fact.get("type") or "", "transitions": len(transitions),
         }
     return out
@@ -161,9 +181,14 @@ def flow_metrics(timelines: dict[str, dict], slices: list[dict], *, start: float
         wip = sum(1 for tl in timelines.values() if tl["first_start"] and tl["first_start"] < cursor + 7 * 86400 and not (tl["last_done"] and tl["last_done"] < cursor + 7 * 86400))
         wip_curve.append({"week": week, "wip": wip, "finished": finished_by_week.get(week, 0), "started": started_by_week.get(week, 0)})
         cursor += 7 * 86400
-    # Currently in review / blocked (as of now): live queue, not window-bound.
+    # Finished but never closed, as of now - a live queue, not window-bound: the
+    # closure lag the tracker's own "done" figures hide.
+    awaiting = [tl for tl in timelines.values() if tl["status_cat"] == "resolved" and tl.get("status_since")]
+    now = end
+    ages = [(now - tl["status_since"]) / 86400.0 for tl in awaiting]
     return {
         "finished": finished,
+        "awaiting_closure": {"count": len(awaiting), "p50_days": _r(percentile(ages, 50)), "p85_days": _r(percentile(ages, 85))},
         "cycle_days": {"p50": _r(percentile(cycle, 50)), "p85": _r(percentile(cycle, 85)), "n": len(cycle), "histogram": histogram(cycle, [1, 3, 7, 14, 30, 60])},
         "lead_days": {"p50": _r(percentile(lead, 50)), "p85": _r(percentile(lead, 85)), "n": len(lead)},
         "review_days": {"p50": _r(percentile(review, 50)), "p85": _r(percentile(review, 85)), "n": len(review)},
