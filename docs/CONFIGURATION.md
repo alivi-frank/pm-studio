@@ -875,6 +875,10 @@ judge_model = ""                  # empty = the strongest declared model (opus t
 auto_judge = false                # run the judge after every refresh
 ado_pr_projects = ["Proj"]        # ADO projects whose pull requests are pulled (needs the ADO tracker)
 
+[signals.default_projects]        # known tickets planned onto no project land here, by
+"ado:Arizona:Ticket" = "6e37cea0" # "<tracker>:<tracker project>[:<raw type>]" -> project id
+                                  # (reported as via = "default-project", never as a real link)
+
 [signals.thresholds]              # any key from findings.DEFAULT_THRESHOLDS
 stale_in_progress_days = 10
 unkeyed_commit_pct = 40

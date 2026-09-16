@@ -349,3 +349,111 @@ def _date_epoch(day: str) -> float:
         return datetime(y, m, d, tzinfo=timezone.utc).timestamp()
     except ValueError:
         return 0.0
+
+
+REALIZED = "realized"
+IN_FLIGHT = "in_flight"
+STRANDED = "stranded"
+UNTRACEABLE = "untraceable"
+PROD_BRANCH_RE = re.compile(r"^(main|master|prod|production|release|releases?/.*|release-candidate/.*|develop|development)$", re.IGNORECASE)
+
+
+def weighted_percentile(pairs: list[tuple[float, float]], pct: float) -> float | None:
+    """pairs of (value, weight)."""
+    if not pairs:
+        return None
+    ordered = sorted(pairs)
+    total = sum(w for _, w in ordered)
+    if total <= 0:
+        return None
+    acc = 0.0
+    for value, weight in ordered:
+        acc += weight
+        if acc >= total * pct / 100.0:
+            return value
+    return ordered[-1][0]
+
+
+def realization(alloc_rows: list[dict], timelines: dict[str, dict], changes_by_ref: dict[str, dict], last_signal_by_ref: dict[str, float], *, now: float, stale_days: float, clock: Clock) -> dict:
+    """What became of the hours. Each allocation row is one person-day on one piece of
+    work; the piece's current fate classifies the hours - the unit is the hour, so a
+    team that writes one epic and one that writes forty subtasks get the same answer.
+
+    realized    - the ticket (or its linked change) reached done
+    in_flight   - still open and touched within `stale_days`
+    stranded    - open but stale, abandoned, or never planned onto a project
+    untraceable - no ticket at all (unkeyed commits, agent turns): fate unknowable
+    """
+    per_init: dict = defaultdict(lambda: {REALIZED: 0.0, IN_FLIGHT: 0.0, STRANDED: 0.0, UNTRACEABLE: 0.0, "lead": []})
+    weekly: dict[str, float] = defaultdict(float)
+    totals = {REALIZED: 0.0, IN_FLIGHT: 0.0, STRANDED: 0.0, UNTRACEABLE: 0.0}
+    lead_all: list[tuple[float, float]] = []
+    for r in alloc_rows:
+        ref = r.get("ref")
+        hours = r["hours"]
+        init = r.get("initiative_id")
+        bucket = UNTRACEABLE
+        done_at = None
+        if ref:
+            tl = timelines.get(ref)
+            change = changes_by_ref.get(ref)
+            if tl and tl.get("status_cat") == "done" and tl.get("last_done"):
+                bucket, done_at = REALIZED, tl["last_done"]
+            elif change is not None and change.get("status") == "done":
+                bucket, done_at = REALIZED, change.get("shipped_at")
+            elif tl and tl.get("status_cat") == "removed":
+                bucket = STRANDED
+            elif not r.get("project_id"):
+                bucket = STRANDED  # real work the portfolio never planned
+            else:
+                last = last_signal_by_ref.get(ref)
+                bucket = IN_FLIGHT if last and (now - last) / 86400.0 < stale_days else STRANDED
+        per_init[init][bucket] += hours
+        totals[bucket] += hours
+        if bucket == REALIZED and done_at:
+            days = max(0.0, (done_at - clock.day_start(r["day"])) / 86400.0)
+            per_init[init]["lead"].append((days, hours))
+            lead_all.append((days, hours))
+            weekly[clock.week(done_at)] += hours
+    rows = {}
+    for init, b in per_init.items():
+        total = b[REALIZED] + b[IN_FLIGHT] + b[STRANDED] + b[UNTRACEABLE]
+        traceable = total - b[UNTRACEABLE]
+        rows[init] = {
+            "hours": round(total, 1), REALIZED: round(b[REALIZED], 1), IN_FLIGHT: round(b[IN_FLIGHT], 1), STRANDED: round(b[STRANDED], 1), UNTRACEABLE: round(b[UNTRACEABLE], 1),
+            "realization_pct": round(100.0 * b[REALIZED] / traceable, 1) if traceable else None,
+            "stranded_pct": round(100.0 * b[STRANDED] / traceable, 1) if traceable else None,
+            "lead_days_p50": _r(weighted_percentile(b["lead"], 50)),
+        }
+    grand = sum(totals.values())
+    traceable = grand - totals[UNTRACEABLE]
+    weeks = sorted(weekly)
+    return {
+        "by_initiative": rows,
+        "totals": {k: round(v, 1) for k, v in totals.items()},
+        "realization_pct": round(100.0 * totals[REALIZED] / traceable, 1) if traceable else None,
+        "stranded_pct": round(100.0 * totals[STRANDED] / traceable, 1) if traceable else None,
+        "untraceable_pct": round(100.0 * totals[UNTRACEABLE] / grand, 1) if grand else None,
+        "lead_days_p50": _r(weighted_percentile(lead_all, 50)),
+        "lead_days_p85": _r(weighted_percentile(lead_all, 85)),
+        "weekly_realized": [{"week": w, "hours": round(weekly[w], 1)} for w in weeks],
+    }
+
+
+def production_merges(slices: list[dict], *, start: float, end: float) -> dict:
+    """Pull requests merged into a mainline branch, per initiative - a delivery event
+    that does not depend on how the team slices tickets. Only sources that know the
+    target branch (ADO pull requests) contribute; git merge commits name their source."""
+    out: dict = defaultdict(int)
+    seen: set = set()
+    for s in slices:
+        if s["kind"] != KIND_PR_MERGED or s["at"] < start or s["at"] >= end:
+            continue
+        key = (s["repo"], s["meta"].get("pr"))
+        if key in seen:
+            continue
+        target = str(s["meta"].get("target") or "")
+        if PROD_BRANCH_RE.match(target):
+            seen.add(key)
+            out[s["initiative_id"]] += 1
+    return dict(out)

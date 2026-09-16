@@ -353,6 +353,12 @@ class SignalsConfig:
     # the full weekly capacity (5 x capacity_hours_per_day), keeping the activity split -
     # the timesheet-replacement stance finance usually wants. The page can preview either.
     allocation_mode: str = "observed"
+    # Where a KNOWN ticket that is planned onto no project lands, by declaration:
+    # "<tracker>:<tracker project>[:<raw type>]" -> project id. The fallback for whole
+    # classes of work a team never files under an epic (support tickets, ops items).
+    # Weaker than a change link or a parent epic, and reported separately as
+    # via="default-project" so it never hides behind real attribution.
+    default_projects: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -929,6 +935,7 @@ def _parse_signals(raw: dict) -> SignalsConfig:
         weights=mapping("weights"),
         ado_pr_projects=strings("ado_pr_projects"),
         allocation_mode=str(table.get("allocation_mode", "observed")).strip() if str(table.get("allocation_mode", "observed")).strip() in ("observed", "scaled") else "observed",
+        default_projects={str(k): str(v) for k, v in (table.get("default_projects") or {}).items()} if isinstance(table.get("default_projects"), dict) else {},
     )
 
 

@@ -24,7 +24,7 @@ from .findings import DEFAULT_THRESHOLDS, RULES, detect, effective_thresholds, o
 from .finance import statement, to_csv, trace
 from .identity import IdentityResolver
 from .ledger import SignalLedger
-from .metrics import flow_metrics, impact_metrics, ticket_timelines, workflow_metrics
+from .metrics import flow_metrics, impact_metrics, production_merges, realization, ticket_timelines, workflow_metrics
 from .model import DEFAULT_WEIGHTS, Clock
 from .sources.ado import AdoHistorySource, AdoPullRequestSource
 from .sources.git import GitSource, discover_repos
@@ -112,6 +112,7 @@ class IntelligenceService:
         ctx = AttributionContext.build(
             tickets=self.stores["tickets"](), changes=self.stores["changes"](), projects=self.stores["projects"](), initiatives=self.stores["initiatives"](), goals=self.stores["goals"](),
             routes=self.routes, product_systems=self.product_systems, capex_overrides=self.tuning.capex_overrides(),
+            default_projects=self.config.default_projects,
         )
         people = self.stores["people"]()
         key = f"{len(people)}:{max([float(p.get('updated_at') or 0) for p in people] or [0]):.0f}:{self.aliases_path.stat().st_mtime if self.aliases_path.is_file() else 0}"
@@ -227,7 +228,18 @@ class IntelligenceService:
         workflow = workflow_metrics(in_window, rows, start=window["start"], end=window["end"], clock=self.clock, repo_facts=self.ledger.facts("git").get("repos") or {})
         impact = impact_metrics(in_window, rows, timelines, changes=changes, releases=self.stores.get("releases", lambda: [])(), initiatives=initiatives, projects=projects, goals=goals, start=window["start"], end=window["end"])
         thresholds = self.thresholds()
-        raw_findings = detect(slices=slices, alloc_rows=rows, timelines=timelines, tickets=tickets, changes=changes, projects=projects if not filters.get("initiative_id") else {k: v for k, v in projects.items() if v.get("initiative_id") == filters["initiative_id"]}, initiatives=initiatives if not filters.get("initiative_id") else {k: v for k, v in initiatives.items() if k == filters["initiative_id"]}, resolver_suggestions=resolver.suggestions(), thresholds=thresholds, clock=self.clock, now=now, start=window["start"], end=window["end"])
+        last_signal_by_ref: dict[str, float] = {}
+        for sl in slices:
+            if sl["ref"] and not sl["bot"]:
+                last_signal_by_ref[sl["ref"]] = max(last_signal_by_ref.get(sl["ref"], 0.0), sl["at"])
+        realized = realization(rows, timelines, ctx.changes_by_ref, last_signal_by_ref, now=now, stale_days=thresholds["stale_in_progress_days"], clock=self.clock)
+        merges = production_merges(in_window, start=window["start"], end=window["end"])
+        for row in impact["initiatives"]:
+            row["realization"] = realized["by_initiative"].get(row["initiative_id"]) or {"hours": 0.0, "realized": 0.0, "in_flight": 0.0, "stranded": 0.0, "untraceable": 0.0, "realization_pct": None, "stranded_pct": None, "lead_days_p50": None}
+            row["prod_merges"] = merges.get(row["initiative_id"], 0)
+        impact["realization"] = {k: v for k, v in realized.items() if k != "by_initiative"}
+        impact["unattributed"] = unattributed_breakdown(rows, in_window, tickets, self.ledger.facts("git").get("repos") or {})
+        raw_findings = detect(slices=slices, alloc_rows=rows, timelines=timelines, tickets=tickets, changes=changes, projects=projects if not filters.get("initiative_id") else {k: v for k, v in projects.items() if v.get("initiative_id") == filters["initiative_id"]}, initiatives=initiatives if not filters.get("initiative_id") else {k: v for k, v in initiatives.items() if k == filters["initiative_id"]}, resolver_suggestions=resolver.suggestions(), thresholds=thresholds, clock=self.clock, now=now, start=window["start"], end=window["end"], realization=realized)
         visible, counts = overlay_feedback(raw_findings, self.feedback.all(), self.tuning.muted_rules(), now=now)
         finance = statement(rows, projects=projects, initiatives=initiatives, rate_for=self.rate_for, currency=self.currency)
         cov = _coverage_for(in_window)
@@ -263,6 +275,7 @@ class IntelligenceService:
             "changes_shipped": sum(r["changes_shipped"] for r in impact["initiatives"]), "releases": impact["releases"],
             "placed_pct": cov["placed_pct"], "capex_pct": finance["capex_pct"], "logged_pct": finance["logged_pct"],
             "findings_high": sum(1 for f in visible if f["severity"] == "high"), "findings_total": len(visible),
+            "realization_pct": realized["realization_pct"], "stranded_pct": realized["stranded_pct"], "lead_days_p50": realized["lead_days_p50"],
             "ai_cost_usd": ai_cost, "ai_commits_pct": workflow["ai_assisted_pct"], "signals": len(in_window),
             "cycle_p50": flow["cycle_days"]["p50"], "maintenance_pct": round(100.0 * sum(r["hours"] for r in rows if r["maintenance"]) / total_hours, 1) if total_hours else 0.0,
         }
@@ -402,3 +415,52 @@ def _titled(rows: list[dict], lookup: dict, none_title: str) -> list[dict]:
 def _coverage_for(slices: list[dict]) -> dict:
     from .attribution import coverage
     return coverage(slices)
+
+
+def unattributed_breakdown(rows: list[dict], slices: list[dict], tickets: dict[str, dict], repo_facts: dict) -> dict:
+    """What "Unattributed" is made of, by cause, each with the fix that would place it:
+    unkeyed commits (per repository), known tickets planned onto no project (per parent
+    epic/feature and per tracker project), tickets the catalog does not hold, and
+    agent/collaboration activity with no target."""
+    from collections import defaultdict
+    un = [r for r in rows if not r.get("project_id")]
+    total = sum(r["hours"] for r in un)
+    by_via: dict = defaultdict(float)
+    by_repo: dict = defaultdict(float)
+    by_parent: dict = defaultdict(lambda: {"hours": 0.0, "tickets": set()})
+    by_tracker_project: dict = defaultdict(float)
+    unknown: dict = defaultdict(float)
+    by_person: dict = defaultdict(float)
+    ticket_type: dict = defaultdict(float)
+    for r in un:
+        via = r.get("via") or "none"
+        by_via[via] += r["hours"]
+        by_person[r["person_name"]] += r["hours"]
+        ref = r.get("ref")
+        if via == "repo-only":
+            by_repo[r.get("repo") or "?"] += r["hours"]
+        elif via == "route-unplanned" and ref:
+            ticket = tickets.get(ref) or {}
+            parent = ticket.get("parent_key")
+            parent_ref = f"{ticket.get('tracker_id')}:{parent}" if parent else None
+            key = parent_ref or "(no parent)"
+            by_parent[key]["hours"] += r["hours"]
+            by_parent[key]["tickets"].add(ref)
+            by_tracker_project[f"{ticket.get('tracker_id') or '?'}:{ticket.get('project') or ref.split(':', 1)[0]}"] += r["hours"]
+            ticket_type[f"{ticket.get('tracker_id') or '?'} {ticket.get('raw_type') or ticket.get('type') or '?'}"] += r["hours"]
+        elif via == "unknown-ticket" and ref:
+            unknown[ref] += r["hours"]
+    parents = []
+    for key, v in sorted(by_parent.items(), key=lambda kv: -kv[1]["hours"])[:10]:
+        pt = tickets.get(key) or {}
+        parents.append({"ref": key, "title": pt.get("title") or ("tickets with no parent" if key == "(no parent)" else key), "type": pt.get("type") or "", "url": pt.get("url") or "", "hours": round(v["hours"], 1), "tickets": len(v["tickets"])})
+    return {
+        "hours": round(total, 1),
+        "by_via": {k: round(v, 1) for k, v in sorted(by_via.items(), key=lambda kv: -kv[1])},
+        "repos": [{"repo": k, "hours": round(v, 1), "keyed_pct": (round(100.0 * (repo_facts.get(k) or {}).get("keyed_commits", 0) / (repo_facts.get(k) or {}).get("human_commits", 1), 0) if (repo_facts.get(k) or {}).get("human_commits") else None)} for k, v in sorted(by_repo.items(), key=lambda kv: -kv[1])[:10]],
+        "parents": parents,
+        "tracker_projects": {k: round(v, 1) for k, v in sorted(by_tracker_project.items(), key=lambda kv: -kv[1])},
+        "ticket_types": {k: round(v, 1) for k, v in sorted(ticket_type.items(), key=lambda kv: -kv[1])},
+        "unknown": [{"ref": k, "hours": round(v, 1)} for k, v in sorted(unknown.items(), key=lambda kv: -kv[1])[:8]],
+        "people": [{"name": k, "hours": round(v, 1)} for k, v in sorted(by_person.items(), key=lambda kv: -kv[1])[:8]],
+    }

@@ -31,6 +31,7 @@ VIA_PARENT_CHANGE = "parent-change"
 VIA_EPIC_PROJECT = "epic-project"
 VIA_OWN_EPIC = "own-epic"
 VIA_ROUTE = "route-unplanned"
+VIA_DEFAULT_PROJECT = "default-project"
 VIA_UNKNOWN_TICKET = "unknown-ticket"
 VIA_REPO = "repo-only"
 VIA_SESSION = "session"
@@ -72,10 +73,11 @@ class AttributionContext:
     products_of_system: dict[str, list[str]] = field(default_factory=dict)
     systems_of_product: dict[str, list[str]] = field(default_factory=dict)
     capex_overrides: dict[str, bool] = field(default_factory=dict)  # initiative id -> capitalizable
+    default_projects: dict[str, str] = field(default_factory=dict)  # "tracker:project[:type]" -> project id
     version: str = ""
 
     @classmethod
-    def build(cls, *, tickets: list[dict], changes: list[dict], projects: list[dict], initiatives: list[dict], goals: list[dict], routes: list[dict], product_systems: dict[str, tuple[str, ...]] | dict[str, list[str]], capex_overrides: dict[str, bool] | None = None) -> "AttributionContext":
+    def build(cls, *, tickets: list[dict], changes: list[dict], projects: list[dict], initiatives: list[dict], goals: list[dict], routes: list[dict], product_systems: dict[str, tuple[str, ...]] | dict[str, list[str]], capex_overrides: dict[str, bool] | None = None, default_projects: dict[str, str] | None = None) -> "AttributionContext":
         ctx = cls()
         for t in tickets:
             ctx.tickets[f"{t['tracker_id']}:{t['key']}"] = t
@@ -97,8 +99,9 @@ class AttributionContext:
             for s in systems:
                 ctx.products_of_system.setdefault(s, []).append(product)
         ctx.capex_overrides = dict(capex_overrides or {})
+        ctx.default_projects = {k: v for k, v in (default_projects or {}).items() if v in ctx.projects}
         newest = max([float(x.get("updated_at") or 0) for x in list(projects) + list(initiatives) + list(changes)] or [0.0])
-        ctx.version = f"{len(tickets)}:{len(changes)}:{len(projects)}:{newest:.0f}:{len(ctx.capex_overrides)}"
+        ctx.version = f"{len(tickets)}:{len(changes)}:{len(projects)}:{newest:.0f}:{len(ctx.capex_overrides)}:{sorted(ctx.default_projects.items())}"
         return ctx
 
 
@@ -145,6 +148,13 @@ def resolve_ref(ctx: AttributionContext, ref: str) -> dict:
         hops += 1
     if ref in ctx.projects_by_ref:
         return _from_project(ctx, ctx.projects_by_ref[ref], VIA_OWN_EPIC, ref, ticket)
+    if ctx.default_projects:
+        project_name = ticket.get("project") or ""
+        for key in (f"{tracker}:{project_name}:{ticket.get('raw_type') or ''}", f"{tracker}:{project_name}:{ticket.get('type') or ''}", f"{tracker}:{project_name}"):
+            if key in ctx.default_projects:
+                out = _from_project(ctx, ctx.default_projects[key], VIA_DEFAULT_PROJECT, ref, ticket)
+                out["product"], out["system"] = _route_product(ctx, ticket)
+                return out
     product, system = _route_product(ctx, ticket)
     return {"via": VIA_ROUTE, "ref": ref, "project_id": None, "product": product, "system": system, "change_id": None, "ticket": ticket, "initiative_id": None, "goal_ids": []}
 
@@ -268,7 +278,7 @@ def coverage(slices: list[dict]) -> dict:
         if s["bot"]:
             continue
         by_via[s["via"]] = by_via.get(s["via"], 0.0) + s["weight"]
-    placed = sum(v for k, v in by_via.items() if k in (VIA_CHANGE, VIA_PARENT_CHANGE, VIA_EPIC_PROJECT, VIA_OWN_EPIC, VIA_SESSION))
+    placed = sum(v for k, v in by_via.items() if k in (VIA_CHANGE, VIA_PARENT_CHANGE, VIA_EPIC_PROJECT, VIA_OWN_EPIC, VIA_SESSION, VIA_DEFAULT_PROJECT))
     persons = {s["person_id"] for s in slices if not s["bot"]}
     external = {s["person_id"] for s in slices if s["person_external"] and not s["bot"]}
     return {

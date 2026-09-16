@@ -152,6 +152,8 @@
         <div id="goals"></div>
       </div>
     </div>
+    <h3>What is in "Unattributed" <span class="muted" id="unatt-total"></span></h3>
+    <div id="unattributed"></div>
     <h3 style="display:flex;align-items:center;gap:10px">Breakdown
       <span class="seg" id="dim-seg">
         <button data-dim="by_initiative" aria-pressed="true">Initiatives</button><button data-dim="by_project">Projects</button><button data-dim="by_person">People</button><button data-dim="by_product">Products</button><button data-dim="by_system">Systems</button>
@@ -162,15 +164,20 @@
 
   <section id="impact">
     <h2>Effort → outcomes <span class="count" id="impact-count"></span></h2>
-    <p class="sub">What each initiative's hours produced in the window: tickets that reached done (by the tracker's own transitions), changes shipped, commits — and the agent spend beside the human effort. "Done per 100h" is the crude yield; read it with the nature of the work in mind.</p>
+    <p class="sub">What became of the hours. Every hour in the window went into a piece of work whose fate is observable now: <b>realized</b> (it reached done), <b>in flight</b> (open and still moving), <b>stranded</b> (stale, abandoned, removed, or never planned), or <b>untraceable</b> (no ticket, so unknowable). The unit is the hour, so a team that writes one epic and one that writes forty subtasks are measured alike. Tickets done stays as a secondary column.</p>
+    <div class="stats" id="impact-stats"></div>
     <div class="cols-32">
-      <div id="impact-table"></div>
       <div>
-        <h3>Hours in vs tickets done</h3>
-        <svg class="chart" id="impact-scatter"></svg>
+        <h3>Where the hours stand, by initiative</h3>
+        <div id="realization-bars"></div>
+      </div>
+      <div>
+        <h3>Realized hours per week <span class="muted">(by the week the work finished)</span></h3>
+        <svg class="chart" id="realized-line"></svg>
         <p class="sub" id="releases-note"></p>
       </div>
     </div>
+    <details open><summary>Initiative table</summary><div id="impact-table"></div></details>
   </section>
 
   <section id="flow">
@@ -349,6 +356,24 @@
     grid.forEach((row, d) => { const tr = t.insertRow(); const th = document.createElement("th"); th.textContent = days[d]; tr.appendChild(th); row.forEach((v, h) => { const td = tr.insertCell(); const cell = document.createElement("div"); cell.className = "cell"; const step = v <= 0 ? 0 : Math.min(6, Math.ceil(6 * v / max)); cell.style.background = v <= 0 ? "var(--track)" : `var(${ramp[step]})`; cell.addEventListener("mousemove", (e) => tip(e, `${days[d]} ${h}:00 — ${fmt(v)} commits`)); cell.addEventListener("mouseleave", (e) => tip(e, null)); td.appendChild(cell); }); });
     el.appendChild(t);
   }
+  function realizationBars(el, rows) {
+    const items = rows.filter((r) => r.hours > 0).slice(0, 18); const max = Math.max(1, ...items.map((r) => r.hours));
+    const seg = (w, cls, title) => w > 0 ? `<span style="width:${w}%;background:${cls}" title="${esc(title)}"></span>` : "";
+    el.innerHTML = items.length ? `<table><thead><tr><th>Initiative</th><th></th><th class="num">Realized</th><th class="num">Lead p50</th></tr></thead><tbody>${items.map((r) => { const z = r.realization; const w = (v) => 100 * v / max; return `<tr class="click" data-init="${esc(r.initiative_id || "")}"><td>${esc(r.title.length > 34 ? r.title.slice(0, 33) + "…" : r.title)}${r.is_maintenance ? ' <span class="chip maint">maint</span>' : ""}</td><td><span class="bar" style="width:220px;height:10px;display:inline-flex;gap:1px;background:var(--track)">${seg(w(z.realized), "var(--s3)", `realized ${hours(z.realized)}`)}${seg(w(z.in_flight), "var(--s1)", `in flight ${hours(z.in_flight)}`)}${seg(w(z.stranded), "var(--s8)", `stranded ${hours(z.stranded)}`)}${seg(w(z.untraceable), "var(--s-other)", `untraceable ${hours(z.untraceable)}`)}</span></td><td class="num">${z.realization_pct == null ? "—" : pct(z.realization_pct)}</td><td class="num muted">${z.lead_days_p50 == null ? "—" : z.lead_days_p50 + "d"}</td></tr>`; }).join("")}</tbody></table><div class="legend"><span><i style="background:var(--s3)"></i>realized</span><span><i style="background:var(--s1)"></i>in flight</span><span><i style="background:var(--s8)"></i>stranded</span><span><i style="background:var(--s-other)"></i>untraceable</span></div>` : '<div class="empty">No hours in this window.</div>';
+    el.querySelectorAll("tr.click").forEach((tr) => tr.onclick = () => { if (tr.dataset.init) { state.filters = { initiative_id: tr.dataset.init }; const sel = $("scope"); if (sel) sel.value = "initiative_id=" + tr.dataset.init; load(); } });
+  }
+  function renderUnattributed(u) {
+    $("unatt-total").textContent = u.hours ? `${hours(u.hours)} — effort the portfolio cannot place on a project, by cause` : "";
+    if (!u.hours) { $("unattributed").innerHTML = '<div class="empty">Everything in the window is placed on a project.</div>'; return; }
+    const viaLabel = { "repo-only": "Commits with no ticket key", "route-unplanned": "Known tickets planned onto no project", "unknown-ticket": "Ticket keys the catalog does not hold", "none": "Agent turns / collaboration with no target", "session": "PM sessions with no project", "change": "Board changes with no project" };
+    const viaFix = { "repo-only": "put the ticket key in the commit message, or map the repository's work to an initiative", "route-unplanned": "link the parent epic/feature to a project, or declare a default project for the type in [signals.default_projects] (e.g. \"ado:Arizona Microservices:Ticket\" = \"<project id>\")", "unknown-ticket": "add the ticket's tracker project to [[trackers]] projects, or fix the key", "none": "pin the session to a project", "session": "pin the session to a project", "change": "give the change a project on the board" };
+    let html = `<div class="cols-3">`;
+    html += `<div><table><thead><tr><th>Cause</th><th class="num">Hours</th></tr></thead><tbody>${Object.entries(u.by_via).map(([k, v]) => `<tr><td>${esc(viaLabel[k] || k)}<div class="muted" style="font-size:0.8em">${esc(viaFix[k] || "")}</div></td><td class="num">${hours(v)} <span class="muted">${pct(100 * v / u.hours)}</span></td></tr>`).join("")}</tbody></table>${u.people.length ? `<h3>Who</h3><div class="inline-list">${u.people.map((p) => `${esc(p.name)} <span class="muted">${hours(p.hours)}</span>`).join(" · ")}</div>` : ""}</div>`;
+    html += `<div><h3 style="margin-top:0">Unplanned tickets, by parent <span class="muted">(link these epics to a project)</span></h3>${u.parents.length ? `<table><tbody>${u.parents.map((p) => `<tr><td>${p.url ? `<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.ref)}</a>` : esc(p.ref)} <span class="second">${esc(p.title.slice(0, 60))}</span><div class="muted" style="font-size:0.8em">${esc(p.type)} · ${p.tickets} ticket(s)</div></td><td class="num">${hours(p.hours)}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">None.</div>'}${Object.keys(u.tracker_projects).length ? `<div class="muted" style="font-size:0.82em;margin-top:6px">By tracker project: ${Object.entries(u.tracker_projects).map(([k, v]) => `${esc(k)} ${hours(v)}`).join(" · ")}</div>` : ""}${Object.keys(u.ticket_types).length ? `<div class="muted" style="font-size:0.82em;margin-top:4px">By work item type: ${Object.entries(u.ticket_types).map(([k, v]) => `${esc(k)} ${hours(v)}`).join(" · ")}</div>` : ""}</div>`;
+    html += `<div><h3 style="margin-top:0">Unkeyed commits, by repository</h3>${u.repos.length ? `<table><tbody>${u.repos.map((r) => `<tr><td>${esc(r.repo.replace(/^src\//, ""))}<div class="muted" style="font-size:0.8em">${r.keyed_pct == null ? "" : pct(r.keyed_pct) + " of its commits carry a key"}</div></td><td class="num">${hours(r.hours)}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">None.</div>'}${u.unknown.length ? `<h3>Unknown ticket keys</h3><div class="inline-list">${u.unknown.map((x) => `${esc(x.ref)} <span class="muted">${hours(x.hours)}</span>`).join(" · ")}</div>` : ""}</div>`;
+    html += `</div>`;
+    $("unattributed").innerHTML = html;
+  }
   function hbars(rows, opts) {
     const max = Math.max(1, ...rows.map((r) => r.hours)); const total = rows.reduce((a, r) => a + r.hours, 0) || 1;
     return `<table><thead><tr><th>${esc(opts.label)}</th><th></th><th class="num">Hours</th><th class="num">Share</th>${opts.extra ? opts.extra.map((e) => `<th class="num">${esc(e.label)}</th>`).join("") : ""}</tr></thead><tbody>` +
@@ -382,11 +407,14 @@
     renderBreakdown();
 
     // impact
-    const imp = d.impact.initiatives; $("impact-count").textContent = `${imp.filter((r) => r.initiative_id).length} initiatives with activity`;
-    $("impact-table").innerHTML = imp.length ? `<table><thead><tr><th>Initiative</th><th class="num">Hours</th><th class="num">People</th><th class="num">Commits</th><th class="num">Touched</th><th class="num">Done</th><th class="num">Shipped</th><th class="num">Done/100h</th><th class="num">Agent $</th></tr></thead><tbody>${imp.slice(0, 25).map((r) => `<tr class="click" data-init="${esc(r.initiative_id || "")}"><td>${esc(r.title)}${r.is_maintenance ? ' <span class="chip maint">maintenance</span>' : ""}${r.initiative_id ? "" : ' <span class="chip quiet">unplaced</span>'}</td><td class="num">${hours(r.hours)} <span class="muted">${pct(r.hours_pct)}</span></td><td class="num">${r.people}</td><td class="num">${fmt(r.commits)}</td><td class="num">${fmt(r.tickets_touched)}</td><td class="num">${fmt(r.tickets_done)}</td><td class="num">${fmt(r.changes_shipped)}</td><td class="num">${r.done_per_100h == null ? "—" : fmt(r.done_per_100h, 1)}</td><td class="num">${r.agent_cost_usd ? money(r.agent_cost_usd) : "—"}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">No activity in this window.</div>';
+    const imp = d.impact.initiatives; const rz = d.impact.realization; $("impact-count").textContent = `${imp.filter((r) => r.initiative_id).length} initiatives with activity`;
+    $("impact-stats").innerHTML = [[pct(rz.realization_pct), "of traceable hours realized", `${hours(rz.totals.realized)} reached done`], [rz.lead_days_p50 == null ? "—" : rz.lead_days_p50 + "d", "effort lead time p50", `hour spent → work done · p85 ${rz.lead_days_p85 == null ? "—" : rz.lead_days_p85 + "d"}`], [hours(rz.totals.in_flight), "in flight", "open work still moving"], [pct(rz.stranded_pct), "stranded", `${hours(rz.totals.stranded)} on stale, abandoned or unplanned work`, (rz.stranded_pct || 0) > 40], [pct(rz.untraceable_pct), "untraceable", `${hours(rz.totals.untraceable)} with no ticket at all`]].map(([v, l, dd, warn]) => `<div class="stat${warn ? " warn" : ""}"><div class="v">${v}</div><div class="l">${esc(l)}</div><div class="d">${esc(dd)}</div></div>`).join("");
+    realizationBars($("realization-bars"), imp);
+    lines($("realized-line"), rz.weekly_realized.map((w) => w.week), [{ title: "realized hours", values: rz.weekly_realized.map((w) => w.hours) }], document.createElement("div"));
+    $("impact-table").innerHTML = imp.length ? `<table><thead><tr><th>Initiative</th><th class="num">Hours</th><th class="num">Realized</th><th class="num">Lead p50</th><th class="num">Stranded</th><th class="num">Prod merges</th><th class="num">People</th><th class="num">Commits</th><th class="num">Done</th><th class="num">Shipped</th><th class="num">Agent $</th></tr></thead><tbody>${imp.slice(0, 25).map((r) => { const z = r.realization; return `<tr class="click" data-init="${esc(r.initiative_id || "")}"><td>${esc(r.title)}${r.is_maintenance ? ' <span class="chip maint">maintenance</span>' : ""}${r.initiative_id ? "" : ' <span class="chip quiet">unplaced</span>'}</td><td class="num">${hours(r.hours)} <span class="muted">${pct(r.hours_pct)}</span></td><td class="num">${z.realization_pct == null ? "—" : pct(z.realization_pct)}</td><td class="num">${z.lead_days_p50 == null ? "—" : z.lead_days_p50 + "d"}</td><td class="num" style="${(z.stranded_pct || 0) > 40 ? "color:var(--critical)" : ""}">${z.stranded_pct == null ? "—" : pct(z.stranded_pct)}</td><td class="num">${fmt(r.prod_merges)}</td><td class="num">${r.people}</td><td class="num">${fmt(r.commits)}</td><td class="num">${fmt(r.tickets_done)}</td><td class="num">${fmt(r.changes_shipped)}</td><td class="num">${r.agent_cost_usd ? money(r.agent_cost_usd) : "—"}</td></tr>`; }).join("")}</tbody></table><p class="sub" style="margin-top:8px">Prod merges counts pull requests merged into a mainline branch — only trackers that expose the target branch (Azure DevOps) contribute.</p>` : '<div class="empty">No activity in this window.</div>';
     $("impact-table").querySelectorAll("tr.click").forEach((tr) => tr.onclick = () => { if (tr.dataset.init) { state.filters = { initiative_id: tr.dataset.init }; const sel = $("scope"); if (sel) sel.value = "initiative_id=" + tr.dataset.init; load(); } });
-    scatter($("impact-scatter"), imp);
     $("releases-note").textContent = d.impact.releases ? `${d.impact.releases} release(s) in the window: ${d.impact.release_names.join(", ")}` : "No tracker releases dated in this window.";
+    renderUnattributed(d.impact.unattributed);
 
     // flow
     const f = d.flow; $("flow-count").textContent = `${f.finished} tickets finished`;
@@ -439,7 +467,7 @@
     $("hidden").innerHTML = hidden.length ? hidden.slice(0, 40).map((f) => `<div class="finding"><div><span class="chip quiet">${esc((f.state || "hidden"))}</span></div><div><div class="t">${esc(f.title)}</div><div class="d">${esc(f.detail)}</div></div><div class="acts">${state.can ? `<button class="btn small" data-act="open" data-id="${f.id}">Reopen</button>` : ""}</div></div>`).join("") : '<div class="empty">None.</div>';
     $("hidden").querySelectorAll("button[data-act]").forEach((b) => b.onclick = () => feedback(b.dataset.id, b.dataset.act));
   }
-  function thresholdsFor(rule) { const map = { stale_in_progress: ["stale_in_progress_days"], zombie_in_progress: ["zombie_in_progress_days"], stale_project: ["stale_project_days"], silent_initiative: ["silent_initiative_days"], work_after_done: ["work_after_done_days"], status_lag: ["status_lag_days"], review_dwell: ["review_dwell_days"], reopened: ["reopen_count"], unkeyed_commits: ["unkeyed_commit_pct", "unkeyed_min_commits"], unresolved_author: ["unresolved_author_min_signals"], unplanned_work: ["unplanned_share_pct"], maintenance_share: ["maintenance_share_pct"], fragmentation: ["fragmentation_projects_per_week"], bus_factor: ["bus_factor_min_commits", "bus_factor_pct"], idle_assignee: ["idle_assignee_days"], ideation_with_commits: [], abandoned_backlog: ["abandoned_after_days"], unreviewed_merges: ["unreviewed_merge_pct", "unreviewed_min_merges"], closure_lag: ["closure_lag_days", "closure_lag_min_tickets"] }; return map[rule] || []; }
+  function thresholdsFor(rule) { const map = { stale_in_progress: ["stale_in_progress_days"], zombie_in_progress: ["zombie_in_progress_days"], stale_project: ["stale_project_days"], silent_initiative: ["silent_initiative_days"], work_after_done: ["work_after_done_days"], status_lag: ["status_lag_days"], review_dwell: ["review_dwell_days"], reopened: ["reopen_count"], unkeyed_commits: ["unkeyed_commit_pct", "unkeyed_min_commits"], unresolved_author: ["unresolved_author_min_signals"], unplanned_work: ["unplanned_share_pct"], maintenance_share: ["maintenance_share_pct"], fragmentation: ["fragmentation_projects_per_week"], bus_factor: ["bus_factor_min_commits", "bus_factor_pct"], idle_assignee: ["idle_assignee_days"], ideation_with_commits: [], abandoned_backlog: ["abandoned_after_days"], unreviewed_merges: ["unreviewed_merge_pct", "unreviewed_min_merges"], closure_lag: ["closure_lag_days", "closure_lag_min_tickets"], stranded_effort: ["stranded_share_pct", "stranded_min_hours"] }; return map[rule] || []; }
   function findingHtml(f) {
     const links = f.links || {}; const d = state.data;
     let where = "";

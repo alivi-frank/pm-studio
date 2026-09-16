@@ -72,6 +72,17 @@ class ResolveRefTest(unittest.TestCase):
         self.assertEqual((out["via"], out["project_id"]), ("epic-project", "p1"))
 
 
+class DefaultProjectTest(unittest.TestCase):
+    def test_declared_home_for_unplanned_type(self) -> None:
+        c = ctx()
+        c.tickets["jira:NDT-2"]["raw_type"] = "Bug"
+        self.assertEqual(resolve_ref(c, "jira:NDT-2")["via"], VIA_ROUTE)
+        c2 = AttributionContext.build(tickets=list(c.tickets.values()), changes=list(c.changes_by_id.values()), projects=list(c.projects.values()), initiatives=list(c.initiatives.values()), goals=list(c.goals.values()), routes=c.routes, product_systems={"nemt": ("epicride",)}, default_projects={"jira:NDT:Bug": "pm", "jira:NOPE": "p1", "jira:NDT:Story": "missing"})
+        out = resolve_ref(c2, "jira:NDT-2")
+        self.assertEqual((out["via"], out["project_id"], out["initiative_id"], out["product"]), ("default-project", "pm", "im", "nemt"))
+        self.assertEqual(resolve_ref(c2, "jira:NDT-3")["via"], VIA_ROUTE)  # task: no declaration, unknown target dropped
+
+
 class AttributorTest(unittest.TestCase):
     def test_slices_split_evenly_and_carry_people(self) -> None:
         a = Attributor(ctx(), resolver())
@@ -232,6 +243,50 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(flow["cycle_days"]["p50"], 6.0)
         self.assertEqual(flow["lead_days"]["p50"], 7.0)
         self.assertEqual(flow["reopen_rate_pct"], 100.0)
+
+
+class RealizationTest(unittest.TestCase):
+    def test_hours_are_classified_by_the_fate_of_the_work(self) -> None:
+        from pm_studio.signals.metrics import realization, production_merges
+        c = ctx()
+        a = Attributor(c, resolver())
+        now = T0 + 30 * DAY
+        slices = a.slices(commit("done", T0, "Ada", "ada@x.com", ["jira:NDT-1"]))       # p1, will be done
+        slices += a.slices(commit("unplanned", T0, "Bob", "bob@x.com", ["jira:NDT-2"]))  # known ticket, no project -> stranded
+        slices += a.slices(commit("nokey", T0, "Bob", "bob@x.com", []))                  # untraceable
+        rows = allocate(slices, CLOCK)["rows"]
+        timelines = {"jira:NDT-1": {"status_cat": "done", "last_done": T0 + 5 * DAY}, "jira:NDT-2": {"status_cat": "todo", "last_done": None}}
+        r = realization(rows, timelines, c.changes_by_ref, {"jira:NDT-1": T0, "jira:NDT-2": T0}, now=now, stale_days=10, clock=CLOCK)
+        self.assertEqual(r["totals"], {"realized": 8.0, "in_flight": 0.0, "stranded": 4.0, "untraceable": 4.0})
+        self.assertEqual(r["realization_pct"], 66.7)
+        self.assertEqual(r["lead_days_p50"], 5.0)
+        self.assertEqual(r["weekly_realized"], [{"week": CLOCK.week(T0 + 5 * DAY), "hours": 8.0}])
+        self.assertEqual(r["by_initiative"]["i1"]["realization_pct"], 100.0)
+        self.assertIsNone(r["by_initiative"][None]["realization_pct"] if r["by_initiative"][None]["hours"] == r["by_initiative"][None]["untraceable"] else None)
+        merged = Signal(id="pr", at=T0, source="ado-prs", kind="pr_merged", actor="Ada", actor_email="ada@x.com", refs=["jira:NDT-1"], weight=10.0, meta={"pr": 7, "target": "master"})
+        self.assertEqual(production_merges(a.slices(merged), start=T0 - 1, end=now), {"i1": 1})
+
+    def test_stranded_rule_and_unattributed_breakdown(self) -> None:
+        from pm_studio.signals.service import unattributed_breakdown
+        c = ctx()
+        a = Attributor(c, resolver())
+        now = T0 + 30 * DAY
+        slices = []
+        for i in range(3):
+            slices += a.slices(commit(f"s{i}", T0 + i * DAY, "Ada", "ada@x.com", ["jira:NDT-1"]))
+        rows = allocate(slices, CLOCK)["rows"]
+        realized = {"by_initiative": {"i1": {"hours": 200.0, "realized": 20.0, "in_flight": 0.0, "stranded": 180.0, "untraceable": 0.0, "stranded_pct": 90.0}}}
+        found = detect(slices=slices, alloc_rows=rows, timelines={}, tickets=c.tickets, changes=[], projects=c.projects, initiatives=c.initiatives, resolver_suggestions=[], thresholds=DEFAULT_THRESHOLDS, clock=CLOCK, now=now, start=T0 - DAY, end=now, realization=realized)
+        stranded = [f for f in found if f["rule"] == "stranded_effort"]
+        self.assertEqual(len(stranded), 1)
+        self.assertEqual((stranded[0]["severity"], stranded[0]["entity"]), ("high", "i1"))
+        rows2 = allocate(a.slices(commit("u", T0, "Bob", "bob@x.com", ["jira:NDT-3"])) + a.slices(commit("k", T0 + 60, "Bob", "bob@x.com", [], repo="src/x", system=None)), CLOCK)["rows"]
+        u = unattributed_breakdown(rows2, [], c.tickets, {"src/x": {"keyed_commits": 1, "human_commits": 4}})
+        self.assertEqual(u["hours"], 8.0)
+        self.assertEqual(set(u["by_via"]), {"route-unplanned", "repo-only"})
+        self.assertEqual(u["parents"][0]["ref"], "jira:NDT-E")
+        self.assertEqual(u["parents"][0]["tickets"], 1)
+        self.assertEqual(u["repos"][0], {"repo": "src/x", "hours": 4.0, "keyed_pct": 25.0})
 
 
 class StatusNormalizationTest(unittest.TestCase):

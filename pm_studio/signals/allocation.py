@@ -25,8 +25,11 @@ from .attribution import UNATTRIBUTED_PROJECT
 from .model import Clock
 
 
-def _target_key(slice_: dict) -> str:
-    return slice_["project_id"] or UNATTRIBUTED_PROJECT
+def _target_key(slice_: dict) -> tuple:
+    """Rows are kept per piece of work, not just per project: the ticket (or, with no
+    ticket, the repository) is what lets an hour's FATE be looked up later - did the
+    work it went into finish, stall, or never get planned. Project rollups sum them."""
+    return (slice_["project_id"] or UNATTRIBUTED_PROJECT, slice_.get("ref") or "", "" if slice_.get("ref") else (slice_.get("repo") or ""))
 
 
 def allocate(slices: list[dict], clock: Clock, *, capacity_hours: float = 8.0, start: float | None = None, end: float | None = None, mode: str = "observed") -> dict:
@@ -54,7 +57,7 @@ def allocate(slices: list[dict], clock: Clock, *, capacity_hours: float = 8.0, s
         facts: dict[str, dict] = {}
         for s in day_slices:
             key = _target_key(s)
-            facts.setdefault(key, {"initiative_id": s["initiative_id"], "goal_ids": s["goal_ids"], "product": s["product"], "system": s["system"], "capex": s["capex"], "maintenance": s["maintenance"], "nature": s["nature"], "via": s["via"], "person_external": s["person_external"]})
+            facts.setdefault(key, {"initiative_id": s["initiative_id"], "goal_ids": s["goal_ids"], "product": s["product"], "system": s["system"], "capex": s["capex"], "maintenance": s["maintenance"], "nature": s["nature"], "via": s["via"], "person_external": s["person_external"], "ref": s.get("ref") or None, "repo": s.get("repo"), "change_id": s.get("change_id"), "ticket_type": s.get("ticket_type") or ""})
             if len(evidence[key]) < 40:
                 evidence[key].append(s["signal_id"])
             if s["minutes"]:
@@ -75,12 +78,12 @@ def allocate(slices: list[dict], clock: Clock, *, capacity_hours: float = 8.0, s
             rows.append({
                 "day": day, "week": clock.week(clock.day_start(day) + 43200), "month": day[:7],
                 "person_id": person_id, "person_name": person_name,
-                "project_id": None if key == UNATTRIBUTED_PROJECT else key,
+                "project_id": None if key[0] == UNATTRIBUTED_PROJECT else key[0],
                 **facts[key],
                 "hours": round(hours + inferred, 3), "logged_hours": round(hours, 3), "inferred_hours": round(inferred, 3),
                 "method": method, "signals": len(evidence[key]), "signal_ids": evidence[key],
             })
-    rows.sort(key=lambda r: (r["day"], r["person_name"], r["project_id"] or ""))
+    rows.sort(key=lambda r: (r["day"], r["person_name"], r["project_id"] or "", r.get("ref") or ""))
     if mode == "scaled":
         rows = scale_to_weeks(rows, weekly_capacity=capacity_hours * 5)
     return {"rows": rows, "active_days": len(per_day), "mode": mode}

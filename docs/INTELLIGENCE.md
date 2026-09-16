@@ -53,9 +53,11 @@ the product/system, the nature of the work (feature / defect / task / discovery)
 1. `change` - a change linked 1:1 to the ticket;
 2. `parent-change` / `epic-project` - the ticket's parent chain (three hops);
 3. `own-epic` - the ticket is itself a project's epic;
-4. `route-unplanned` - known ticket, planned nowhere; product via import routes;
-5. `unknown-ticket` - a key the catalog does not hold;
-6. `repo-only` - no key at all; the repository's system is all we know.
+4. `default-project` - known ticket, planned nowhere, but its tracker project / work item
+   type has a declared home (`[signals.default_projects]`) - counted as placed, reported apart;
+5. `route-unplanned` - known ticket, planned nowhere; product via import routes;
+6. `unknown-ticket` - a key the catalog does not hold;
+7. `repo-only` - no key at all; the repository's system is all we know.
 
 `coverage()` reports the share of weight placed on a real project - the first number
 to trust before any per-initiative figure.
@@ -86,9 +88,18 @@ under both) and are never summed into a grand total.
 - **workflow & developer experience**: commit hour-of-day heatmap (author-local),
   after-hours and weekend share, projects per person-day and fragmented days, tagging
   discipline per repo, AI-assisted share, pull-request open time and review counts.
-- **impact**: per initiative - hours, people, commits, tickets touched/done, changes
-  shipped (by the tracker's done date, not the board's mirrored stamp), agent spend,
-  done per 100 hours; per goal (overlapping shares); releases in the window.
+- **impact**: the primary view is **effort realization** - every hour in the window is
+  classified by the fate of the work it went into: *realized* (the ticket or change
+  reached done), *in flight* (open, touched within the stale threshold), *stranded*
+  (stale, abandoned, removed, or never planned), *untraceable* (no ticket at all).
+  Realization rate and hours-weighted effort lead time (hour spent -> work done) are
+  the two headline numbers; both are independent of how a team slices tickets, which
+  is why they replace tickets-done as the yield measure. Also per initiative: pull
+  requests merged into a mainline branch, people, commits, tickets done, changes
+  shipped (by the tracker's done date), agent spend; realized hours per week; releases.
+  An `unattributed` breakdown names what the Unattributed bucket is made of - by cause,
+  parent epic, tracker project, work item type, repository and person - each with the
+  action that would place it.
 
 ## Findings (`findings.py`)
 

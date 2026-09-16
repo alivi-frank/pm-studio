@@ -16,7 +16,7 @@ import hashlib
 import time
 from collections import defaultdict
 
-from .attribution import VIA_CHANGE, VIA_EPIC_PROJECT, VIA_OWN_EPIC, VIA_PARENT_CHANGE, VIA_SESSION
+from .attribution import VIA_CHANGE, VIA_DEFAULT_PROJECT, VIA_EPIC_PROJECT, VIA_OWN_EPIC, VIA_PARENT_CHANGE, VIA_SESSION
 from .model import KIND_COMMIT, KIND_PR_MERGED, KIND_PR_REVIEW, KIND_STATUS, Clock
 
 DEFAULT_THRESHOLDS: dict[str, float] = {
@@ -42,6 +42,8 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "unreviewed_min_merges": 10,
     "closure_lag_days": 14,
     "closure_lag_min_tickets": 10,
+    "stranded_share_pct": 40,
+    "stranded_min_hours": 100,
 }
 
 SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2, "info": 3}
@@ -65,10 +67,11 @@ RULES: dict[str, dict] = {
     "idle_assignee": {"title": "Assigned in-progress ticket, assignee inactive", "family": "lifecycle", "what": "Active tickets whose assignee has produced no signal anywhere for N days."},
     "abandoned_backlog": {"title": "Abandoned in-progress backlog", "family": "lifecycle", "what": "Tickets the tracker still shows in progress that nobody has touched for more than N days, one finding per tracker project - a cleanup, not 500 alarms."},
     "unreviewed_merges": {"title": "Pull requests merged without review", "family": "workflow", "what": "Repositories where most merged pull requests carried no reviewer vote - or were merged within minutes of opening."},
+    "stranded_effort": {"title": "Effort going nowhere", "family": "investment", "what": "Initiatives where more than N% of the traceable hours went into work that is now stale, abandoned, removed or never planned - measured in hours, so it does not depend on how a team slices tickets."},
     "closure_lag": {"title": "Finished but never closed", "family": "flow", "what": "Tickets resolved / UAT-complete for more than N days without being closed, one finding per tracker project - the hygiene gap that makes WIP and cycle time read worse than they are."},
 }
 
-PLACED = (VIA_CHANGE, VIA_PARENT_CHANGE, VIA_EPIC_PROJECT, VIA_OWN_EPIC, VIA_SESSION)
+PLACED = (VIA_CHANGE, VIA_PARENT_CHANGE, VIA_EPIC_PROJECT, VIA_OWN_EPIC, VIA_SESSION, VIA_DEFAULT_PROJECT)
 
 
 def finding_id(rule: str, entity: str) -> str:
@@ -91,7 +94,7 @@ def _finding(rule: str, entity: str, severity: str, title: str, detail: str, *, 
     return {"id": finding_id(rule, entity), "rule": rule, "family": RULES[rule]["family"], "rule_title": RULES[rule]["title"], "entity": entity, "severity": severity, "title": title, "detail": detail, "evidence": (evidence or [])[:8], "links": links or {}, "value": value, "unit": unit}
 
 
-def detect(*, slices: list[dict], alloc_rows: list[dict], timelines: dict[str, dict], tickets: dict[str, dict], changes: list[dict], projects: dict[str, dict], initiatives: dict[str, dict], resolver_suggestions: list[dict], thresholds: dict[str, float], clock: Clock, now: float, start: float, end: float) -> list[dict]:
+def detect(*, slices: list[dict], alloc_rows: list[dict], timelines: dict[str, dict], tickets: dict[str, dict], changes: list[dict], projects: dict[str, dict], initiatives: dict[str, dict], resolver_suggestions: list[dict], thresholds: dict[str, float], clock: Clock, now: float, start: float, end: float, realization: dict | None = None) -> list[dict]:
     T = thresholds
     day = 86400.0
     findings: list[dict] = []
@@ -231,6 +234,13 @@ def detect(*, slices: list[dict], alloc_rows: list[dict], timelines: dict[str, d
                     top_refs[s["ref"]] += s["weight"]
             evidence = [{"ref": ref, "title": ticket_title.get(ref, "")[:80], "url": ticket_url.get(ref, "")} for ref, _ in sorted(top_refs.items(), key=lambda kv: -kv[1])[:6]]
             findings.append(_finding("unplanned_work", "window", "high" if 100.0 * unplanned / total > 2 * T["unplanned_share_pct"] else "medium", f"{100.0 * unplanned / total:.0f}% of hours on work outside any project", f"{unplanned:.0f} of {total:.0f} hours could not be placed on a project (unplanned tickets, unkeyed commits, unknown tickets).", evidence=evidence, value=round(100.0 * unplanned / total, 1), unit="%"))
+
+    for iid, r in ((realization or {}).get("by_initiative") or {}).items():
+        if not iid or r["hours"] < T["stranded_min_hours"] or r.get("stranded_pct") is None:
+            continue
+        if r["stranded_pct"] > T["stranded_share_pct"]:
+            initiative = initiatives.get(iid) or {}
+            findings.append(_finding("stranded_effort", iid, "high" if r["stranded_pct"] > 1.5 * T["stranded_share_pct"] else "medium", initiative.get("title", iid)[:90], f"{r['stranded']:.0f} of {r['hours'] - r['untraceable']:.0f} traceable hours ({r['stranded_pct']:.0f}%) went into work that is now stale, abandoned or unplanned; {r['realized']:.0f} h realized.", links={"initiative_id": iid}, value=round(r["stranded_pct"]), unit="% stranded"))
 
     # ---- hygiene per repo ----
     per_repo: dict[str, dict] = defaultdict(lambda: {"commits": 0.0, "keyed": 0.0, "people": defaultdict(float)})
