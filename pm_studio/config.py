@@ -359,6 +359,12 @@ class SignalsConfig:
     # Weaker than a change link or a parent epic, and reported separately as
     # via="default-project" so it never hides behind real attribution.
     default_projects: dict[str, str] = field(default_factory=dict)
+    # How much to believe a source's explicit time (worklogs, CompletedWork), per source
+    # id: "full" books it as hours where logged; "signal" (the default) keeps it only as
+    # evidence that the ticket was worked, weighted by its size, and lets activity decide
+    # the hours; "ignore" drops it. Jira worklogs written by status-dwell automation are
+    # exactly the case the default protects against.
+    worklog_trust: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -936,6 +942,7 @@ def _parse_signals(raw: dict) -> SignalsConfig:
         ado_pr_projects=strings("ado_pr_projects"),
         allocation_mode=str(table.get("allocation_mode", "observed")).strip() if str(table.get("allocation_mode", "observed")).strip() in ("observed", "scaled") else "observed",
         default_projects={str(k): str(v) for k, v in (table.get("default_projects") or {}).items()} if isinstance(table.get("default_projects"), dict) else {},
+        worklog_trust={str(k): str(v) for k, v in (table.get("worklog_trust") or {}).items() if str(v) in ("full", "signal", "ignore")} if isinstance(table.get("worklog_trust"), dict) else {},
     )
 
 

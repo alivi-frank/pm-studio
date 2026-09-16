@@ -121,7 +121,7 @@ class AllocationTest(unittest.TestCase):
         return out
 
     def test_days_reconcile_to_capacity(self) -> None:
-        result = allocate(self.slices(), CLOCK, capacity_hours=8.0)
+        result = allocate(self.slices(), CLOCK, capacity_hours=8.0, worklog_trust={"jira": "full"})
         rows = result["rows"]
         ada_day1 = [r for r in rows if r["person_id"] == "ada" and r["day"] == "2026-01-01"]
         self.assertAlmostEqual(sum(r["hours"] for r in ada_day1), 8.0)
@@ -133,15 +133,32 @@ class AllocationTest(unittest.TestCase):
         self.assertEqual(bob[0]["hours"], 8.0)
         self.assertEqual(result["active_days"], 2)
 
+    def test_worklogs_are_evidence_unless_trusted(self) -> None:
+        a = Attributor(ctx(), resolver())
+        s = a.slices(Signal(id="w", at=T0, source="jira", kind=KIND_WORKLOG, actor="Ada", actor_email="ada@x.com", refs=["jira:NDT-1"], weight=0.0, minutes=480.0, meta={}))
+        s += a.slices(commit("c", T0 + 60, "Ada", "ada@x.com", ["jira:NDT-2"]))
+        # Default: the 8h worklog is a bounded weight (120) beside a 45 commit -> 8h split ~73/27, nothing logged.
+        rows = allocate(s, CLOCK, capacity_hours=8.0)["rows"]
+        self.assertEqual(sum(r["logged_hours"] for r in rows), 0.0)
+        self.assertAlmostEqual(sum(r["hours"] for r in rows), 8.0)
+        p1 = next(r for r in rows if r["project_id"] == "p1")
+        self.assertAlmostEqual(p1["hours"], 8.0 * 120 / 165, places=2)
+        # Trusted: booked as logged.
+        rows = allocate(s, CLOCK, capacity_hours=8.0, worklog_trust={"jira": "full"})["rows"]
+        self.assertEqual(next(r for r in rows if r["project_id"] == "p1")["logged_hours"], 8.0)
+        # Ignored: the worklog vanishes, the commit takes the day.
+        rows = allocate(s, CLOCK, capacity_hours=8.0, worklog_trust={"jira": "ignore"})["rows"]
+        self.assertEqual([(r["project_id"], r["hours"]) for r in rows], [(None, 8.0)])
+
     def test_logged_over_capacity_is_not_topped_up(self) -> None:
         a = Attributor(ctx(), resolver())
         s = a.slices(Signal(id="w", at=T0, source="jira", kind=KIND_WORKLOG, actor="Ada", actor_email="ada@x.com", refs=["jira:NDT-1"], weight=0.0, minutes=600.0, meta={}))
         s += a.slices(commit("c", T0 + 60, "Ada", "ada@x.com", []))
-        rows = allocate(s, CLOCK, capacity_hours=8.0)["rows"]
+        rows = allocate(s, CLOCK, capacity_hours=8.0, worklog_trust={"jira": "full"})["rows"]
         self.assertEqual([r["hours"] for r in rows], [10.0])
 
     def test_rollup_and_series_conserve_hours(self) -> None:
-        rows = allocate(self.slices(), CLOCK)["rows"]
+        rows = allocate(self.slices(), CLOCK, worklog_trust={"jira": "full"})["rows"]
         total = sum(r["hours"] for r in rows)
         self.assertAlmostEqual(sum(r["hours"] for r in rollup(rows, "initiative_id")), total, places=1)
         self.assertAlmostEqual(sum(r["hours"] for r in rollup(rows, "goal_ids")), total, places=1)

@@ -83,8 +83,10 @@ def statement(alloc_rows: list[dict], *, projects: dict[str, dict], initiatives:
         "logged_pct": round(100.0 * sum(r["logged_hours"] for r in rows) / totals["hours"], 1) if totals["hours"] else 0.0,
         "methodology": (
             "Hours are activity-weighted: each person's active day is worth the configured capacity, "
-            "explicit worklogs are booked where logged, and the remainder is split across the tickets and "
-            "repositories they touched that day in proportion to signal weight. Capitalizable = development "
+            "explicit time is booked where logged only for sources declared trustworthy (by default a worklog "
+            "counts as evidence that the ticket was worked, not as hours - status-dwell automation writes "
+            "worklogs too), and the remainder is split across the tickets and repositories they touched "
+            "that day in proportion to signal weight. Capitalizable = development "
             "work on a live project of a non-maintenance initiative, excluding defects; per-initiative "
             "overrides are recorded in the tuning log. Every hour traces to the signals that earned it."
         ),

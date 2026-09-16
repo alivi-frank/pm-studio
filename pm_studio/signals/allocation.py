@@ -32,11 +32,33 @@ def _target_key(slice_: dict) -> tuple:
     return (slice_["project_id"] or UNATTRIBUTED_PROJECT, slice_.get("ref") or "", "" if slice_.get("ref") else (slice_.get("repo") or ""))
 
 
-def allocate(slices: list[dict], clock: Clock, *, capacity_hours: float = 8.0, start: float | None = None, end: float | None = None, mode: str = "observed") -> dict:
+TRUST_FULL = "full"
+TRUST_SIGNAL = "signal"
+TRUST_IGNORE = "ignore"
+# A worklog kept as evidence only: its weight grows with its size but is bounded, so a
+# tool that writes "8h" on every status move cannot dominate a day the way a real
+# eight-hour entry would.
+SIGNAL_WORKLOG_MIN_WEIGHT = 15.0
+SIGNAL_WORKLOG_MAX_WEIGHT = 120.0
+
+
+def allocate(slices: list[dict], clock: Clock, *, capacity_hours: float = 8.0, start: float | None = None, end: float | None = None, mode: str = "observed", worklog_trust: dict[str, str] | None = None) -> dict:
     """Returns {"rows": [...], "days": {...}} where each row is one (day, person,
-    project) allocation with its hours, method and the signal ids behind it."""
+    piece of work) allocation with its hours, method and the signal ids behind it.
+    `worklog_trust` maps a source id to full / signal / ignore (default signal)."""
+    trust = worklog_trust or {}
     per_day: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for s in slices:
+        if s.get("minutes") is not None:
+            # Meetings dropped in the inbox are durations someone attended - trusted
+            # unless the deployment says otherwise; tracker time defaults to evidence.
+            level = trust.get(s["source"], TRUST_FULL if s["source"] == "inbox" else TRUST_SIGNAL)
+            if level == TRUST_IGNORE:
+                continue
+            if level == TRUST_SIGNAL:
+                # Evidence, not hours: the minutes become a bounded weight and the
+                # explicit time is dropped so nothing downstream books it.
+                s = {**s, "minutes": None, "weight": max(SIGNAL_WORKLOG_MIN_WEIGHT, min(SIGNAL_WORKLOG_MAX_WEIGHT, float(s["minutes"]) / 2.0)) * s.get("share", 1.0)}
         if s["bot"]:
             continue
         if start is not None and s["at"] < start:

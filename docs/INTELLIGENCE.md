@@ -71,7 +71,12 @@ effort is still counted, and surface as `unresolved_author` findings with candid
 
 - A person's *active day* (any non-bot signal that day, in the configured zone) is worth
   `capacity_hours_per_day`. No signal, no hours - nothing is invented.
-- Explicit minutes (worklogs, meetings) are booked first, exactly where logged.
+- Explicit minutes are booked first, exactly where logged - but only from sources the
+  deployment declares trustworthy (`[signals.worklog_trust] <source> = "full"`). By
+  default a worklog is *evidence* that the ticket was worked (a bounded weight that grows
+  with its size), never hours: on the first real deployment 67% of Jira worklogs landed
+  within two minutes of a status change and thousands were exactly 8.0 h - status-dwell
+  automation, not effort. Meeting durations from the inbox adapter are booked as logged.
 - The remaining capacity is split across everything else touched that day by weight.
 - Logged time above capacity stands; nothing is inferred on top.
 

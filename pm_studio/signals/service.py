@@ -215,7 +215,7 @@ class IntelligenceService:
         ctx, _ = self.context()
         slices = [s for s in slices_all if self._matches(s, filters)] if any(filters.values()) else slices_all
         in_window = [s for s in slices if window["start"] <= s["at"] < window["end"]]
-        alloc = allocate(in_window, self.clock, capacity_hours=self.config.capacity_hours_per_day, mode=mode)
+        alloc = allocate(in_window, self.clock, capacity_hours=self.config.capacity_hours_per_day, mode=mode, worklog_trust=self.config.worklog_trust)
         rows = alloc["rows"]
         timelines = self.timelines(now)
         if any(filters.values()):
@@ -294,7 +294,7 @@ class IntelligenceService:
             "identity": {"suggestions": resolver.suggestions()[:40], "unresolved": len(resolver.unresolved)},
             "sources": self.ledger.describe(), "refreshing": self.ledger.is_refreshing, "last_refresh_at": self.ledger.last_refresh_at,
             "lookup": {"initiatives": {k: {"title": v.get("title"), "is_maintenance": v.get("is_maintenance"), "status": v.get("status"), "goal_ids": v.get("goal_ids")} for k, v in initiatives.items()}, "projects": {k: {"title": v.get("title"), "initiative_id": v.get("initiative_id"), "status": v.get("status")} for k, v in projects.items()}, "goals": {k: v.get("title") for k, v in goals.items()}, "people": names, "products": self.stores.get("product_labels", lambda: {})(), "systems": {k: getattr(v, "label", k) for k, v in self.systems.items()}},
-            "tuning": self.tuning.snapshot(), "config": {"since": self.config.since, "capacity_hours_per_day": self.config.capacity_hours_per_day, "allocation_mode": self.config.allocation_mode, "timezone": self.config.timezone, "auto_refresh_minutes": self.config.auto_refresh_minutes, "auto_judge": self.config.auto_judge},
+            "tuning": self.tuning.snapshot(), "config": {"since": self.config.since, "capacity_hours_per_day": self.config.capacity_hours_per_day, "allocation_mode": self.config.allocation_mode, "worklog_trust": dict(self.config.worklog_trust), "worklog_trust_default": "signal", "timezone": self.config.timezone, "auto_refresh_minutes": self.config.auto_refresh_minutes, "auto_judge": self.config.auto_judge},
         }
         report["judge"]["self_assessment"] = judge_mod.self_assessment(judge_mod.build_dossier(report, feedback=self.feedback.all(), previous=latest, thresholds=thresholds))
         self._report_cache[key] = report
@@ -311,7 +311,7 @@ class IntelligenceService:
         window = report["window"]
         slices_all, _, _ = self.ledger.slices()
         slices = [s for s in slices_all if window["start"] <= s["at"] < window["end"] and self._matches(s, {k: (filters or {}).get(k) or "" for k in FILTER_KEYS})]
-        rows = allocate(slices, self.clock, capacity_hours=self.config.capacity_hours_per_day, mode=report["allocation_mode"])["rows"]
+        rows = allocate(slices, self.clock, capacity_hours=self.config.capacity_hours_per_day, mode=report["allocation_mode"], worklog_trust=self.config.worklog_trust)["rows"]
         return trace(rows, self.ledger.signals_by_id, person_id=person_id, project_id=project_id)
 
     def entity_signals(self, from_day: str | None, to_day: str | None, *, ref: str | None = None, project_id: str | None = None, limit: int = 200) -> list[dict]:

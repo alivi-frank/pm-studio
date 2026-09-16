@@ -879,6 +879,10 @@ ado_pr_projects = ["Proj"]        # ADO projects whose pull requests are pulled 
 "ado:Arizona:Ticket" = "6e37cea0" # "<tracker>:<tracker project>[:<raw type>]" -> project id
                                   # (reported as via = "default-project", never as a real link)
 
+[signals.worklog_trust]           # explicit time per source: "full" books it as hours,
+jira = "signal"                   # "signal" (default) keeps it as evidence only, "ignore" drops it
+ado = "full"
+
 [signals.thresholds]              # any key from findings.DEFAULT_THRESHOLDS
 stale_in_progress_days = 10
 unkeyed_commit_pct = 40
