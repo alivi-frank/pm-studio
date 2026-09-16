@@ -279,10 +279,16 @@ def coverage(slices: list[dict]) -> dict:
             continue
         by_via[s["via"]] = by_via.get(s["via"], 0.0) + s["weight"]
     placed = sum(v for k, v in by_via.items() if k in (VIA_CHANGE, VIA_PARENT_CHANGE, VIA_EPIC_PROJECT, VIA_OWN_EPIC, VIA_SESSION, VIA_DEFAULT_PROJECT))
+    # Evidence-backed: a real link (change, parent, epic, pinned session). Declared
+    # default projects are placement by rule, not by evidence, and are reported apart so
+    # a config edit can never dress up as better data.
+    evidenced = sum(v for k, v in by_via.items() if k in (VIA_CHANGE, VIA_PARENT_CHANGE, VIA_EPIC_PROJECT, VIA_OWN_EPIC, VIA_SESSION))
     persons = {s["person_id"] for s in slices if not s["bot"]}
     external = {s["person_id"] for s in slices if s["person_external"] and not s["bot"]}
     return {
         "placed_pct": round(100.0 * placed / total, 1),
+        "evidence_pct": round(100.0 * evidenced / total, 1),
+        "declared_pct": round(100.0 * by_via.get(VIA_DEFAULT_PROJECT, 0.0) / total, 1),
         "by_via_pct": {k: round(100.0 * v / total, 1) for k, v in sorted(by_via.items(), key=lambda kv: -kv[1])},
         "people": len(persons), "unresolved_people": len(external),
         "computed_at": time.time(),

@@ -141,6 +141,16 @@ def build_dossier(report: dict, *, feedback: dict, previous: dict | None, thresh
         "human_feedback": human,
         "unresolved_authors": report.get("identity", {}).get("suggestions", [])[:15],
         "thresholds": thresholds,
+        "config": report.get("config"),
+        # Decisions a human already made, so the judge argues with them rather than
+        # rediscovering them: which sources' explicit time is trusted and why the
+        # default is "evidence only".
+        "operator_decisions": {
+            "worklog_trust": (report.get("config") or {}).get("worklog_trust"),
+            "worklog_trust_default": "signal - a worklog counts as evidence that the ticket was worked, never as hours, because status-dwell automation writes worklogs too (on this deployment 67% of Jira worklogs landed within two minutes of a status change and thousands were exactly 8.0 h). Do not recommend booking untrusted worklogs as hours; recommend it only if you can show they are human-entered.",
+            "default_projects": (report.get("config") or {}).get("default_projects"),
+            "placed_vs_evidence": "coverage.placed_pct counts declared default projects as placed; coverage.evidence_pct counts only real links (change, parent, epic, session). Judge attribution on evidence_pct and treat declared_pct as a policy choice, not data.",
+        },
         "sources": report.get("sources"),
         "previous_judgment": {k: previous.get(k) for k in ("at", "scores", "summary", "threshold_suggestions")} if previous else None,
     }

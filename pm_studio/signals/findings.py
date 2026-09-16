@@ -44,6 +44,7 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     "closure_lag_min_tickets": 10,
     "stranded_share_pct": 40,
     "stranded_min_hours": 100,
+    "sibling_fold_min": 3,              # stale tickets under one parent fold into one finding
 }
 
 SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2, "info": 3}
@@ -67,6 +68,7 @@ RULES: dict[str, dict] = {
     "idle_assignee": {"title": "Assigned in-progress ticket, assignee inactive", "family": "lifecycle", "what": "Active tickets whose assignee has produced no signal anywhere for N days."},
     "abandoned_backlog": {"title": "Abandoned in-progress backlog", "family": "lifecycle", "what": "Tickets the tracker still shows in progress that nobody has touched for more than N days, one finding per tracker project - a cleanup, not 500 alarms."},
     "unreviewed_merges": {"title": "Pull requests merged without review", "family": "workflow", "what": "Repositories where most merged pull requests carried no reviewer vote - or were merged within minutes of opening."},
+    "stale_epic": {"title": "Stale work under one epic", "family": "lifecycle", "what": "Several in-progress tickets under the same parent, all silent - one dead epic, one finding, instead of one alarm per child."},
     "stranded_effort": {"title": "Effort going nowhere", "family": "investment", "what": "Initiatives where more than N% of the traceable hours went into work that is now stale, abandoned, removed or never planned - measured in hours, so it does not depend on how a team slices tickets."},
     "closure_lag": {"title": "Finished but never closed", "family": "flow", "what": "Tickets resolved / UAT-complete for more than N days without being closed, one finding per tracker project - the hygiene gap that makes WIP and cycle time read worse than they are."},
 }
@@ -126,6 +128,7 @@ def detect(*, slices: list[dict], alloc_rows: list[dict], timelines: dict[str, d
 
     # ---- ticket-level rules ----
     abandoned: dict[str, list[dict]] = defaultdict(list)
+    stale_candidates: list[tuple[str | None, dict]] = []
     for ref, tl in timelines.items():
         ticket = tickets.get(ref) or {}
         title = ticket_title.get(ref) or ref
@@ -142,8 +145,9 @@ def detect(*, slices: list[dict], alloc_rows: list[dict], timelines: dict[str, d
                 continue
             if stale:
                 # One finding per stale ticket: staleness is the root cause, so the
-                # review-queue and long-running rules stay quiet for it below.
-                findings.append(_finding("stale_in_progress", ref, "high" if idle >= 2 * T["stale_in_progress_days"] else "medium", f"{ref.split(':', 1)[1]} · {title[:80]}", f"Status {tl['status']!r}, last signal {idle:.0f} days ago" + (f", assigned to {assignee_of.get(ref)}" if assignee_of.get(ref) else "") + ".", links=links, value=round(idle, 1), unit="days idle"))
+                # review-queue and long-running rules stay quiet for it below. Siblings
+                # under one parent are folded after the loop.
+                stale_candidates.append((ticket.get("parent_key") and f"{ticket['tracker_id']}:{ticket['parent_key']}", _finding("stale_in_progress", ref, "high" if idle >= 2 * T["stale_in_progress_days"] else "medium", f"{ref.split(':', 1)[1]} · {title[:80]}", f"Status {tl['status']!r}, last signal {idle:.0f} days ago" + (f", assigned to {assignee_of.get(ref)}" if assignee_of.get(ref) else "") + ".", links=links, value=round(idle, 1), unit="days idle")))
             if not stale and tl.get("first_start") and (now - tl["first_start"]) / day >= T["zombie_in_progress_days"]:
                 age = (now - tl["first_start"]) / day
                 findings.append(_finding("zombie_in_progress", ref, "medium", f"{ref.split(':', 1)[1]} · {title[:80]}", f"Started {age:.0f} days ago and still {tl['status']!r}, with activity in the last {idle:.0f} days." if idle is not None else f"Started {age:.0f} days ago and still {tl['status']!r}.", links=links, value=round(age, 0), unit="days active"))
@@ -166,6 +170,17 @@ def detect(*, slices: list[dict], alloc_rows: list[dict], timelines: dict[str, d
                 findings.append(_finding("work_after_done", ref, "medium" if len(late) < 5 else "high", f"{ref.split(':', 1)[1]} · {title[:80]}", f"{len(late)} commit(s) landed {(late[-1]['at'] - done_at) / day:.0f}+ days after the ticket was done ({clock.day(done_at)}).", evidence=[{"at": c["at"], "who": c["person_name"], "what": c["meta"].get("subject", "")[:100], "repo": c["repo"]} for c in late[:5]], links=links, value=len(late), unit="commits after done"))
         if tl.get("reopens", 0) >= T["reopen_count"] and tl.get("last_done") and start <= tl["last_done"] < end:
             findings.append(_finding("reopened", ref, "low", f"{ref.split(':', 1)[1]} · {title[:80]}", f"Reopened {tl['reopens']} times.", links=links, value=tl["reopens"], unit="reopens"))
+
+    by_parent: dict[str, list[dict]] = defaultdict(list)
+    for parent_ref, f in stale_candidates:
+        by_parent[parent_ref or f["entity"]].append(f)
+    for parent_ref, group in by_parent.items():
+        if len(group) >= T["sibling_fold_min"] and parent_ref in tickets:
+            parent = tickets[parent_ref]
+            worst = max(group, key=lambda f: f.get("value") or 0)
+            findings.append(_finding("stale_epic", parent_ref, worst["severity"], f"{parent_ref.split(':', 1)[1]} · {(parent.get('title') or '')[:80]}", f"{len(group)} in-progress tickets under this {parent.get('raw_type') or parent.get('type') or 'parent'} are all silent; the quietest for {worst['value']:.0f} days. Decide the epic, not the children.", evidence=[{"ref": f["entity"], "title": f["title"].split(" · ", 1)[-1][:70] + f" — {f['value']:.0f}d idle"} for f in sorted(group, key=lambda f: -(f.get("value") or 0))[:8]], links={"url": parent.get("url", ""), "ref": parent_ref}, value=len(group), unit="stale children"))
+        else:
+            findings.extend(group)
 
     awaiting: dict[str, list[dict]] = defaultdict(list)
     for ref, tl in timelines.items():

@@ -59,8 +59,9 @@ the product/system, the nature of the work (feature / defect / task / discovery)
 6. `unknown-ticket` - a key the catalog does not hold;
 7. `repo-only` - no key at all; the repository's system is all we know.
 
-`coverage()` reports the share of weight placed on a real project - the first number
-to trust before any per-initiative figure.
+`coverage()` reports two rates: `evidence_pct` (real links only - change, parent,
+epic, session) and `placed_pct` (evidence plus declared default projects). The page
+leads with the evidence rate; a config edit can raise the second, never the first.
 
 People: `identity.IdentityResolver` reads the people directory (tracker identities,
 emails, names), an alias table (`signals/aliases.json`), and falls back to exact then
@@ -109,8 +110,9 @@ under both) and are never summed into a grand total.
 ## Findings (`findings.py`)
 
 Rules over the same slices, each firing on an entity with evidence; ids are stable
-(`rule + entity`). Families: lifecycle (`stale_in_progress`, `zombie_in_progress`,
-`stale_project`, `ideation_with_commits`, `idle_assignee`), investment
+(`rule + entity`). Families: lifecycle (`stale_in_progress`, `stale_epic` - three or
+more silent siblings fold into their parent, `zombie_in_progress`, `stale_project`,
+`ideation_with_commits`, `idle_assignee`), investment
 (`silent_initiative`, `unplanned_work`, `maintenance_share`), hygiene
 (`work_after_done`, `status_lag`, `unkeyed_commits`), flow (`review_dwell`,
 `reopened`, `closure_lag`), workflow (`fragmentation`, `bus_factor`,

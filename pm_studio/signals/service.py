@@ -234,9 +234,21 @@ class IntelligenceService:
                 last_signal_by_ref[sl["ref"]] = max(last_signal_by_ref.get(sl["ref"], 0.0), sl["at"])
         realized = realization(rows, timelines, ctx.changes_by_ref, last_signal_by_ref, now=now, stale_days=thresholds["stale_in_progress_days"], clock=self.clock)
         merges = production_merges(in_window, start=window["start"], end=window["end"])
+        code_kinds = {"commit", "merge", "pr_opened", "pr_merged", "pr_review"}
+        mix: dict = {}
+        for sl in in_window:
+            if sl["bot"] or sl["kind"] == "ai_turn":
+                continue
+            m = mix.setdefault(sl["initiative_id"], {"code": 0.0, "tracker": 0.0})
+            m["code" if sl["kind"] in code_kinds else "tracker"] += sl["weight"]
         for row in impact["initiatives"]:
             row["realization"] = realized["by_initiative"].get(row["initiative_id"]) or {"hours": 0.0, "realized": 0.0, "in_flight": 0.0, "stranded": 0.0, "untraceable": 0.0, "realization_pct": None, "stranded_pct": None, "lead_days_p50": None}
             row["prod_merges"] = merges.get(row["initiative_id"], 0)
+            m = mix.get(row["initiative_id"]) or {"code": 0.0, "tracker": 0.0}
+            # What the hours rest on: code events (commits, PRs) vs tracker bookkeeping
+            # (transitions, edits, comments). An initiative carried by typing, not
+            # shipping, should read that way.
+            row["code_evidence_pct"] = round(100.0 * m["code"] / (m["code"] + m["tracker"]), 0) if (m["code"] + m["tracker"]) else None
         impact["realization"] = {k: v for k, v in realized.items() if k != "by_initiative"}
         impact["unattributed"] = unattributed_breakdown(rows, in_window, tickets, self.ledger.facts("git").get("repos") or {})
         raw_findings = detect(slices=slices, alloc_rows=rows, timelines=timelines, tickets=tickets, changes=changes, projects=projects if not filters.get("initiative_id") else {k: v for k, v in projects.items() if v.get("initiative_id") == filters["initiative_id"]}, initiatives=initiatives if not filters.get("initiative_id") else {k: v for k, v in initiatives.items() if k == filters["initiative_id"]}, resolver_suggestions=resolver.suggestions(), thresholds=thresholds, clock=self.clock, now=now, start=window["start"], end=window["end"], realization=realized)
@@ -273,7 +285,7 @@ class IntelligenceService:
             "hours": total_hours, "active_people": len({r["person_id"] for r in rows}), "active_days": alloc["active_days"],
             "commits": workflow["commits"], "tickets_touched": len({s["ref"] for s in in_window if s["ref"]}), "tickets_done": flow["finished"],
             "changes_shipped": sum(r["changes_shipped"] for r in impact["initiatives"]), "releases": impact["releases"],
-            "placed_pct": cov["placed_pct"], "capex_pct": finance["capex_pct"], "logged_pct": finance["logged_pct"],
+            "placed_pct": cov["placed_pct"], "evidence_pct": cov["evidence_pct"], "declared_pct": cov["declared_pct"], "capex_pct": finance["capex_pct"], "logged_pct": finance["logged_pct"],
             "findings_high": sum(1 for f in visible if f["severity"] == "high"), "findings_total": len(visible),
             "realization_pct": realized["realization_pct"], "stranded_pct": realized["stranded_pct"], "lead_days_p50": realized["lead_days_p50"],
             "ai_cost_usd": ai_cost, "ai_commits_pct": workflow["ai_assisted_pct"], "signals": len(in_window),
@@ -294,7 +306,7 @@ class IntelligenceService:
             "identity": {"suggestions": resolver.suggestions()[:40], "unresolved": len(resolver.unresolved)},
             "sources": self.ledger.describe(), "refreshing": self.ledger.is_refreshing, "last_refresh_at": self.ledger.last_refresh_at,
             "lookup": {"initiatives": {k: {"title": v.get("title"), "is_maintenance": v.get("is_maintenance"), "status": v.get("status"), "goal_ids": v.get("goal_ids")} for k, v in initiatives.items()}, "projects": {k: {"title": v.get("title"), "initiative_id": v.get("initiative_id"), "status": v.get("status")} for k, v in projects.items()}, "goals": {k: v.get("title") for k, v in goals.items()}, "people": names, "products": self.stores.get("product_labels", lambda: {})(), "systems": {k: getattr(v, "label", k) for k, v in self.systems.items()}},
-            "tuning": self.tuning.snapshot(), "config": {"since": self.config.since, "capacity_hours_per_day": self.config.capacity_hours_per_day, "allocation_mode": self.config.allocation_mode, "worklog_trust": dict(self.config.worklog_trust), "worklog_trust_default": "signal", "timezone": self.config.timezone, "auto_refresh_minutes": self.config.auto_refresh_minutes, "auto_judge": self.config.auto_judge},
+            "tuning": self.tuning.snapshot(), "config": {"since": self.config.since, "capacity_hours_per_day": self.config.capacity_hours_per_day, "allocation_mode": self.config.allocation_mode, "worklog_trust": dict(self.config.worklog_trust), "worklog_trust_default": "signal", "default_projects": dict(self.config.default_projects), "timezone": self.config.timezone, "auto_refresh_minutes": self.config.auto_refresh_minutes, "auto_judge": self.config.auto_judge},
         }
         report["judge"]["self_assessment"] = judge_mod.self_assessment(judge_mod.build_dossier(report, feedback=self.feedback.all(), previous=latest, thresholds=thresholds))
         self._report_cache[key] = report

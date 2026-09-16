@@ -306,6 +306,31 @@ class RealizationTest(unittest.TestCase):
         self.assertEqual(u["repos"][0], {"repo": "src/x", "hours": 4.0, "keyed_pct": 25.0})
 
 
+class SiblingFoldTest(unittest.TestCase):
+    def test_stale_siblings_fold_into_the_parent(self) -> None:
+        c = ctx()
+        now = T0 + 60 * DAY
+        timelines = {}
+        for i in range(3):
+            key = f"jira:NDT-{200 + i}"
+            c.tickets[key] = {"tracker_id": "jira", "key": f"NDT-{200 + i}", "type": "task", "state_category": "In Progress", "parent_key": "NDT-E", "components": [], "project": "NDT", "title": f"child {i}", "url": ""}
+            timelines[key] = {"created": T0 - DAY, "status": "In Progress", "status_cat": "in_progress", "status_since": T0, "transitions": [{"at": T0, "from": "To Do", "to": "In Progress", "from_cat": "todo", "to_cat": "in_progress"}], "first_start": T0, "last_done": None, "reopens": 0, "review_secs": 0, "blocked_secs": 0, "type": "task"}
+        slices = Attributor(c, resolver()).slices(commit("s", T0, "Ada", "ada@x.com", ["jira:NDT-200", "jira:NDT-201", "jira:NDT-202"]))
+        found = detect(slices=slices, alloc_rows=[], timelines=timelines, tickets=c.tickets, changes=[], projects={}, initiatives={}, resolver_suggestions=[], thresholds=DEFAULT_THRESHOLDS, clock=CLOCK, now=now, start=now - 90 * DAY, end=now + DAY)
+        rules = [f["rule"] for f in found]
+        self.assertEqual(rules.count("stale_epic"), 1)
+        self.assertNotIn("stale_in_progress", rules)
+        epic = next(f for f in found if f["rule"] == "stale_epic")
+        self.assertEqual((epic["entity"], epic["value"], len(epic["evidence"])), ("jira:NDT-E", 3, 3))
+
+    def test_coverage_separates_evidence_from_declaration(self) -> None:
+        c = AttributionContext.build(tickets=[{"tracker_id": "jira", "key": "NDT-2", "type": "bug", "state_category": "To Do", "parent_key": None, "components": [], "project": "NDT", "raw_type": "Bug"}], changes=[], projects=[{"id": "pm", "title": "Catch-all", "initiative_id": None, "status": "open"}], initiatives=[], goals=[], routes=[], product_systems={}, default_projects={"jira:NDT:Bug": "pm"})
+        a = Attributor(c, resolver())
+        slices = a.slices(commit("d", T0, "Ada", "ada@x.com", ["jira:NDT-2"]))
+        cov = coverage(slices)
+        self.assertEqual((cov["placed_pct"], cov["evidence_pct"], cov["declared_pct"]), (100.0, 0.0, 100.0))
+
+
 class StatusNormalizationTest(unittest.TestCase):
     def test_resolved_by_name_is_not_in_progress(self) -> None:
         from pm_studio.signals.metrics import normalize_cat
