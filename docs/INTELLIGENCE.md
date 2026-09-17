@@ -33,7 +33,7 @@ previous) -> CollectResult(signals, facts, notes, truncated)`. Registered in
 
 | id | reads | how |
 |---|---|---|
-| `git` | every nested checkout under each `[systems]` path (+ `extra_repos`), discovered to depth 3 | `git log --all --numstat` since the configured date; ticket keys from subject+body (Jira `PROJ-123`, ADO `#1234` / `ticket #1234` / `AB#1234`; PR numbers are stripped first); merge vs commit; AI co-author trailers; bot authors carry zero weight |
+| `git` | every nested checkout under each `[systems]` path (+ `extra_repos`), discovered to depth 3 | `git fetch --all --prune` first (default; the checkout is a window onto the remote, so every pushed branch counts), then `git log --all --numstat` since the configured date; ticket keys from subject+body (Jira `PROJ-123`, ADO `#1234` / `ticket #1234` / `AB#1234`; PR numbers are stripped first); merge vs commit; AI co-author trailers; bot authors carry zero weight |
 | `jira` | full changelog, worklogs and comments for every issue in the tracker's projects | `/rest/api/3/search/jql?expand=changelog` in pages of 100 (~4k issues in ~60 requests); per-issue top-ups where a list overflowed; status names mapped to categories via `/rest/api/3/status`; incremental on `updated` |
 | `ado` | every work item revision | `wit/reporting/workitemrevisions` (1,000 per call, continuation token kept for the next run); revisions diffed per item into state / assignee / CompletedWork (booked as worklog) / comment / field signals; state categories from `workitemtypes` |
 | `ado-prs` | pull requests with reviewers and votes | `git/pullrequests` per project in `ado_pr_projects`; attributed by work item ids in title and branch |

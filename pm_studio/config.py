@@ -335,8 +335,13 @@ class SignalsConfig:
     capacity_hours_per_day: float = 8.0
     # IANA zone used to bucket instants into working days and hours.
     timezone: str = "America/New_York"
-    # Background refresh cadence; 0 disables the loop (manual refresh only).
-    auto_refresh_minutes: float = 180.0
+    # Background refresh cadence; 0 disables the loop (manual refresh only). Every
+    # source is incremental after its first pull, so a short cadence is cheap.
+    auto_refresh_minutes: float = 15.0
+    # `git fetch --all --prune` each checkout before scanning, so work on any branch
+    # anyone has pushed is in the ledger within one refresh - not only what somebody
+    # pulled into this machine. Uses the checkouts' own remotes and credentials.
+    git_fetch: bool = True
     # Extra repo-root-relative git checkouts to scan beyond every [systems] path.
     extra_repos: tuple[str, ...] = ()
     # Model for the intelligence judge; empty = strongest declared (opus tier).
@@ -933,7 +938,8 @@ def _parse_signals(raw: dict) -> SignalsConfig:
         since=since,
         capacity_hours_per_day=num("capacity_hours_per_day", 8.0),
         timezone=str(table.get("timezone", "America/New_York")).strip() or "America/New_York",
-        auto_refresh_minutes=num("auto_refresh_minutes", 180.0),
+        auto_refresh_minutes=num("auto_refresh_minutes", 15.0),
+        git_fetch=bool(table.get("git_fetch", True)),
         extra_repos=strings("extra_repos"),
         judge_model=str(table.get("judge_model", "")).strip(),
         auto_judge=bool(table.get("auto_judge", False)),

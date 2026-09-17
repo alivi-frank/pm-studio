@@ -869,7 +869,8 @@ design in [INTELLIGENCE.md](INTELLIGENCE.md).
 since = "2024-01-01"              # earliest activity ever pulled (git, Jira, ADO)
 capacity_hours_per_day = 8.0      # what one active person-day is worth
 timezone = "America/New_York"     # working days and hours are bucketed in this zone
-auto_refresh_minutes = 180        # background re-pull cadence; 0 = only the page's button
+auto_refresh_minutes = 15         # background re-pull cadence; 0 = only the page's button
+git_fetch = true                  # fetch every checkout before scanning (all pushed branches count)
 extra_repos = []                  # repo-root-relative checkouts beyond the [systems] paths
 judge_model = ""                  # empty = the strongest declared model (opus tier)
 auto_judge = false                # run the judge after every refresh

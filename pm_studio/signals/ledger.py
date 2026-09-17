@@ -186,7 +186,7 @@ def summarize_facts(source_id: str, result: CollectResult) -> dict:
     facts = result.facts or {}
     if source_id == "git":
         repos = facts.get("repos") or {}
-        return {"repos": len(repos), "newest_at": max((r.get("newest_at") or 0) for r in repos.values()) if repos else None,
+        return {"repos": len(repos), "fetched": facts.get("fetched"), "newest_at": max((r.get("newest_at") or 0) for r in repos.values()) if repos else None,
                 "repo_rows": sorted(({"repo": k, **{kk: vv for kk, vv in v.items() if kk != "error"}, "error": v.get("error")} for k, v in repos.items()), key=lambda r: -(r.get("commits") or 0))}
     if source_id in ("jira", "ado"):
         return {"issues": len(facts.get("issues") or {}), "refetched": facts.get("refetched", facts.get("touched"))}

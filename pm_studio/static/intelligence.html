@@ -305,7 +305,10 @@
   }
   function renderBanner(d) {
     const b = $("banner"); const running = (d.sources || []).filter((s) => s.refreshing).map((s) => s.label);
-    b.innerHTML = running.length ? `<div class="note"><span class="spin"></span>Refreshing ${esc(running.join(", "))} — the figures below are from the previous run.</div>` : "";
+    const fr = d.freshness || {}; const asOf = fr.data_as_of; const age = asOf ? (Date.now() / 1000 - asOf) / 3600 : null;
+    const stale = age != null && age > 6;
+    const line = asOf ? `<div class="note${stale ? " warn" : ""}" style="display:flex;gap:14px;flex-wrap:wrap;align-items:baseline"><span><b>Data as of ${esc(when(asOf))}</b> — the newest activity every core source has seen${stale ? " (over 6 h old: check the Sources panel)" : ""}.</span>${fr.by_source ? Object.entries(fr.by_source).filter(([k, v]) => v.newest_signal_at && k !== "inbox").map(([k, v]) => `<span class="muted">${esc(k)} ${esc(when(v.newest_signal_at))}</span>`).join("") : ""}${fr.next_refresh_at ? `<span class="muted">next refresh ${esc(ago(fr.next_refresh_at).replace(" ago", "").replace("just now", "any moment"))}${fr.next_refresh_at > Date.now() / 1000 ? " from now" : " (due)"}</span>` : ""}</div>` : "";
+    b.innerHTML = (running.length ? `<div class="note"><span class="spin"></span>Refreshing ${esc(running.join(", "))} — the figures below are from the previous run.</div>` : "") + line;
   }
 
   // ---- charts ----
@@ -545,7 +548,7 @@
 
   function renderSources() {
     const src = state.data.sources; $("src-count").textContent = `${src.filter((s) => s.configured).length} of ${src.length} configured · last refresh ${ago(state.data.last_refresh_at)}`;
-    $("sources-table").innerHTML = `<table><thead><tr><th>Source</th><th>Kind</th><th>Status</th><th class="num">Signals</th><th>Collected</th><th>Detail</th></tr></thead><tbody>${src.map((s) => `<tr><td><b>${esc(s.label)}</b></td><td class="muted">${esc(s.category)}</td><td><span class="status-dot ${esc(s.refreshing ? "cached" : (s.state || ""))}"></span>${s.refreshing ? "refreshing…" : (!s.configured ? "not configured" : esc(s.state || "never"))}${s.error ? `<div class="muted" style="font-size:0.8em;color:var(--critical)">${esc(s.error)}</div>` : ""}${s.notes && s.notes.length ? `<div class="muted" style="font-size:0.8em">${esc(s.notes.slice(0, 3).join(" · "))}</div>` : ""}</td><td class="num">${fmt(s.signals || 0)}</td><td class="muted">${s.collected_at ? `${ago(s.collected_at)}${s.seconds ? ` (${fmt(s.seconds)}s)` : ""}` : "—"}</td><td class="second" style="font-size:0.85em">${esc(s.detail || "")}${s.summary && s.summary.issues != null ? ` · ${fmt(s.summary.issues)} tickets with history` : ""}${s.summary && s.summary.repos != null ? ` · ${s.summary.repos} repos` : ""}${s.summary && s.summary.pull_requests != null ? ` · ${fmt(s.summary.pull_requests)} PRs` : ""}${s.summary && s.summary.agent_cost_usd != null ? ` · ${money(s.summary.agent_cost_usd)} agent spend` : ""}</td></tr>`).join("")}</tbody></table>`;
+    $("sources-table").innerHTML = `<table><thead><tr><th>Source</th><th>Kind</th><th>Status</th><th class="num">Signals</th><th>Collected</th><th>Detail</th></tr></thead><tbody>${src.map((s) => `<tr><td><b>${esc(s.label)}</b></td><td class="muted">${esc(s.category)}</td><td><span class="status-dot ${esc(s.refreshing ? "cached" : (s.state || ""))}"></span>${s.refreshing ? "refreshing…" : (!s.configured ? "not configured" : esc(s.state || "never"))}${s.error ? `<div class="muted" style="font-size:0.8em;color:var(--critical)">${esc(s.error)}</div>` : ""}${s.notes && s.notes.length ? `<div class="muted" style="font-size:0.8em">${esc(s.notes.slice(0, 3).join(" · "))}</div>` : ""}</td><td class="num">${fmt(s.signals || 0)}</td><td class="muted">${s.collected_at ? `${ago(s.collected_at)}${s.seconds ? ` (${fmt(s.seconds)}s)` : ""}` : "—"}</td><td class="second" style="font-size:0.85em">${esc(s.detail || "")}${s.summary && s.summary.issues != null ? ` · ${fmt(s.summary.issues)} tickets with history` : ""}${s.summary && s.summary.repos != null ? ` · ${s.summary.repos} repos${s.summary.fetched != null ? ` (${s.summary.fetched} fetched)` : ""}` : ""}${s.summary && s.summary.pull_requests != null ? ` · ${fmt(s.summary.pull_requests)} PRs` : ""}${s.summary && s.summary.agent_cost_usd != null ? ` · ${money(s.summary.agent_cost_usd)} agent spend` : ""}</td></tr>`).join("")}</tbody></table>`;
     const git = src.find((s) => s.id === "git"); const repos = (git && git.summary && git.summary.repo_rows) || [];
     $("repo-facts").innerHTML = repos.length ? `<table><thead><tr><th>Repository</th><th>System</th><th class="num">Commits since ${esc(state.data.config.since)}</th><th class="num">Keyed</th><th class="num">Authors</th><th>Newest commit</th></tr></thead><tbody>${repos.map((r) => `<tr><td>${esc(r.repo)}</td><td class="muted">${esc(r.system || "—")}</td><td class="num">${fmt(r.commits)}</td><td class="num">${r.human_commits ? pct(100 * r.keyed_commits / r.human_commits) : "—"}</td><td class="num">${r.authors || 0}</td><td class="muted">${r.newest_at ? new Date(r.newest_at * 1000).toLocaleDateString() : (r.error ? esc(r.error) : "—")}</td></tr>`).join("")}</tbody></table>` : '<div class="empty">No repositories scanned yet.</div>';
   }
@@ -557,6 +560,10 @@
       if (d.refreshing) pollRefresh();
     } catch (e) { $("banner").innerHTML = `<div class="note warn">Could not load the intelligence report: ${esc(e.message)}</div>`; }
   }
+  // Live enough: re-read the report every five minutes while the tab is visible, and
+  // the moment it becomes visible again after being hidden.
+  setInterval(() => { if (document.visibilityState === "visible" && !document.getElementById("dlg").open) load(); }, 5 * 60 * 1000);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && state.data && Date.now() / 1000 - state.data.generated_at > 300) load(); });
   applyPreset("90");
   if (window.PMNav && PMNav.ready) {
     PMNav.ready.then(mountControls);

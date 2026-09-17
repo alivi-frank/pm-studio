@@ -5,9 +5,12 @@ what changed, and - when the team writes them - which ticket. This adapter reads
 `git log --all` on each repo under a [systems] path (plus `extra_repos`), so branches
 that never merged still count as work done.
 
-What it deliberately does NOT do: fetch. Reading is local and offline; the Sources
-panel shows each repo's newest commit so a stale checkout is visible rather than
-silently under-counting.
+Before scanning, each checkout is fetched (`git fetch --all --prune`, on by default)
+so commits pushed to ANY branch by anyone are in the ledger within one refresh - the
+checkout on this machine is a window onto the remote, not the source of truth. A
+fetch that fails (no network, expired credential) is a note on the Sources panel and
+the scan proceeds on what is local; the newest commit per repo is shown so staleness
+is visible rather than silently under-counted.
 """
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ RECORD_SEP = "\x1e"
 # next record. Leading, each chunk is "fields, then that commit's own numstat".
 LOG_FORMAT = RECORD_SEP + FIELD_SEP.join(["%H", "%an", "%ae", "%aI", "%P", "%s", "%b"])
 GIT_TIMEOUT_SECONDS = 300
+FETCH_TIMEOUT_SECONDS = 120
 MAX_DISCOVERY_DEPTH = 3
 # Authors that are automation, not people. Their commits still count as repository
 # motion but never as anyone's effort.
@@ -180,8 +184,9 @@ class GitSource:
     label = "Git repositories"
     category = "code"
 
-    def __init__(self, repo_root: Path, system_paths: dict[str, str], extra_repos: tuple[str, ...] = (), *, jira_projects: set[str] | None = None, ado_enabled: bool = False, weights: dict[str, float] | None = None, runner=None) -> None:
+    def __init__(self, repo_root: Path, system_paths: dict[str, str], extra_repos: tuple[str, ...] = (), *, jira_projects: set[str] | None = None, ado_enabled: bool = False, weights: dict[str, float] | None = None, runner=None, fetch: bool = False) -> None:
         self.repo_root = repo_root
+        self.fetch = fetch
         # system id -> repo-root-relative path (only systems that declared one)
         self.system_paths = {k: v for k, v in system_paths.items() if v}
         self.extra_repos = extra_repos
@@ -198,12 +203,13 @@ class GitSource:
         return {
             "id": self.id, "label": self.label, "category": self.category,
             "configured": self.configured,
-            "detail": f"{len(self.system_paths)} system paths" + (f" + {len(self.extra_repos)} extra" if self.extra_repos else ""),
+            "detail": f"{len(self.system_paths)} system paths" + (f" + {len(self.extra_repos)} extra" if self.extra_repos else "") + (" · fetched before each scan" if self.fetch else " · local refs only (git_fetch = false)"),
         }
 
     @staticmethod
     def _default_runner(args: list[str], cwd: Path) -> str:
-        proc = subprocess.run(args, cwd=str(cwd), capture_output=True, text=True, timeout=GIT_TIMEOUT_SECONDS, errors="replace")
+        timeout = FETCH_TIMEOUT_SECONDS if args[:2] == ["git", "fetch"] else GIT_TIMEOUT_SECONDS
+        proc = subprocess.run(args, cwd=str(cwd), capture_output=True, text=True, timeout=timeout, errors="replace", env={**__import__("os").environ, "GIT_TERMINAL_PROMPT": "0"})
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr.strip()[:300] or f"git exited {proc.returncode}")
         return proc.stdout
@@ -223,10 +229,19 @@ class GitSource:
         repos = discover_repos(self.repo_root, roots)
         since_iso = datetime.fromtimestamp(since, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         repo_facts: dict[str, dict] = {}
+        fetched = 0
         for rel in repos:
             path = self.repo_root / rel
             system = self.system_for(rel)
             started = time.time()
+            fetch_error = ""
+            if self.fetch:
+                try:
+                    self._run(["git", "fetch", "--all", "--prune", "--quiet"], path)
+                    fetched += 1
+                except (RuntimeError, subprocess.TimeoutExpired, OSError) as exc:
+                    fetch_error = str(exc)[:160] or "fetch failed"
+                    result.notes.append(f"{rel}: fetch failed ({fetch_error})")
             try:
                 raw = self._run(["git", "log", "--all", "--no-color", f"--since={since_iso}", f"--format={LOG_FORMAT}", "--numstat"], path)
             except (RuntimeError, subprocess.TimeoutExpired, OSError) as exc:
@@ -240,6 +255,8 @@ class GitSource:
             plain = sum(1 for s in signals if s.kind == KIND_COMMIT and not s.meta.get("bot"))
             repo_facts[rel] = {
                 "system": system,
+                "fetched": self.fetch and not fetch_error,
+                "fetch_error": fetch_error,
                 "commits": len(signals),
                 "keyed_commits": keyed,
                 "human_commits": plain,
@@ -247,5 +264,5 @@ class GitSource:
                 "authors": len({s.actor_email for s in signals if not s.meta.get("bot")}),
                 "scan_seconds": round(time.time() - started, 2),
             }
-        result.facts = {"repos": repo_facts, "collected_at": time.time()}
+        result.facts = {"repos": repo_facts, "fetched": fetched, "fetch_enabled": self.fetch, "collected_at": time.time()}
         return result

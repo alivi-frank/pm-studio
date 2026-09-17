@@ -84,7 +84,7 @@ class IntelligenceService:
                 sources.append(AdoHistorySource(t.id, t.base_url, tuple(t.projects), t.token, weights=weights))
                 if self.config.ado_pr_projects:
                     sources.append(AdoPullRequestSource(t.id, t.base_url, tuple(self.config.ado_pr_projects), t.token, repo_resolver=self._repo_resolver(system_paths), weights=weights))
-        git = GitSource(self.repo_root, system_paths, self.config.extra_repos, jira_projects=jira_projects or None, ado_enabled=ado_enabled, weights=weights)
+        git = GitSource(self.repo_root, system_paths, self.config.extra_repos, jira_projects=jira_projects or None, ado_enabled=ado_enabled, weights=weights, fetch=self.config.git_fetch)
         sources.insert(0, git)
         sources.append(PMActivitySource(self.data_dir.parent, weights=weights))
         sources.append(InboxSource(self.data_dir / "inbox", jira_projects=jira_projects or None, ado_enabled=ado_enabled, weights=weights))
@@ -291,6 +291,15 @@ class IntelligenceService:
             "ai_cost_usd": ai_cost, "ai_commits_pct": workflow["ai_assisted_pct"], "signals": len(in_window),
             "cycle_p50": flow["cycle_days"]["p50"], "maintenance_pct": round(100.0 * sum(r["hours"] for r in rows if r["maintenance"]) / total_hours, 1) if total_hours else 0.0,
         }
+        # Freshness: the newest signal each source has actually seen, and when it looked.
+        # "Data as of" on the page is the oldest of the configured sources' newest signal,
+        # because a report is only as current as its stalest input.
+        freshness = {}
+        for source_id, result in self.ledger.results.items():
+            status = self.ledger.status.get(source_id, {})
+            newest = max((sg.at for sg in result.signals), default=None)
+            freshness[source_id] = {"newest_signal_at": newest, "collected_at": status.get("collected_at"), "state": status.get("state")}
+        core = [f["newest_signal_at"] for sid, f in freshness.items() if sid in ("git", "jira", "ado") and f["newest_signal_at"]]
         latest = self.judgments.latest()
         history = [{"at": j.get("at"), "scores": j.get("scores"), "kind": j.get("kind")} for j in self.judgments.all() if j.get("scores")][-24:]
         report = {
@@ -305,8 +314,9 @@ class IntelligenceService:
             "judge": {"latest": latest, "history": history, "running": self.judge_running, "error": self.judge_error, "self_assessment": None},
             "identity": {"suggestions": resolver.suggestions()[:40], "unresolved": len(resolver.unresolved)},
             "sources": self.ledger.describe(), "refreshing": self.ledger.is_refreshing, "last_refresh_at": self.ledger.last_refresh_at,
+            "freshness": {"by_source": freshness, "data_as_of": min(core) if core else None, "next_refresh_at": (self.ledger.last_refresh_at + self.config.auto_refresh_minutes * 60) if self.ledger.last_refresh_at and self.config.auto_refresh_minutes > 0 else None},
             "lookup": {"initiatives": {k: {"title": v.get("title"), "is_maintenance": v.get("is_maintenance"), "status": v.get("status"), "goal_ids": v.get("goal_ids")} for k, v in initiatives.items()}, "projects": {k: {"title": v.get("title"), "initiative_id": v.get("initiative_id"), "status": v.get("status")} for k, v in projects.items()}, "goals": {k: v.get("title") for k, v in goals.items()}, "people": names, "products": self.stores.get("product_labels", lambda: {})(), "systems": {k: getattr(v, "label", k) for k, v in self.systems.items()}},
-            "tuning": self.tuning.snapshot(), "config": {"since": self.config.since, "capacity_hours_per_day": self.config.capacity_hours_per_day, "allocation_mode": self.config.allocation_mode, "worklog_trust": dict(self.config.worklog_trust), "worklog_trust_default": "signal", "default_projects": dict(self.config.default_projects), "timezone": self.config.timezone, "auto_refresh_minutes": self.config.auto_refresh_minutes, "auto_judge": self.config.auto_judge},
+            "tuning": self.tuning.snapshot(), "config": {"since": self.config.since, "git_fetch": self.config.git_fetch, "capacity_hours_per_day": self.config.capacity_hours_per_day, "allocation_mode": self.config.allocation_mode, "worklog_trust": dict(self.config.worklog_trust), "worklog_trust_default": "signal", "default_projects": dict(self.config.default_projects), "timezone": self.config.timezone, "auto_refresh_minutes": self.config.auto_refresh_minutes, "auto_judge": self.config.auto_judge},
         }
         report["judge"]["self_assessment"] = judge_mod.self_assessment(judge_mod.build_dossier(report, feedback=self.feedback.all(), previous=latest, thresholds=thresholds))
         self._report_cache[key] = report

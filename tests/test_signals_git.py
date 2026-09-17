@@ -75,6 +75,25 @@ class GitSourceTest(unittest.TestCase):
         far_future = 4_000_000_000.0
         self.assertEqual(source.collect(far_future).signals, [])
 
+    def test_fetch_runs_first_and_a_failed_fetch_is_a_note(self) -> None:
+        calls = []
+        real = GitSource._default_runner
+        def runner(args, cwd):
+            calls.append(args[:2])
+            if args[:2] == ["git", "fetch"]:
+                raise RuntimeError("could not read Username")
+            return real(args, cwd)
+        source = GitSource(self.root, {"svc": "src/svc"}, runner=runner, fetch=True)
+        result = source.collect(0.0)
+        self.assertEqual(calls[0], ["git", "fetch"])
+        self.assertEqual(len(result.signals), 4)  # the scan still ran on local refs
+        self.assertIn("fetch failed", result.notes[0])
+        self.assertEqual(result.facts["fetched"], 0)
+        self.assertEqual(result.facts["repos"]["src/svc/backend"]["fetch_error"], "could not read Username")
+        off = GitSource(self.root, {"svc": "src/svc"}, runner=runner, fetch=False)
+        calls.clear(); off.collect(0.0)
+        self.assertNotIn(["git", "fetch"], calls)
+
     def test_broken_repo_is_a_note_not_a_crash(self) -> None:
         def runner(args, cwd):
             raise RuntimeError("boom")
