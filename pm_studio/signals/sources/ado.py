@@ -289,11 +289,10 @@ class AdoPullRequestSource:
     def _w(self, kind: str) -> float:
         return self.weights.get(kind, DEFAULT_WEIGHTS[kind])
 
-    def _prs(self, project: str, since: float):
+    def _query(self, project: str, **criteria):
         skip = 0
-        start_iso = datetime.fromtimestamp(since, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         while True:
-            params = {"api-version": "7.1", "searchCriteria.status": "all", "searchCriteria.minTime": start_iso, "searchCriteria.queryTimeRangeType": "created", "$top": PR_PAGE, "$skip": skip}
+            params = {"api-version": "7.1", "$top": PR_PAGE, "$skip": skip, **{f"searchCriteria.{k}": v for k, v in criteria.items()}}
             payload = self._get(f"{self.base_url}/{quote(project)}/_apis/git/pullrequests?{qs(params)}", self._headers())
             rows = payload.get("value") or []
             for row in rows:
@@ -302,14 +301,42 @@ class AdoPullRequestSource:
                 return
             skip += len(rows)
 
+    def _prs(self, project: str, since: float, watermark: float | None = None):
+        """Every PR that can have changed since `watermark`: created since it, closed
+        since it, or still open. The first run (no watermark) reads everything since
+        `since`. Duplicates across the three queries are dropped by id."""
+        seen: set = set()
+        if watermark is None:
+            start_iso = datetime.fromtimestamp(since, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            queries = [{"status": "all", "minTime": start_iso, "queryTimeRangeType": "created"}]
+        else:
+            mark_iso = datetime.fromtimestamp(max(since, watermark - 2 * 86400), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            queries = [
+                {"status": "all", "minTime": mark_iso, "queryTimeRangeType": "created"},
+                {"status": "completed", "minTime": mark_iso, "queryTimeRangeType": "closed"},
+                {"status": "abandoned", "minTime": mark_iso, "queryTimeRangeType": "closed"},
+                {"status": "active"},
+            ]
+        for criteria in queries:
+            for row in self._query(project, **criteria):
+                key = (project, row.get("pullRequestId"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield row
+
     def collect(self, since: float, previous: CollectResult | None = None) -> CollectResult:
         result = CollectResult()
+        prev_facts = (previous.facts if previous else None) or {}
+        watermark = prev_facts.get("collected_at")
         count = 0
+        refetched: set = set()
         for project in self.projects:
             try:
-                for pr in self._prs(project, since):
+                for pr in self._prs(project, since, watermark):
                     count += 1
                     pr_id = pr.get("pullRequestId")
+                    refetched.add((project, pr_id))
                     repo_name = (pr.get("repository") or {}).get("name") or ""
                     repo_rel, system = self._resolve_repo(repo_name)
                     text = f"{pr.get('title', '')} {pr.get('sourceRefName', '')} {pr.get('description', '') or ''}"
@@ -337,5 +364,12 @@ class AdoPullRequestSource:
             except SourceError as exc:
                 result.truncated = True
                 result.notes.append(f"{project}: {exc}")
-        result.facts = {"pull_requests": count, "collected_at": time.time()}
+        # PRs not touched since the watermark keep last run's signals.
+        carried = 0
+        if previous and watermark:
+            for signal in previous.signals:
+                if (signal.meta.get("project"), signal.meta.get("pr")) not in refetched and signal.at >= since:
+                    result.signals.append(signal)
+                    carried += 1
+        result.facts = {"pull_requests": count, "carried": carried, "total_pull_requests": (prev_facts.get("total_pull_requests") or 0) + count if watermark else count, "collected_at": time.time() if not result.truncated else watermark}
         return result

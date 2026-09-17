@@ -138,6 +138,27 @@ class AdoSourceTest(unittest.TestCase):
 
 
 class AdoPullRequestTest(unittest.TestCase):
+    def test_second_run_queries_incrementally_and_carries_unchanged_prs(self) -> None:
+        pr = {"pullRequestId": 5, "title": "#12099 fix", "sourceRefName": "refs/heads/x", "targetRefName": "refs/heads/master", "status": "completed", "creationDate": "2026-03-01T10:00:00Z", "closedDate": "2026-03-02T10:00:00Z", "createdBy": {"displayName": "Ada", "uniqueName": "ada@x.com"}, "repository": {"name": "R"}, "reviewers": []}
+        urls = []
+        def fetch(url, headers):
+            urls.append(url)
+            return {"value": [pr]} if "queryTimeRangeType=created" in url and "status=all" in url else {"value": []}
+        source = AdoPullRequestSource("ado", "https://ado.example/org", ("Proj",), "pat", fetch=fetch)
+        first = source.collect(0.0)
+        self.assertEqual(len(first.signals), 2)
+        self.assertEqual(len(urls), 1)  # first run: one created-since query
+        urls.clear()
+        def fetch_quiet(url, headers):
+            urls.append(url)
+            return {"value": []}
+        again = AdoPullRequestSource("ado", "https://ado.example/org", ("Proj",), "pat", fetch=fetch_quiet)
+        second = again.collect(0.0, first)
+        self.assertEqual(len(urls), 4)  # created / completed / abandoned since watermark + active
+        self.assertTrue(any("queryTimeRangeType=closed" in u for u in urls))
+        self.assertEqual(len(second.signals), 2)  # carried over
+        self.assertEqual(second.facts["carried"], 2)
+
     def test_prs_become_open_merge_review_signals(self) -> None:
         def fetch(url, headers):
             return {"value": [{"pullRequestId": 5, "title": "ticket #12099 fix", "sourceRefName": "refs/heads/12099/feat", "targetRefName": "refs/heads/master", "status": "completed",
