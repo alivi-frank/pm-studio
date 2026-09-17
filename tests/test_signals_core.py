@@ -83,6 +83,27 @@ class DefaultProjectTest(unittest.TestCase):
         self.assertEqual(resolve_ref(c2, "jira:NDT-3")["via"], VIA_ROUTE)  # task: no declaration, unknown target dropped
 
 
+class DefaultRepoTest(unittest.TestCase):
+    def test_unkeyed_commits_land_on_the_declared_repo_home(self) -> None:
+        c = AttributionContext.build(tickets=[], changes=[], projects=[{"id": "p9", "title": "Data platform", "initiative_id": None, "status": "open"}], initiatives=[], goals=[], routes=[], product_systems={}, default_repos={"src/dataflow": "p9", "nemtos": "p9"})
+        a = Attributor(c, resolver())
+        by_path = a.slices(commit("a", T0, "Ada", "ada@x.com", [], repo="src/dataflow/sub", system="dataflow"))[0]
+        by_system = a.slices(commit("b", T0, "Ada", "ada@x.com", [], repo="src/nemtos", system="nemtos"))[0]
+        other = a.slices(commit("c", T0, "Ada", "ada@x.com", [], repo="src/pdm", system="pdm-stack"))[0]
+        self.assertEqual((by_path["via"], by_path["project_id"]), ("default-project", "p9"))
+        self.assertEqual((by_system["via"], by_system["project_id"]), ("default-project", "p9"))
+        self.assertEqual((other["via"], other["project_id"]), (VIA_REPO, None))
+
+
+class SuggestionSafetyTest(unittest.TestCase):
+    def test_first_name_alone_is_never_a_candidate(self) -> None:
+        r = IdentityResolver([{"id": "ruque", "name": "Jorge Ruque", "email": "jorge.ruque@x.com", "identities": []}, {"id": "gonz", "name": "Jorge Gonzalez Perez", "email": "", "identities": []}])
+        r.resolve("Jorge Luis Piña González", "jorge.gonzalez@x.com")
+        sug = r.suggestions()[0]
+        self.assertNotIn("ruque", sug["candidates"])
+        self.assertIn("gonz", sug["candidates"])  # surname shared through the email local part
+
+
 class AttributorTest(unittest.TestCase):
     def test_slices_split_evenly_and_carry_people(self) -> None:
         a = Attributor(ctx(), resolver())

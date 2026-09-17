@@ -37,8 +37,12 @@ class GitSourceTest(unittest.TestCase):
         commit(self.repo, "chore: no ticket here", filename="g.txt")
         run(["git", "checkout", "-q", "-b", "feature/NDT-101-thing"], self.repo)
         commit(self.repo, "fix: ticket #1234 on branch", filename="h.txt")
+        commit(self.repo, "chore: on the branch, no key", filename="i.txt")
         run(["git", "checkout", "-q", "main"], self.repo)
         run(["git", "merge", "-q", "--no-ff", "-m", "Merge branch 'feature/NDT-101-thing'", "feature/NDT-101-thing"], self.repo)
+        # Branches get deleted after merging: the merge commit is then the only thing
+        # that still names the ticket for the branch's unkeyed commits.
+        run(["git", "branch", "-q", "-d", "feature/NDT-101-thing"], self.repo)
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -61,14 +65,32 @@ class GitSourceTest(unittest.TestCase):
         self.assertEqual(first.actor_email, "ada@example.com")
         self.assertEqual(first.meta["files"], 1)
         self.assertEqual(by_subject["chore: no ticket here"].refs, [])
-        self.assertEqual(by_subject["fix: ticket #1234 on branch"].refs, ["ado:1234"])
+        self.assertEqual(by_subject["fix: ticket #1234 on branch"].refs, ["ado:1234"])  # message key wins
+        self.assertFalse(by_subject["fix: ticket #1234 on branch"].meta["key_from_branch"])
         merge = by_subject["Merge branch 'feature/NDT-101-thing'"]
         self.assertEqual(merge.kind, KIND_MERGE)
         self.assertEqual(merge.refs, ["jira:NDT-101"])
         self.assertEqual(merge.meta["branch"], "feature/NDT-101-thing")
+        # The unkeyed commit on the merged branch inherits the merge's key; the main
+        # commit the branch also reaches does not take the branch's name.
+        inherited = by_subject["chore: on the branch, no key"]
+        self.assertEqual(inherited.refs, ["jira:NDT-101"])
+        self.assertEqual(inherited.meta["key_from_merge"], merge.meta["sha"])
         facts = result.facts["repos"]["src/svc/backend"]
-        self.assertEqual(facts["commits"], 4)
-        self.assertEqual(facts["keyed_commits"], 2)
+        self.assertEqual(facts["commits"], 5)
+        self.assertEqual(facts["keyed_commits"], 3)
+
+    def test_unkeyed_commit_takes_the_key_from_its_branch(self) -> None:
+        run(["git", "checkout", "-q", "-b", "feature/NDT-777-branch-only"], self.repo)
+        commit(self.repo, "chore: tidy, no key in the message", filename="z.txt")
+        run(["git", "checkout", "-q", "main"], self.repo)
+        source = GitSource(self.root, {"svc": "src/svc"}, jira_projects={"NDT"})
+        by_subject = {s.meta["subject"]: s for s in source.collect(0.0).signals}
+        tidy = by_subject["chore: tidy, no key in the message"]
+        self.assertEqual(tidy.refs, ["jira:NDT-777"])
+        self.assertTrue(tidy.meta["key_from_branch"])
+        # A commit reachable only from main stays unkeyed.
+        self.assertEqual(by_subject["chore: no ticket here"].refs, [])
 
     def test_since_bounds_the_scan(self) -> None:
         source = GitSource(self.root, {"svc": "src/svc"})
@@ -86,7 +108,7 @@ class GitSourceTest(unittest.TestCase):
         source = GitSource(self.root, {"svc": "src/svc"}, runner=runner, fetch=True)
         result = source.collect(0.0)
         self.assertEqual(calls[0], ["git", "fetch"])
-        self.assertEqual(len(result.signals), 4)  # the scan still ran on local refs
+        self.assertEqual(len(result.signals), 5)  # the scan still ran on local refs
         self.assertIn("fetch failed", result.notes[0])
         self.assertEqual(result.facts["fetched"], 0)
         self.assertEqual(result.facts["repos"]["src/svc/backend"]["fetch_error"], "could not read Username")

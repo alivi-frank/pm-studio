@@ -74,10 +74,11 @@ class AttributionContext:
     systems_of_product: dict[str, list[str]] = field(default_factory=dict)
     capex_overrides: dict[str, bool] = field(default_factory=dict)  # initiative id -> capitalizable
     default_projects: dict[str, str] = field(default_factory=dict)  # "tracker:project[:type]" -> project id
+    default_repos: dict[str, str] = field(default_factory=dict)     # repo path or system id -> project id
     version: str = ""
 
     @classmethod
-    def build(cls, *, tickets: list[dict], changes: list[dict], projects: list[dict], initiatives: list[dict], goals: list[dict], routes: list[dict], product_systems: dict[str, tuple[str, ...]] | dict[str, list[str]], capex_overrides: dict[str, bool] | None = None, default_projects: dict[str, str] | None = None) -> "AttributionContext":
+    def build(cls, *, tickets: list[dict], changes: list[dict], projects: list[dict], initiatives: list[dict], goals: list[dict], routes: list[dict], product_systems: dict[str, tuple[str, ...]] | dict[str, list[str]], capex_overrides: dict[str, bool] | None = None, default_projects: dict[str, str] | None = None, default_repos: dict[str, str] | None = None) -> "AttributionContext":
         ctx = cls()
         for t in tickets:
             ctx.tickets[f"{t['tracker_id']}:{t['key']}"] = t
@@ -100,8 +101,9 @@ class AttributionContext:
                 ctx.products_of_system.setdefault(s, []).append(product)
         ctx.capex_overrides = dict(capex_overrides or {})
         ctx.default_projects = {k: v for k, v in (default_projects or {}).items() if v in ctx.projects}
+        ctx.default_repos = {k: v for k, v in (default_repos or {}).items() if v in ctx.projects}
         newest = max([float(x.get("updated_at") or 0) for x in list(projects) + list(initiatives) + list(changes)] or [0.0])
-        ctx.version = f"{len(tickets)}:{len(changes)}:{len(projects)}:{newest:.0f}:{len(ctx.capex_overrides)}:{sorted(ctx.default_projects.items())}"
+        ctx.version = f"{len(tickets)}:{len(changes)}:{len(projects)}:{newest:.0f}:{len(ctx.capex_overrides)}:{sorted(ctx.default_projects.items())}:{sorted(ctx.default_repos.items())}"
         return ctx
 
 
@@ -232,7 +234,19 @@ class Attributor:
             for ref in signal.refs:
                 targets.append(resolve_ref(self.ctx, ref))
         if not targets:
-            targets.append({"via": VIA_REPO if signal.repo else VIA_NONE, "ref": "", "ticket": None, "project_id": None, "initiative_id": None, "goal_ids": [], "product": None, "system": signal.system, "change_id": None})
+            home = None
+            if signal.repo:
+                # Longest declared path prefix wins, then the system.
+                for key, pid in sorted(self.ctx.default_repos.items(), key=lambda kv: -len(kv[0])):
+                    if signal.repo == key or signal.repo.startswith(key.rstrip("/") + "/"):
+                        home = pid
+                        break
+                if home is None and signal.system in self.ctx.default_repos:
+                    home = self.ctx.default_repos[signal.system]
+            if home:
+                targets.append({**_from_project(self.ctx, home, VIA_DEFAULT_PROJECT, "", None), "system": signal.system})
+            else:
+                targets.append({"via": VIA_REPO if signal.repo else VIA_NONE, "ref": "", "ticket": None, "project_id": None, "initiative_id": None, "goal_ids": [], "product": None, "system": signal.system, "change_id": None})
         share = 1.0 / len(targets)
         out = []
         for target in targets:

@@ -112,7 +112,7 @@ class IntelligenceService:
         ctx = AttributionContext.build(
             tickets=self.stores["tickets"](), changes=self.stores["changes"](), projects=self.stores["projects"](), initiatives=self.stores["initiatives"](), goals=self.stores["goals"](),
             routes=self.routes, product_systems=self.product_systems, capex_overrides=self.tuning.capex_overrides(),
-            default_projects=self.config.default_projects,
+            default_projects=self.config.default_projects, default_repos=self.config.default_repos,
         )
         people = self.stores["people"]()
         key = f"{len(people)}:{max([float(p.get('updated_at') or 0) for p in people] or [0]):.0f}:{self.aliases_path.stat().st_mtime if self.aliases_path.is_file() else 0}"
@@ -244,6 +244,7 @@ class IntelligenceService:
         for row in impact["initiatives"]:
             row["realization"] = realized["by_initiative"].get(row["initiative_id"]) or {"hours": 0.0, "realized": 0.0, "in_flight": 0.0, "stranded": 0.0, "untraceable": 0.0, "realization_pct": None, "stranded_pct": None, "lead_days_p50": None}
             row["prod_merges"] = merges.get(row["initiative_id"], 0)
+            row["declared_hours"] = round(sum(r["hours"] for r in rows if r["initiative_id"] == row["initiative_id"] and r["via"] == "default-project"), 1)
             m = mix.get(row["initiative_id"]) or {"code": 0.0, "tracker": 0.0}
             # What the hours rest on: code events (commits, PRs) vs tracker bookkeeping
             # (transitions, edits, comments). An initiative carried by typing, not
@@ -261,6 +262,9 @@ class IntelligenceService:
             row["maintenance"] = bool(init.get("is_maintenance"))
             row["status"] = init.get("status")
             row["capex_hours"] = round(sum(r["hours"] for r in rows if r["initiative_id"] == row["key"] and r["capex"]), 1)
+            # Hours placed by a declared default project, shown apart: a policy default
+            # must never read as a measurement.
+            row["declared_hours"] = round(sum(r["hours"] for r in rows if r["initiative_id"] == row["key"] and r["via"] == "default-project"), 1)
         by_project = _titled(rollup(rows, "project_id"), projects, "Unattributed")
         for row in by_project:
             row["initiative_id"] = (projects.get(row["key"] or "") or {}).get("initiative_id")
@@ -316,7 +320,7 @@ class IntelligenceService:
             "sources": self.ledger.describe(), "refreshing": self.ledger.is_refreshing, "last_refresh_at": self.ledger.last_refresh_at,
             "freshness": {"by_source": freshness, "data_as_of": min(core) if core else None, "next_refresh_at": (self.ledger.last_refresh_at + self.config.auto_refresh_minutes * 60) if self.ledger.last_refresh_at and self.config.auto_refresh_minutes > 0 else None},
             "lookup": {"initiatives": {k: {"title": v.get("title"), "is_maintenance": v.get("is_maintenance"), "status": v.get("status"), "goal_ids": v.get("goal_ids")} for k, v in initiatives.items()}, "projects": {k: {"title": v.get("title"), "initiative_id": v.get("initiative_id"), "status": v.get("status")} for k, v in projects.items()}, "goals": {k: v.get("title") for k, v in goals.items()}, "people": names, "products": self.stores.get("product_labels", lambda: {})(), "systems": {k: getattr(v, "label", k) for k, v in self.systems.items()}},
-            "tuning": self.tuning.snapshot(), "config": {"since": self.config.since, "git_fetch": self.config.git_fetch, "capacity_hours_per_day": self.config.capacity_hours_per_day, "allocation_mode": self.config.allocation_mode, "worklog_trust": dict(self.config.worklog_trust), "worklog_trust_default": "signal", "default_projects": dict(self.config.default_projects), "timezone": self.config.timezone, "auto_refresh_minutes": self.config.auto_refresh_minutes, "auto_judge": self.config.auto_judge},
+            "tuning": self.tuning.snapshot(), "config": {"since": self.config.since, "git_fetch": self.config.git_fetch, "capacity_hours_per_day": self.config.capacity_hours_per_day, "allocation_mode": self.config.allocation_mode, "worklog_trust": dict(self.config.worklog_trust), "worklog_trust_default": "signal", "default_projects": dict(self.config.default_projects), "default_repos": dict(self.config.default_repos), "timezone": self.config.timezone, "auto_refresh_minutes": self.config.auto_refresh_minutes, "auto_judge": self.config.auto_judge},
         }
         report["judge"]["self_assessment"] = judge_mod.self_assessment(judge_mod.build_dossier(report, feedback=self.feedback.all(), previous=latest, thresholds=thresholds))
         self._report_cache[key] = report

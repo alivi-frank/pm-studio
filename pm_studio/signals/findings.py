@@ -173,9 +173,15 @@ def detect(*, slices: list[dict], alloc_rows: list[dict], timelines: dict[str, d
 
     by_parent: dict[str, list[dict]] = defaultdict(list)
     for parent_ref, f in stale_candidates:
-        by_parent[parent_ref or f["entity"]].append(f)
+        # Fold key: the parent when there is one, else the title stem - twelve
+        # "Remove FF ..." tickets are one cleanup whether or not they share an epic.
+        key = parent_ref or _title_stem(ticket_title.get(f["entity"], "")) or f["entity"]
+        by_parent[key].append(f)
     for parent_ref, group in by_parent.items():
-        if len(group) >= T["sibling_fold_min"] and parent_ref in tickets:
+        if len(group) >= T["sibling_fold_min"] and parent_ref not in tickets and parent_ref.startswith("stem:"):
+            worst = max(group, key=lambda f: f.get("value") or 0)
+            findings.append(_finding("stale_epic", parent_ref, worst["severity"], f"{len(group)} silent tickets titled \u201c{parent_ref[5:]}\u2026\u201d", f"{len(group)} in-progress tickets with the same title stem are all silent; the quietest for {worst['value']:.0f} days. One decision covers them.", evidence=[{"ref": f["entity"], "title": f["title"].split(" · ", 1)[-1][:70] + f" — {f['value']:.0f}d idle"} for f in sorted(group, key=lambda f: -(f.get("value") or 0))[:8]], value=len(group), unit="stale siblings"))
+        elif len(group) >= T["sibling_fold_min"] and parent_ref in tickets:
             parent = tickets[parent_ref]
             worst = max(group, key=lambda f: f.get("value") or 0)
             findings.append(_finding("stale_epic", parent_ref, worst["severity"], f"{parent_ref.split(':', 1)[1]} · {(parent.get('title') or '')[:80]}", f"{len(group)} in-progress tickets under this {parent.get('raw_type') or parent.get('type') or 'parent'} are all silent; the quietest for {worst['value']:.0f} days. Decide the epic, not the children.", evidence=[{"ref": f["entity"], "title": f["title"].split(" · ", 1)[-1][:70] + f" — {f['value']:.0f}d idle"} for f in sorted(group, key=lambda f: -(f.get("value") or 0))[:8]], links={"url": parent.get("url", ""), "ref": parent_ref}, value=len(group), unit="stale children"))
@@ -320,6 +326,16 @@ def detect(*, slices: list[dict], alloc_rows: list[dict], timelines: dict[str, d
 
     findings.sort(key=lambda f: (SEVERITY_ORDER.get(f["severity"], 9), -(f.get("value") or 0)))
     return findings
+
+
+_STEM_STOP = {"the", "a", "an", "to", "for", "of", "in", "on", "and", "with", "from", "by", "at", "is", "be"}
+
+
+def _title_stem(title: str) -> str:
+    """The first three meaningful words of a title, lower-cased - "Remove FF release..."
+    tickets share one whatever follows."""
+    words = [w for w in "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in (title or "").lower()).split() if w not in _STEM_STOP and not w.isdigit()]
+    return "stem:" + " ".join(words[:3]) if len(words) >= 3 else ""
 
 
 def _looks_review(status: str) -> bool:

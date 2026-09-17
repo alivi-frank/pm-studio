@@ -444,16 +444,13 @@ def production_merges(slices: list[dict], *, start: float, end: float) -> dict:
     """Pull requests merged into a mainline branch, per initiative - a delivery event
     that does not depend on how the team slices tickets. Only sources that know the
     target branch (ADO pull requests) contribute; git merge commits name their source."""
-    out: dict = defaultdict(int)
-    seen: set = set()
+    # A PR naming tickets in two initiatives counts half for each (its slices carry
+    # equal shares), so the column sums to the number of merges and never double counts.
+    out: dict = defaultdict(float)
     for s in slices:
         if s["kind"] != KIND_PR_MERGED or s["at"] < start or s["at"] >= end:
             continue
-        key = (s["repo"], s["meta"].get("pr"))
-        if key in seen:
-            continue
         target = str(s["meta"].get("target") or "")
         if PROD_BRANCH_RE.match(target):
-            seen.add(key)
-            out[s["initiative_id"]] += 1
-    return dict(out)
+            out[s["initiative_id"]] += s["share"]
+    return {k: round(v, 1) for k, v in out.items()}

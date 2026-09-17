@@ -370,6 +370,10 @@ class SignalsConfig:
     # the hours; "ignore" drops it. Jira worklogs written by status-dwell automation are
     # exactly the case the default protects against.
     worklog_trust: dict[str, str] = field(default_factory=dict)
+    # Where commits with NO ticket key land, by repository path (repo-root-relative) or
+    # system id -> project id. For repositories whose commit convention strips keys.
+    # Reported as via="default-project", like default_projects.
+    default_repos: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -949,6 +953,7 @@ def _parse_signals(raw: dict) -> SignalsConfig:
         allocation_mode=str(table.get("allocation_mode", "observed")).strip() if str(table.get("allocation_mode", "observed")).strip() in ("observed", "scaled") else "observed",
         default_projects={str(k): str(v) for k, v in (table.get("default_projects") or {}).items()} if isinstance(table.get("default_projects"), dict) else {},
         worklog_trust={str(k): str(v) for k, v in (table.get("worklog_trust") or {}).items() if str(v) in ("full", "signal", "ignore")} if isinstance(table.get("worklog_trust"), dict) else {},
+        default_repos={str(k): str(v) for k, v in (table.get("default_repos") or {}).items()} if isinstance(table.get("default_repos"), dict) else {},
     )
 
 

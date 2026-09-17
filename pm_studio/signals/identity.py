@@ -174,9 +174,15 @@ class IdentityResolver:
                 tokens = name_tokens(record["name"])
                 if not tokens:
                     continue
-                if local_norm and local_norm not in GENERIC_LOCALPARTS and all(tok in normalize_name(record["name"]) for tok in local_norm.split() if len(tok) > 2):
-                    candidates.append(record["id"])
-                elif entry["name"] and name_tokens(entry["name"])[:1] == tokens[:1] and len(name_tokens(entry["name"])) >= 2:
+                # A candidate needs a SURNAME in common, never a first name alone: the
+                # judge caught "jorge.gonzalez" being offered "Jorge Ruque". The email's
+                # local part (first.last) or the display name must share at least one
+                # token beyond the first with the directory name.
+                local_tokens = [t for t in local_norm.split() if len(t) > 2] if local_norm and local_norm not in GENERIC_LOCALPARTS else []
+                handle_tokens = name_tokens(entry["name"]) if entry["name"] else ()
+                shared_surname = (set(local_tokens[1:]) | set(handle_tokens[1:])) & set(tokens[1:])
+                first_matches = bool(local_tokens and local_tokens[0] == tokens[0]) or bool(handle_tokens and handle_tokens[0] == tokens[0])
+                if shared_surname and (first_matches or len(shared_surname) >= 2):
                     candidates.append(record["id"])
             out.append({"handle": handle, "name": entry["name"], "email": entry["email"], "signals": entry["signals"], "candidates": candidates[:3], "person_id": entry["id"]})
         return out

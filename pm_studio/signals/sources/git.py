@@ -15,6 +15,7 @@ is visible rather than silently under-counted.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -38,7 +39,10 @@ RECORD_SEP = "\x1e"
 # The record separator LEADS each record: --numstat prints a commit's file lines AFTER
 # its format line, so a trailing separator would hand every commit's stats to the
 # next record. Leading, each chunk is "fields, then that commit's own numstat".
-LOG_FORMAT = RECORD_SEP + FIELD_SEP.join(["%H", "%an", "%ae", "%aI", "%P", "%s", "%b"])
+# %S (with --source) is the ref each commit was reached from - a branch named after
+# the ticket (feature/NDT-5619-...) keys every commit on it, even when the team's
+# commit convention keeps the key out of the message (nemtos, epicride).
+LOG_FORMAT = RECORD_SEP + FIELD_SEP.join(["%H", "%an", "%ae", "%aI", "%P", "%S", "%s", "%b"])
 GIT_TIMEOUT_SECONDS = 300
 FETCH_TIMEOUT_SECONDS = 120
 MAX_DISCOVERY_DEPTH = 3
@@ -113,19 +117,32 @@ def _branch_from_subject(subject: str) -> str:
     return ""
 
 
-def parse_log(raw: str, repo: str, system: str | None, *, jira_projects: set[str] | None, ado_enabled: bool, weights: dict[str, float]) -> list[Signal]:
-    """The git log records (LOG_FORMAT + --numstat) as signals."""
+MAINLINE_RE = re.compile(r"^(origin/)?(main|master|develop|development|prod|production|release|releases?/.*|release-candidate/.*)$", re.IGNORECASE)
+
+
+def parse_log(raw: str, repo: str, system: str | None, *, jira_projects: set[str] | None, ado_enabled: bool, weights: dict[str, float], mainline: set[str] | None = None) -> list[Signal]:
+    """The git log records (LOG_FORMAT + --numstat) as signals.
+
+    Keys come from the message first; failing that from the branch the commit was
+    reached from (%S) - except for commits on a mainline's own first-parent chain
+    (`mainline`), which git may report under whichever feature branch happens to also
+    reach them. Commits merged in from a keyed branch inherit the merge's key
+    (`inherit_merge_keys`), so squash-free feature branches stay attributed after the
+    branch is deleted."""
     signals: list[Signal] = []
+    mainline = mainline or set()
+    parents_of: dict[str, list[str]] = {}
     for record in raw.split(RECORD_SEP):
         if not record.strip():
             continue
         # The body field (%b) may contain newlines, so split on the field separator and
         # take this commit's numstat lines off the tail of the LAST field.
         parts = record.lstrip("\n").split(FIELD_SEP)
-        if len(parts) < 7:
+        if len(parts) < 8:
             continue
-        sha, name, email, when, parents, subject = parts[:6]
-        tail = FIELD_SEP.join(parts[6:])
+        sha, name, email, when, parents, source_ref, subject = parts[:7]
+        tail = FIELD_SEP.join(parts[7:])
+        source_ref = source_ref.strip().replace("refs/remotes/origin/", "").replace("refs/heads/", "").replace("refs/remotes/", "")
         body_lines: list[str] = []
         files = ins = dels = 0
         dirs: dict[str, int] = {}
@@ -144,7 +161,14 @@ def parse_log(raw: str, repo: str, system: str | None, *, jira_projects: set[str
         if at is None:
             continue
         is_merge = len(parents.split()) > 1
+        parents_of[sha] = parents.split()
         jira, ado = extract_ticket_refs(f"{subject}\n{body}", jira_projects=jira_projects)
+        from_ref = False
+        if not jira and not ado and source_ref and sha not in mainline and not MAINLINE_RE.match(source_ref) and source_ref != "HEAD":
+            # Fall back to the containing branch's name - but not for shared branches,
+            # whose names carry no ticket, and only when the message had none.
+            jira, ado = extract_ticket_refs(source_ref.replace("/", " ").replace("_", " "), jira_projects=jira_projects)
+            from_ref = bool(jira or ado)
         refs = [f"jira:{k}" for k in jira] + ([f"ado:{i}" for i in ado] if ado_enabled else [])
         kind = KIND_MERGE if is_merge else KIND_COMMIT
         pr = PR_NUMBER_RE.search(subject)
@@ -157,7 +181,8 @@ def parse_log(raw: str, repo: str, system: str | None, *, jira_projects: set[str
             "dirs": sorted(dirs, key=dirs.get, reverse=True)[:3],
             "ai": is_ai_assisted(body) or is_ai_assisted(subject),
             "bot": _is_bot(name, email),
-            "branch": _branch_from_subject(subject) if is_merge else "",
+            "branch": _branch_from_subject(subject) if is_merge else source_ref[:120],
+            "key_from_branch": from_ref,
             "pr": pr.group(1) if pr else "",
             "hour_local": datetime.fromisoformat(when.strip().replace("Z", "+00:00")).hour if when.strip() else None,
             "weekday_local": datetime.fromisoformat(when.strip().replace("Z", "+00:00")).weekday() if when.strip() else None,
@@ -176,7 +201,40 @@ def parse_log(raw: str, repo: str, system: str | None, *, jira_projects: set[str
             minutes=None,
             meta=meta,
         ))
+    inherit_merge_keys(signals, parents_of, mainline)
     return signals
+
+
+def inherit_merge_keys(signals: list[Signal], parents_of: dict[str, list[str]], mainline: set[str]) -> None:
+    """A merge whose subject names the branch ("Merge branch 'feature/NDT-101-x'") keys
+    the merge itself; the commits it brought in are reached by walking the second
+    parent's first-parent chain until a mainline commit or an already-keyed commit ends
+    the branch's own history. Only unkeyed commits inherit, and never from a merge
+    whose subject named no ticket."""
+    by_sha = {s.meta["sha"]: s for s in signals}
+    full_sha = {sha[:12]: sha for sha in parents_of}
+    for merge in signals:
+        if merge.kind != KIND_MERGE or not merge.refs:
+            continue
+        parents = parents_of.get(full_sha.get(merge.meta["sha"], ""), [])
+        if len(parents) < 2:
+            continue
+        cur = parents[1]
+        steps = 0
+        while cur and steps < 500:
+            steps += 1
+            if cur in mainline:
+                break
+            sig = by_sha.get(cur[:12])
+            if sig is None:
+                break
+            if not sig.refs and sig.kind == KIND_COMMIT:
+                sig.refs = list(merge.refs)
+                sig.meta["key_from_merge"] = merge.meta["sha"]
+            elif sig.refs and not sig.meta.get("key_from_merge") and sig.kind == KIND_MERGE:
+                break
+            nxt = parents_of.get(cur, [])
+            cur = nxt[0] if nxt else None
 
 
 class GitSource:
@@ -214,6 +272,22 @@ class GitSource:
             raise RuntimeError(proc.stderr.strip()[:300] or f"git exited {proc.returncode}")
         return proc.stdout
 
+    def _mainline(self, path: Path, since_iso: str) -> set[str]:
+        """Full shas on the first-parent chain of every mainline ref: main's own
+        commits, whichever feature branches also happen to reach them."""
+        try:
+            refs = [r.strip() for r in self._run(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes"], path).splitlines() if r.strip()]
+        except (RuntimeError, subprocess.TimeoutExpired, OSError):
+            return set()
+        main_refs = [r for r in refs if MAINLINE_RE.match(r)]
+        if not main_refs:
+            return set()
+        try:
+            out = self._run(["git", "rev-list", "--first-parent", f"--since={since_iso}", *main_refs[:40]], path)
+        except (RuntimeError, subprocess.TimeoutExpired, OSError):
+            return set()
+        return {line.strip() for line in out.splitlines() if line.strip()}
+
     def system_for(self, repo_rel: str) -> str | None:
         best: tuple[int, str | None] = (-1, None)
         for system_id, path in self.system_paths.items():
@@ -243,12 +317,13 @@ class GitSource:
                     fetch_error = str(exc)[:160] or "fetch failed"
                     result.notes.append(f"{rel}: fetch failed ({fetch_error})")
             try:
-                raw = self._run(["git", "log", "--all", "--no-color", f"--since={since_iso}", f"--format={LOG_FORMAT}", "--numstat"], path)
+                raw = self._run(["git", "log", "--all", "--source", "--no-color", f"--since={since_iso}", f"--format={LOG_FORMAT}", "--numstat"], path)
+                mainline = self._mainline(path, since_iso)
             except (RuntimeError, subprocess.TimeoutExpired, OSError) as exc:
                 result.notes.append(f"{rel}: {exc}")
                 repo_facts[rel] = {"system": system, "error": str(exc)[:200], "commits": 0}
                 continue
-            signals = parse_log(raw, rel, system, jira_projects=self.jira_projects, ado_enabled=self.ado_enabled, weights=self.weights)
+            signals = parse_log(raw, rel, system, jira_projects=self.jira_projects, ado_enabled=self.ado_enabled, weights=self.weights, mainline=mainline)
             result.signals.extend(signals)
             newest = max((s.at for s in signals), default=None)
             keyed = sum(1 for s in signals if s.refs and s.kind == KIND_COMMIT)
