@@ -68,7 +68,9 @@ def discover_repos(repo_root: Path, roots: list[str], max_depth: int = MAX_DISCO
     def walk(path: Path, depth: int) -> None:
         if not path.is_dir():
             return
-        rel = str(path.relative_to(repo_root))
+        # POSIX form on every OS: these keys are matched against the forward-slash
+        # system paths in config.toml.
+        rel = path.relative_to(repo_root).as_posix()
         if is_repo(path):
             if rel not in seen:
                 seen.add(rel)

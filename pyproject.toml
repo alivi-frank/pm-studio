@@ -15,6 +15,9 @@ dependencies = [
     # Plain uvicorn ships no websocket protocol implementation and silently serves
     # 404 on every websocket upgrade; the [standard] extra pulls in `websockets`.
     "uvicorn[standard]>=0.29",
+    # Windows ships no IANA zone database, so without this zoneinfo cannot resolve
+    # [signals] timezone and the signals layer silently falls back to UTC days.
+    "tzdata; sys_platform == 'win32'",
 ]
 
 [project.urls]
@@ -24,7 +27,9 @@ Repository = "https://github.com/fromerosk/pm-studio"
 pm-studio = "pm_studio.__main__:main"
 
 [tool.setuptools]
-packages = ["pm_studio"]
+# Subpackages listed explicitly: a non-editable install of just "pm_studio" ships
+# without pm_studio.signals, and the server cannot import it.
+packages = ["pm_studio", "pm_studio.signals", "pm_studio.signals.sources"]
 
 [tool.setuptools.package-data]
 # The pages plus the shared navigation chrome they all pull in - an installed wheel that
