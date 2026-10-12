@@ -1,7 +1,13 @@
 import base64
+import contextlib
+import difflib
 import json
+import os
+import queue
+import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -11,6 +17,8 @@ from typing import Callable, Iterator, TYPE_CHECKING
 
 from . import gitsnapshot
 from .accounts import AGENT_HEADER_NAME, AGENT_TOKEN
+from . import agent_mcp
+from .agent_env import subprocess_env
 from .config import CONFIG, LOCAL_DIR_NAME
 from .costing import agent_usage
 from .roadmap import (
@@ -31,6 +39,9 @@ if TYPE_CHECKING:
     from .sessions import Session
 
 PM_TIMEOUT_SECONDS = 1800
+# A resumed PM conversation gets the full roadmap snapshot again at least this often, so a
+# context the CLI has compacted never leaves it planning against a summary of a summary.
+ROADMAP_FULL_EVERY = 8
 
 # How many times in a row the PM can be auto-re-invoked by its own dev tasks finishing,
 # with no real stakeholder message in between, before it's forced to stop dispatching
@@ -316,6 +327,29 @@ def _dispatch_system_slots() -> tuple[str, str]:
     )
 
 
+def _dev_capabilities() -> str:
+    """The {dev_capabilities} slot: which systems a dev task can run locally and which
+    [agents.mcp] tools it gets. Read when the prompt is built, so a server added to
+    config.toml shows up from the next prompt rebuild (a new session, or a scope or
+    mode change)."""
+    local = [
+        f"`{sid}` ({spec.label})"
+        for sid, spec in SYSTEMS.items()
+        if spec.local is not None and spec.local.services
+    ]
+    local_envs = (
+        f"\n  - run these systems locally, one environment per session, started on demand: "
+        f"{', '.join(local)}" if local else ""
+    )
+    # Ready ones only: a server skipped for a missing variable is not a tool a dev agent has.
+    _, names = agent_mcp.AGENT_MCP.launch_config(pm=False)
+    mcp_tools = (
+        f"\n  - use these MCP tools: {', '.join(names)} (a browser one means it can open "
+        "pages, click through them and take screenshots)" if names else ""
+    )
+    return DEV_CAPABILITIES_TEMPLATE.format(local_envs=local_envs, mcp_tools=mcp_tools)
+
+
 # Appended to ROADMAP_GUIDANCE_TEMPLATE only when the deployment declared [[trackers]].
 # Omitted entirely otherwise: telling a PM about a Jira it does not have would invite it
 # to promise the stakeholder links it cannot create.
@@ -540,7 +574,7 @@ Your own working files (spec, chat history, task records, uploads) live under \
 there, and dev tasks should never be told to create it there.
 
 {roadmap_guidance}
-{dispatch_curls}- Check one task's status/result:
+{dispatch_curls}{code_checkout_curl}- Check one task's status/result:
   curl -s {tasks_base_url}/<id>{auth_header}
 - Check all tasks (e.g. if the stakeholder asks for status, or to catch up on anything that \
 finished since you last checked):
@@ -594,6 +628,21 @@ to them - summarize outcomes in plain language.{local_instructions}"""
 BUILD_DISPATCH_CURLS_TEMPLATE = """- Start a dev task (returns immediately - does not wait for it to finish):
   curl -s -X POST {tasks_base_url}{auth_header} -H "Content-Type: application/json" -d '{{"task": "<specific, actionable task description - what to build/fix and what done looks like>"{task_system_field}}}'
   This returns JSON like {{"id": "...", "status": "running", ...}}. Remember the id.{dispatch_system_note}
+  Add `"quick": true` to the JSON for a QUICK task: look, don't build. The dev agent brings up what it needs, checks what you asked, captures evidence and reports, without changing code - e.g. "start the frontend locally and take a screenshot of the login page", or "check how X behaves today". You cannot run, open or screenshot anything yourself, so whenever the stakeholder wants to SEE something or have it checked, dispatch a quick task instead of saying it can't be done. Quick tasks skip spec-writing and need no build slice.{dev_capabilities}
+"""
+
+# The {dev_capabilities} slot of the dispatch block: what a dev agent can actually do on
+# this deployment, so the PM neither under-promises ("I can't screenshot") nor invents.
+DEV_CAPABILITIES_TEMPLATE = """
+  Every dev task (quick or not) can:{local_envs}{mcp_tools}
+  - leave files for the stakeholder (screenshots, reports): they are shown on the task's card in this chat, images inline, and the completion message lists their paths - Read an image when you need to see it to report accurately."""
+
+# For a session whose worktree is not the primary checkout: there, every system kept in a git
+# submodule starts as an EMPTY folder - which a PM reading the tree will otherwise mistake for
+# missing code or a blocked repository.
+CODE_CHECKOUT_CURL_TEMPLATE = """- Check a system's code out into this session's worktree, so you can Read it. This session is its own git worktree, and code kept in git submodules starts there as EMPTY folders, checked out on demand - an empty folder under a system's path never means the code is missing or that the repository is inaccessible. Run this before reading a system's code (idempotent; returns when the code is there, which can take a few seconds the first time; system ids: {system_ids}):
+  curl -s -X POST {checkout_url}/<system_id>{auth_header}
+  Dev tasks and local environments check their system's code out by themselves - you never need this just to dispatch.
 """
 
 BUILD_LOOP_STEPS = """3. Once a slice of the spec is concrete enough to build, check this turn's other-active-sessions \
@@ -697,6 +746,219 @@ def _local_instructions_block() -> str:
     )
 
 
+def _mcp_prompt_note(names: list[str]) -> str:
+    """Appended to the system prompt for a turn that has [agents.mcp] servers, next to
+    the PM's own tool list; "" otherwise, so the prompt is unchanged without them."""
+    if not names:
+        return ""
+    tools = ", ".join(f"mcp__{name}" for name in names)
+    return (
+        f"\n\nThis deployment also gives you these MCP servers: {tools}. Use them only "
+        "to look things up (for example DEV data) - never to change anything; they run "
+        "unattended on the stakeholder's behalf."
+    )
+
+
+def _tool_label(name: str, tool_input: dict) -> str:
+    """A short, human label for one tool call the PM makes, for the live progress in the
+    chat. Built from what the call is FOR, never from its raw command: a PM's curl carries
+    the agent auth header, which must not reach a browser."""
+    def base(path) -> str:
+        return Path(str(path or "")).name or str(path or "")
+
+    if name == "Bash":
+        command = str(tool_input.get("command") or "")
+        if command.startswith("curl"):
+            # A dev agent driving its local environment (local_env.py's routes).
+            env_call = re.search(
+                r"/local-env/([\w-]+)/([\w-]+)/(start|wait|logs|stop|restart|create|destroy)\b",
+                command,
+            )
+            if env_call:
+                system, item, action = env_call.groups()
+                return {
+                    "start": f"Starting {system}/{item}",
+                    "wait": f"Waiting for {system}/{item} to be up",
+                    "logs": f"Reading {system}/{item} logs",
+                    "stop": f"Stopping {system}/{item}",
+                    "restart": f"Restarting {system}/{item}",
+                    "create": f"Creating {system} resource",
+                    "destroy": f"Destroying {system} resource",
+                }[action]
+            if "/local-env" in command:
+                return "Checking the local environment"
+            for marker, label in (
+                ("/checkout/", "Checking a system's code out"),
+                ("/meta", "Updating the session title"),
+                ("/scope", "Changing the session's scope"),
+                ("/people", "Looking people up"),
+                ("/roadmap", "Updating the roadmap"),
+            ):
+                if marker in command:
+                    return label
+            if "/tasks/" in command:
+                return "Dispatching a dev task" if "-X POST" in command else "Checking dev tasks"
+            return "Calling PM Studio"
+        # The tool, plus its subcommand for the few whose subcommand IS the step ("npm
+        # install", "git status") - never further arguments, which can carry anything.
+        # A leading `cd <dir> &&` is skipped: the work is what follows it.
+        words = re.sub(r"^\s*cd\s+\S+\s*&&\s*", "", command).split()
+        if not words:
+            return "Running a command"
+        tool = base(words[0].strip("\"'"))
+        if tool in ("npm", "npx", "pnpm", "git", "make", "yarn") and len(words) > 1 and words[1][0].isalpha():
+            return f"Running {tool} {words[1]}"
+        return f"Running {tool}"
+    if name in ("Read", "Write", "Edit", "NotebookEdit"):
+        verb = {"Read": "Reading", "Write": "Writing"}.get(name, "Editing")
+        return f"{verb} {base(tool_input.get('file_path') or tool_input.get('notebook_path'))}"
+    if name in ("Glob", "Grep"):
+        return f"Searching for {str(tool_input.get('pattern') or '')[:60]}"
+    if name == "WebSearch":
+        return f"Searching the web: {str(tool_input.get('query') or '')[:80]}"
+    if name == "WebFetch":
+        url = str(tool_input.get("url") or "")
+        return f"Reading {url.split('/')[2] if url.count('/') >= 2 else url}"
+    if name.startswith("mcp__"):
+        server, _, tool = name[len("mcp__"):].partition("__")
+        return f"Using {server}: {tool.replace('_', ' ')}" if tool else f"Using {server}"
+    return f"Using {name}"
+
+
+def progress_events(message: dict) -> list[dict]:
+    """The chat progress events (`pm_progress`) carried by one line of `claude
+    --output-format stream-json` output: each text block the PM writes on its way to the
+    final reply, and a label per tool it calls. Everything else (system init, tool
+    results, the final result) carries none."""
+    if message.get("type") != "assistant":
+        return []
+    events: list[dict] = []
+    for block in (message.get("message") or {}).get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text" and str(block.get("text") or "").strip():
+            events.append({"type": "pm_progress", "kind": "text", "text": block["text"]})
+        elif block.get("type") == "tool_use":
+            events.append({
+                "type": "pm_progress", "kind": "tool",
+                "text": _tool_label(str(block.get("name") or ""), block.get("input") or {}),
+            })
+    return events
+
+
+# Every PM turn's `claude` process while it runs (see _stream_claude), so the server can
+# end them on shutdown instead of waiting minutes for a turn to finish.
+_LIVE_TURNS: set[subprocess.Popen] = set()
+_LIVE_TURNS_LOCK = threading.Lock()
+
+
+def stop_running_turns() -> int:
+    """Kills every PM turn still running; called when the server shuts down. Each one
+    then ends as a pm_error turn, recorded like any failed turn. Returns how many."""
+    with _LIVE_TURNS_LOCK:
+        procs = list(_LIVE_TURNS)
+    for proc in procs:
+        with contextlib.suppress(OSError):
+            proc.kill()
+    return len(procs)
+
+
+def _stream_claude(
+    command: list[str], text: str, *, cwd: str, env: dict, timeout: float,
+    on_message: Callable[[dict], None],
+) -> tuple[int | None, dict | None, str, str]:
+    """Runs `claude ... --output-format stream-json --verbose` with `text` on stdin,
+    handing every JSON line but the last to `on_message` as it arrives.
+
+    Returns (returncode, result, stray_stdout, stderr): `result` is the final
+    {"type": "result", ...} object - the same fields `--output-format json` prints, so
+    session_id/is_error/result/usage read as before - or None if the process ended
+    without one; returncode is None when it was killed for running past `timeout`.
+    stdin and stderr are pumped on their own threads, so neither pipe can fill up and
+    stall the process while stdout is being read."""
+    proc = subprocess.Popen(
+        command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        cwd=cwd, env=env, text=True, encoding="utf-8", errors="replace",
+    )
+    with _LIVE_TURNS_LOCK:
+        _LIVE_TURNS.add(proc)
+    stderr_parts: list[str] = []
+    timed_out = threading.Event()
+
+    def feed() -> None:
+        with contextlib.suppress(OSError, ValueError):
+            proc.stdin.write(text)
+            proc.stdin.close()
+
+    def drain_stderr() -> None:
+        with contextlib.suppress(OSError, ValueError):
+            stderr_parts.append(proc.stderr.read())
+
+    def kill() -> None:
+        timed_out.set()
+        with contextlib.suppress(OSError):
+            proc.kill()
+
+    pumps = [threading.Thread(target=feed, daemon=True), threading.Thread(target=drain_stderr, daemon=True)]
+    for pump in pumps:
+        pump.start()
+    timer = threading.Timer(timeout, kill)
+    timer.daemon = True
+    timer.start()
+    result: dict | None = None
+    stray: list[str] = []
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                stray.append(line)
+                continue
+            if isinstance(message, dict) and message.get("type") == "result":
+                result = message
+            elif isinstance(message, dict):
+                with contextlib.suppress(Exception):  # a broken listener never breaks a turn
+                    on_message(message)
+        proc.wait()
+    finally:
+        timer.cancel()
+        with _LIVE_TURNS_LOCK:
+            _LIVE_TURNS.discard(proc)
+        for pump in pumps:
+            pump.join(timeout=5)
+    returncode = None if timed_out.is_set() else proc.returncode
+    return returncode, result, "\n".join(stray), "".join(stderr_parts)
+
+
+def roadmap_delta(previous: str, current: str) -> str:
+    """The lines that differ between two roadmap snapshots, as "REMOVED: ..." /
+    "ADDED: ..." - each snapshot line is a self-contained item or heading, so the
+    changed lines alone say what changed."""
+    lines: list[str] = []
+    for line in difflib.unified_diff(
+        previous.splitlines(), current.splitlines(), lineterm="", n=0
+    ):
+        if line.startswith(("---", "+++", "@@")):
+            continue
+        if line.startswith("-"):
+            lines.append(f"REMOVED: {line[1:]}")
+        elif line.startswith("+"):
+            lines.append(f"ADDED: {line[1:]}")
+    return "\n".join(lines)
+
+
+def _write_system_prompt(text: str) -> Path:
+    """The system prompt as a temp file for `--system-prompt-file`. mkstemp creates it
+    readable by this user only; the caller deletes it once the turn ends."""
+    fd, path = tempfile.mkstemp(prefix="pm_studio_system_prompt_", suffix=".md")
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    return Path(path)
+
+
 class PMAgent:
     """One PM conversation, scoped to a single session's worktree/branch. Its
     Bash allowlist is a literal match on that session's own /tasks/{id} URL, so
@@ -754,6 +1016,12 @@ class PMAgent:
         # own scope: a PM can adopt a board for ITSELF and can never widen another
         # session's authority.
         self.scope_url = f"{CONFIG.base_url}/sessions/{session.id}/scope"
+        # Same construction again: a PM can check code out into its OWN worktree only.
+        # None for the primary checkout, which already has every initialized submodule.
+        self.checkout_url = (
+            None if self.repo_root.resolve() == CONFIG.repo_root.resolve()
+            else f"{CONFIG.base_url}/sessions/{session.id}/checkout"
+        )
 
         self._refresh_scope()
 
@@ -767,6 +1035,18 @@ class PMAgent:
         # turn start/end can push a live sessions-websocket broadcast.
         self.turn_active = False
         self.on_activity_change: Callable[[], None] | None = None
+        # Where the running turn's pm_progress events go (see _run_pm_turn_with_progress);
+        # None between turns.
+        self._progress_sink: Callable[[dict], None] | None = None
+        # The roadmap context last put in front of this conversation, and how many turns
+        # have gone by on deltas since the last full one (see _with_roadmap_context).
+        # Memory only: after a restart the first turn simply sends it in full again.
+        self._roadmap_sent: str | None = None
+        self._roadmap_turns_since_full = 0
+        # The system prompt this conversation is known to be running on (see
+        # _with_current_instructions). Memory only, so the first turn after a restart -
+        # which minted a new agent token - always re-states it.
+        self._instructions_sent: str | None = None
         self._load_state()
         self._ensure_project_status_seed()
 
@@ -968,12 +1248,23 @@ class PMAgent:
                 auth_header=agent_auth_header(),
                 task_system_field=task_system_field,
                 dispatch_system_note=dispatch_system_note,
+                dev_capabilities=_dev_capabilities(),
             )
             loop_steps = BUILD_LOOP_STEPS
+        code_systems = [sid for sid, spec in SYSTEMS.items() if spec.path]
+        code_checkout_curl = (
+            CODE_CHECKOUT_CURL_TEMPLATE.format(
+                checkout_url=self.checkout_url,
+                auth_header=agent_auth_header(),
+                system_ids=", ".join(f"`{sid}`" for sid in code_systems),
+            )
+            if self.checkout_url and code_systems else ""
+        )
         self.system_prompt = PM_SYSTEM_PROMPT_TEMPLATE.format(
             mission=mission,
             operating_model=operating_model,
             dispatch_curls=dispatch_curls,
+            code_checkout_curl=code_checkout_curl,
             loop_steps=loop_steps,
             tasks_base_url=self.tasks_base_url,
             session_meta_url=self.session_meta_url,
@@ -1002,10 +1293,14 @@ class PMAgent:
             "" if self.mode == "research"
             else f"Bash(curl -s -X POST {self.tasks_base_url}*) "
         )
+        checkout_tool = (
+            f"Bash(curl -s -X POST {self.checkout_url}/*) " if code_checkout_curl else ""
+        )
         self.allowed_tools = (
             f"{dispatch_tool}"
             f"Bash(curl -s {self.tasks_base_url}*) "
             f"Bash(curl -s -X POST {self.session_meta_url}*) "
+            f"{checkout_tool}"
             f"{scope_tool}"
             f"{roadmap_tools}"
             "Write Read WebSearch WebFetch"
@@ -1310,6 +1605,7 @@ class PMAgent:
             "happened."
         )
         prompt += _judge_completion_note(task, at_cap)
+        prompt += self._artifacts_completion_note(task)
         if self.mode == "research":
             # A task can only be running here if it was dispatched before the session was
             # switched to research - so the standard "start the next task" continuation
@@ -1343,6 +1639,20 @@ class PMAgent:
             commit_message=f'PM auto-continue after dev task {task["id"]} ({task["status"]})',
         )
 
+    def _artifacts_completion_note(self, task: dict) -> str:
+        """Names the files a finished task left for the stakeholder, by absolute path so
+        the PM can Read them (an image included). "" when it left none."""
+        artifacts = task.get("artifacts") or []
+        if not artifacts:
+            return ""
+        base = self.workspace_dir / "tasks" / task["id"]
+        listing = ", ".join(str(base / a["name"]) for a in artifacts)
+        return (
+            f" It left {len(artifacts)} file(s) for the stakeholder, already shown on its "
+            f"card in the chat: {listing}. Read an image if you need to see it to report "
+            "accurately; don't paste paths at the stakeholder, just refer to the card."
+        )
+
     def _with_session_context(self, prompt_text: str, other_sessions_context: str) -> str:
         """Prepends a live snapshot of other active sessions' work, when there is any -
         see sessions.py's describe_other_active_sessions. Kept out of the persisted chat
@@ -1372,15 +1682,40 @@ class PMAgent:
             )
         return instruction + f"{other_sessions_context}\n]\n\n{prompt_text}"
 
-    @staticmethod
-    def _with_roadmap_context(prompt_text: str, roadmap_context: str) -> str:
-        """Prepends this turn's roadmap snapshot (own product in full depth, every
-        other product as a shallow digest - see server.py's _roadmap_context_for and
-        this class's ROADMAP_GUIDANCE_TEMPLATE for how to act on it). Kept out of
-        persisted chat history for the same reason as _with_session_context: it's
-        per-turn plumbing, not something the stakeholder said or the PM decided."""
+    def _with_roadmap_context(self, prompt_text: str, roadmap_context: str) -> str:
+        """Prepends this turn's roadmap context (own product in full depth, every other
+        product as a shallow digest - see server.py's _roadmap_context_for and this
+        class's ROADMAP_GUIDANCE_TEMPLATE for how to act on it). Kept out of persisted
+        chat history for the same reason as _with_session_context: it's per-turn
+        plumbing, not something the stakeholder said or the PM decided.
+
+        The conversation is resumed turn after turn, so every snapshot sent stays in its
+        context: re-sending the whole roadmap each turn (tens of thousands of characters
+        on a real portfolio) made every turn slower and costlier than the last. So the
+        full snapshot goes out only when the conversation has none to build on - a fresh
+        conversation, a server restart, a failed turn - and every ROADMAP_FULL_EVERY
+        turns as a refresh; otherwise the turn carries only what changed since the last
+        one sent, or a one-line "unchanged"."""
         if not roadmap_context:
             return prompt_text
+        previous = self._roadmap_sent if self.claude_session_id else None
+        self._roadmap_sent = roadmap_context
+        if previous is not None and self._roadmap_turns_since_full < ROADMAP_FULL_EVERY:
+            self._roadmap_turns_since_full += 1
+            if previous == roadmap_context:
+                return (
+                    "[Roadmap: unchanged since the last snapshot in this conversation - "
+                    f"that one is still current.]\n\n{prompt_text}"
+                )
+            delta = roadmap_delta(previous, roadmap_context)
+            if len(delta) < len(roadmap_context) // 2:
+                return (
+                    "[Roadmap changes since the last snapshot in this conversation (every "
+                    "line not listed here is unchanged; a changed line shows as REMOVED "
+                    "then ADDED):\n"
+                    f"{delta}\n]\n\n{prompt_text}"
+                )
+        self._roadmap_turns_since_full = 0
         return (
             "[Roadmap snapshot for this turn - see your system prompt for how to act on "
             f"it:\n{roadmap_context}\n]\n\n{prompt_text}"
@@ -1425,7 +1760,13 @@ class PMAgent:
                 # all, which is the failure that would actually lose a message.
                 if pending_id:
                     self.drop_pending(pending_id)
-                final_event = self._run_pm_turn(prompt_text)
+                final_event = yield from self._run_pm_turn_with_progress(prompt_text)
+                if final_event.get("type") == "pm_error":
+                    # The conversation may never have seen this turn's roadmap context;
+                    # the next turn sends it in full rather than a delta against it. Same
+                    # for its instructions (see _with_current_instructions).
+                    self._roadmap_sent = None
+                    self._instructions_sent = None
                 self._append_reply_entry(final_event)
                 with self.git_lock:
                     gitsnapshot.snapshot(commit_message, self.repo_root)
@@ -1434,56 +1775,137 @@ class PMAgent:
             self.turn_active = False
             self._notify_activity_change()
 
+    def _with_current_instructions(self, text: str, system_prompt: str) -> str:
+        """`text`, preceded by this turn's full system prompt when a RESUMED conversation
+        may be running on an older one.
+
+        `claude -p --resume` keeps the system prompt the conversation started with and
+        ignores the one passed on later turns. So anything that changes the prompt after
+        the first turn - a server restart (which mints a new agent token, making every
+        curl in the old prompt fail with 401), a scope or mode change, a newly declared
+        MCP server, a new capability - would never reach a conversation already under
+        way. The current instructions are re-stated once per change, marked as
+        replacing the original; a brand-new conversation gets them as its real system
+        prompt and needs no note."""
+        resumed = self.claude_session_id is not None
+        stale = resumed and self._instructions_sent != system_prompt
+        self._instructions_sent = system_prompt
+        if not stale:
+            return text
+        return (
+            "[PM Studio: your operating instructions changed since this conversation began "
+            "(for example the server restarted, which issues a new auth token for your curl "
+            "commands, or this session's scope, mode or tools changed). The complete current "
+            "instructions follow and REPLACE the system prompt you started with: wherever "
+            "they differ - every command, URL and header value included - follow these, "
+            "and never reuse a command or token from earlier in this conversation.\n\n"
+            f"{system_prompt}\n]\n\n{text}"
+        )
+
+    def _run_pm_turn_with_progress(self, prompt_text: str) -> Iterator[dict]:
+        """Runs _run_pm_turn on a worker thread and yields its `pm_progress` events as
+        they happen; returns (as the generator's value) the turn's final event. The
+        progress is live only - never written to the transcript, which keeps the final
+        reply alone, as before."""
+        progress: queue.Queue = queue.Queue()
+        done = object()
+        outcome: dict = {}
+
+        def work() -> None:
+            self._progress_sink = progress.put
+            try:
+                outcome["event"] = self._run_pm_turn(prompt_text)
+            except Exception as exc:  # never leave the turn hanging on the queue
+                outcome["event"] = {"type": "pm_error", "message": str(exc)}
+            finally:
+                self._progress_sink = None
+                progress.put(done)
+
+        threading.Thread(target=work, daemon=True, name=f"pm-turn-{self.session_id}").start()
+        while (item := progress.get()) is not done:
+            yield item
+        return outcome["event"]
+
+    def turn_allowed_tools(self, mcp_names: list[str]) -> str:
+        """This turn's --allowedTools: the PM's own allowlist, unchanged, plus one
+        `mcp__<name>` per [agents.mcp] server it is given this turn."""
+        return self.allowed_tools + "".join(f" mcp__{name}" for name in mcp_names)
+
     def _run_pm_turn(self, text: str) -> dict:
+        # Neither the message nor the system prompt goes on the command line: Windows
+        # caps a whole command line at 32,767 characters, and the system prompt for a
+        # large product tree alone runs past 36,000. The message goes in on stdin and
+        # the system prompt through a temp file outside the repo, so no snapshot can
+        # pick it up (it carries the agent auth header).
+        # The [agents.mcp] servers marked `pm = true`, read fresh for THIS turn (the
+        # list hot-reloads when config.toml changes), each granted as mcp__<name> on top
+        # of the PM's own allowlist - so a running chat gets a newly added server on its
+        # next turn, and a `--resume`d conversation simply continues with it.
+        mcp = contextlib.ExitStack()
+        mcp_args, mcp_names = mcp.enter_context(agent_mcp.AGENT_MCP.launch_args(pm=True))
+        system_prompt = self.system_prompt + _mcp_prompt_note(mcp_names)
+        system_prompt_path = _write_system_prompt(system_prompt)
+        text = self._with_current_instructions(text, system_prompt)
         command = [
             "claude",
-            "-p", text,
-            "--output-format", "json",
-            "--system-prompt", self.system_prompt,
-            "--allowedTools", self.allowed_tools,
+            "-p",
+            # stream-json (which needs --verbose with -p) so each step can reach the chat
+            # while the turn is still running - see _stream_claude and progress_events.
+            "--output-format", "stream-json",
+            "--verbose",
+            "--system-prompt-file", str(system_prompt_path),
+            "--allowedTools", self.turn_allowed_tools(mcp_names),
+            *mcp_args,
             "--model", self.model,
         ]
         if self.claude_session_id:
             command += ["--resume", self.claude_session_id]
 
+        sink = self._progress_sink
+
+        def on_message(message: dict) -> None:
+            if sink is not None:
+                for event in progress_events(message):
+                    sink(event)
+
         try:
-            proc = subprocess.run(
+            returncode, data, stray, stderr = _stream_claude(
                 command,
+                text,
                 # Repo root, not workspace_dir: product sources live at the root, so
                 # relative paths in the PM's reads and in dev-task descriptions
                 # resolve against the real source tree, not the PM's bookkeeping
-                # folder.
+                # folder. (The pipes are UTF-8: the locale default on Windows is cp1252,
+                # which cannot even encode an arrow.)
                 cwd=str(self.repo_root),
-                capture_output=True,
-                text=True,
+                env=subprocess_env(self.session_id),
                 timeout=PM_TIMEOUT_SECONDS,
+                on_message=on_message,
             )
-        except subprocess.TimeoutExpired:
-            return {"type": "pm_error", "message": f"PM agent timed out after {PM_TIMEOUT_SECONDS}s."}
         except FileNotFoundError:
             return {"type": "pm_error", "message": "The `claude` CLI is not installed or not on PATH."}
+        finally:
+            with contextlib.suppress(OSError):
+                system_prompt_path.unlink(missing_ok=True)
+            mcp.close()
 
-        stdout = proc.stdout.strip()
-        if not stdout:
+        if returncode is None:
+            return {"type": "pm_error", "message": f"PM agent timed out after {PM_TIMEOUT_SECONDS}s."}
+        if data is None:
+            detail = stray.strip()[:4000] or f"stderr: {stderr.strip()[:2000]}"
             return {
                 "type": "pm_error",
-                "message": f"PM agent produced no output (exit {proc.returncode}). "
-                           f"stderr: {proc.stderr.strip()[:2000]}",
+                "message": f"PM agent produced no result (exit {returncode}). {detail}",
             }
-
-        try:
-            data = json.loads(stdout)
-        except json.JSONDecodeError:
-            return {"type": "pm_error", "message": stdout[:4000]}
 
         if data.get("session_id"):
             self.claude_session_id = data["session_id"]
             self._save_state()
 
-        if data.get("is_error") or proc.returncode != 0:
+        if data.get("is_error") or returncode != 0:
             return {
                 "type": "pm_error",
-                "message": data.get("result") or f"exit code {proc.returncode}",
+                "message": data.get("result") or f"exit code {returncode}",
                 # Carried even on failure: a turn that errored still cost tokens.
                 "agent_usage": agent_usage(data),
             }

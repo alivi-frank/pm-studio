@@ -1,3 +1,4 @@
+import contextlib
 import json
 import subprocess
 import threading
@@ -6,12 +7,64 @@ import uuid
 from pathlib import Path
 from typing import Callable
 
-from . import gitsnapshot, judge, roadmap
+from . import gitsnapshot, judge, roadmap, session_checkout
+from . import agent_mcp
+from .agent_env import subprocess_env
 from .config import CONFIG, DEV_INSTRUCTIONS_NAME, LOCAL_DIR_NAME
+from .agent import _stream_claude, progress_events
 from .costing import agent_usage
+from . import models as models_module
 from .models import DEFAULT_MODEL
 
 DEV_AGENT_TIMEOUT_SECONDS = 1800
+# How a dev agent's `claude` process is run: streamed, so its steps reach the task card
+# live. A module attribute so tests can stand in for the CLI.
+run_agent = _stream_claude
+# The steps a task record keeps (newest last), and how much of each.
+MAX_PROGRESS_STEPS = 40
+MAX_STEP_CHARS = 240
+# A quick task only looks: it brings up what it needs, checks, captures evidence and
+# reports - so it gets a tighter leash than a build task.
+QUICK_TASK_TIMEOUT_SECONDS = 900
+
+# Files a dev task leaves for the stakeholder (screenshots, logs, reports) go to
+# <tasks_dir>/<task id>/ and are listed on the task record as "artifacts". Bounded so a
+# task that dumps a build tree there cannot bloat the record or the chat.
+MAX_ARTIFACTS = 50
+ARTIFACTS_ENV = "PM_STUDIO_ARTIFACTS_DIR"
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+
+QUICK_TASK_PREAMBLE = """[QUICK TASK - look, don't build. Start what you need (a local \
+environment, a browser), check what is asked, capture evidence, and report briefly. Do not \
+change product code, do not commit, do not push, and do not open pull requests; if what you \
+find needs a code change, say so in your report instead of making it.]
+
+"""
+
+
+def ensure_system_code(worktree: Path, system: str) -> list[str]:
+    """Makes `system`'s code present in a session worktree, where submodules start as
+    empty folders (see session_checkout). Idempotent and cheap once done; a no-op for
+    the primary checkout, for an unknown system, or for one with no `path`. Raises
+    session_checkout.CheckoutError when the system has submodules and none of them could
+    be prepared."""
+    spec = roadmap.SYSTEMS.get(system) if system else None
+    if spec is None or not spec.path:
+        return []
+    links = tuple(spec.local.link_from_primary) if spec.local is not None else ()
+    return session_checkout.ensure_system_checkout(CONFIG.repo_root, worktree, spec.path, links)
+
+
+def list_artifacts(directory: Path) -> list[dict]:
+    """[{name, size}] for the files under `directory` (posix-relative names, sorted),
+    at most MAX_ARTIFACTS. Empty when the directory does not exist."""
+    if not directory.is_dir():
+        return []
+    files = sorted(p for p in directory.rglob("*") if p.is_file())
+    return [
+        {"name": p.relative_to(directory).as_posix(), "size": p.stat().st_size}
+        for p in files[:MAX_ARTIFACTS]
+    ]
 
 
 def validate_dispatch_system(system: str) -> str | None:
@@ -180,23 +233,44 @@ class TaskRegistry:
             }
         return states
 
-    def start_task(self, description: str, system: str = "") -> dict:
+    def artifacts_dir(self, task_id: str) -> Path:
+        """Where task `task_id` leaves files for the stakeholder (see list_artifacts).
+        Under tasks_dir, which is PM bookkeeping that is never committed."""
+        return self.tasks_dir / task_id
+
+    def artifact_path(self, task_id: str, name: str) -> Path | None:
+        """The file `name` of task `task_id`'s artifacts, or None when there is no such
+        task or file - or when `name` would leave that task's folder (`..`, an absolute
+        path, a link pointing out of it)."""
+        if self.get_task(task_id) is None:
+            return None
+        base = self.artifacts_dir(task_id).resolve()
+        path = (base / name).resolve()
+        if not path.is_relative_to(base) or not path.is_file():
+            return None
+        return path
+
+    def start_task(self, description: str, system: str = "", quick: bool = False) -> dict:
         """Kicks off a dev-agent turn in the background and returns immediately.
 
         `system` is the declared system whose code this task changes (validated by
         the dispatch endpoint via validate_dispatch_system). head_before is recorded
         now, under the git lock, so the finished task owns an exact commit range
         (head_before..head_after) - the evidence the compliance judge inspects.
-        Snapshots from PM turns before or after the task never leak into that range."""
+        Snapshots from PM turns before or after the task never leak into that range.
+        The system's nested repos are read in the background instead, AFTER the
+        session's checkout of them exists (see _run_and_record).
+
+        `quick` marks a look-don't-build task (QUICK_TASK_PREAMBLE): shorter timeout,
+        same judge - which only runs if something changed anyway."""
         task_id = uuid.uuid4().hex[:8]
-        nested_rels = self._system_repo_dirs(system)
         with self.git_lock:
             head_before = self._git_head()
-            nested_before = self._repo_states(nested_rels)
         started_at = time.time()
         task = {
             "id": task_id,
             "kind": "dev",
+            "quick": quick,
             "description": description,
             "system": system,
             "status": "running",
@@ -205,15 +279,22 @@ class TaskRegistry:
             "result": None,
             "head_before": head_before,
         }
-        if nested_before:
-            task["system_repos_before"] = nested_before
         self._write_task(task)
         threading.Thread(
             target=self._run_and_record,
-            args=(task_id, description, started_at, system, head_before, nested_before),
+            args=(task_id, description, started_at, system, head_before, None, quick),
             daemon=True,
         ).start()
         return task
+
+    def _prepare_code(self, system: str) -> tuple[list[str], str]:
+        """(notes, error) from making `system`'s code present in this worktree. Never
+        raises: a failed checkout is reported to the agent and on the record, and the
+        agent decides whether the task can still be done."""
+        try:
+            return ensure_system_code(self.repo_root, system), ""
+        except Exception as exc:  # CheckoutError, or git failing in a way it did not expect
+            return [], str(exc)
 
     def run_conflict_resolution(self, description: str) -> dict:
         """Runs a dev-agent turn synchronously (blocking) to resolve a git merge
@@ -246,9 +327,35 @@ class TaskRegistry:
         self, task_id: str, description: str, started_at: float,
         system: str = "", head_before: str = "",
         nested_before: dict[str, dict] | None = None,
+        quick: bool = False,
     ) -> None:
-        nested_before = nested_before or {}
-        is_error, result_text, usage = self._execute(description, system)
+        checkout_error = ""
+        if nested_before is None:
+            # A session worktree holds the system's submodules as empty folders until
+            # they are checked out; do it before reading their state, so a repo the
+            # checkout creates is the task's starting point and not "work it did".
+            _, checkout_error = self._prepare_code(system)
+            with self.git_lock:
+                nested_before = self._repo_states(self._system_repo_dirs(system))
+        artifacts_dir = self.artifacts_dir(task_id)
+        # The agent's steps as they happen (what it wrote on the way, which tools it used),
+        # kept on the running record: writing it is what pushes the card's update, so the
+        # stakeholder sees "starting the API", "npm install" instead of a bare "Running".
+        progress: list[dict] = []
+
+        def on_progress(event: dict) -> None:
+            progress.append({"kind": event["kind"], "text": event["text"][:MAX_STEP_CHARS],
+                             "ts": time.time()})
+            del progress[:-MAX_PROGRESS_STEPS]
+            running = self.get_task(task_id)
+            if running is not None and running.get("status") == "running":
+                running["progress"] = list(progress)
+                self._write_task(running)
+
+        is_error, result_text, usage = self._execute(
+            description, system, quick=quick, artifacts_dir=artifacts_dir,
+            checkout_error=checkout_error, on_progress=on_progress,
+        )
         status_label = "error" if is_error else "done"
         with self.git_lock:
             gitsnapshot.snapshot(f"Dev task {task_id} ({status_label}): {description[:72]}", self.repo_root)
@@ -259,6 +366,7 @@ class TaskRegistry:
         final = {
             "id": task_id,
             "kind": "dev",
+            "quick": quick,
             "description": description,
             "system": system,
             "status": status_label,
@@ -270,6 +378,13 @@ class TaskRegistry:
             "head_before": head_before,
             "head_after": head_after,
         }
+        if progress:
+            final["progress"] = progress
+        artifacts = list_artifacts(artifacts_dir)
+        if artifacts:
+            final["artifacts"] = artifacts
+        if checkout_error:
+            final["checkout_error"] = checkout_error
         if nested_before or nested_after:
             final["system_repos_before"] = nested_before
             final["system_repos_after"] = nested_after
@@ -361,7 +476,11 @@ class TaskRegistry:
             return None
         return judged("", head_before, head_after, uncommitted=False)[1]
 
-    def _execute(self, description: str, system: str = "") -> tuple[bool, str, dict]:
+    def _execute(
+        self, description: str, system: str = "", *, quick: bool = False,
+        artifacts_dir: Path | None = None, checkout_error: str = "",
+        on_progress: Callable[[dict], None] | None = None,
+    ) -> tuple[bool, str, dict]:
         """Runs a single headless dev-agent turn in this registry's workspace.
         Returns (is_error, result_text, agent_usage). The usage figures come straight
         from the CLI's own JSON and are MEASURED, not estimated - they are kept apart
@@ -379,8 +498,34 @@ class TaskRegistry:
         same way, but LAST and read fresh from this worktree's own copy of the file:
         last so they win over anything above them on conflict (the wrapper says so
         outright rather than relying on position), and read-at-dispatch so an edit to
-        the rules takes effect on the very next task."""
-        prompt = description
+        the rules takes effect on the very next task.
+
+        `artifacts_dir` (ordinary dev tasks; not merge resolution) is created, named in
+        the prompt, exported as PM_STUDIO_ARTIFACTS_DIR and offered to [agents.mcp]
+        args as ${PM_STUDIO_ARTIFACTS_DIR} - so e.g. a browser server can write its
+        screenshots straight there."""
+        prompt = (QUICK_TASK_PREAMBLE if quick else "") + description
+        if checkout_error:
+            prompt += (
+                f"\n\n[Note: PM Studio could not check this system's code out into this "
+                f"session's worktree: {checkout_error}. Its folders may be empty here; "
+                f"report that rather than guessing at the code.]"
+            )
+        extra_env: dict[str, str] = {}
+        if artifacts_dir is not None:
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+            extra_env[ARTIFACTS_ENV] = str(artifacts_dir)
+            prompt += (
+                f"\n\n[Files for the stakeholder: save screenshots and any other evidence "
+                f"you want them to see in {artifacts_dir} (also in ${ARTIFACTS_ENV}). "
+                f"They are shown on this task's card in the chat - images "
+                f"({', '.join(IMAGE_SUFFIXES)}) inline. Give them descriptive file names "
+                f"(e.g. login-page.png) and always pass a full ABSOLUTE path inside that "
+                f"folder when a tool asks for a file name (a browser screenshot's "
+                f"`filename` too): a bare name lands in the worktree, where it does not "
+                f"reach the stakeholder and can end up committed. Do not put secrets, "
+                f"passwords or real patient data in them.]"
+            )
         if CONFIG.dev_instructions:
             prompt += (
                 f"\n\n[Project-specific local instructions from "
@@ -389,6 +534,41 @@ class TaskRegistry:
                 f"them strictly:]\n{CONFIG.dev_instructions}"
             )
         spec = roadmap.SYSTEMS.get(system) if system else None
+        if spec is not None and spec.local is not None and spec.local.services:
+            # Only for a system that declares a local environment, so every other
+            # dispatch prompt stays byte-identical. The three variables come from
+            # agent_env.subprocess_env(); the server owns the processes, so whatever the
+            # agent starts outlives this task (and is stopped with the server, or when
+            # this session ends). `?session=` keeps the agent on its OWN session's
+            # environment - the one running this worktree's branch.
+            services = ", ".join(s.id for s in spec.local.services)
+            q = "session=$PM_STUDIO_SESSION"
+            prompt += (
+                f"\n\n[Local environment: PM Studio can run the {spec.label} system "
+                f"locally (services: {services}), one environment per chat session, run "
+                f"from this session's worktree. Do not launch those services yourself; "
+                f"ask the server, which owns the processes and starts dependencies (and "
+                f"provisions resources such as a temporary database) first:\n"
+                f'  curl -s "$PM_STUDIO_URL/local-env?{q}" -H "$PM_STUDIO_AGENT_HEADER"   (state of every service)\n'
+                f'  curl -s -X POST "$PM_STUDIO_URL/local-env/{system}/<service>/start?{q}" -H "$PM_STUDIO_AGENT_HEADER"\n'
+                f'  curl -s "$PM_STUDIO_URL/local-env/{system}/<service>/wait?timeout=180&{q}" -H "$PM_STUDIO_AGENT_HEADER"   (blocks until it is up or failed)\n'
+                f'  curl -s "$PM_STUDIO_URL/local-env/{system}/<service>/logs?lines=200&{q}" -H "$PM_STUDIO_AGENT_HEADER"\n'
+                f"Starting returns at once with state \"starting\"; then call wait, which "
+                f"answers the moment the service is \"running\" (or \"failed\"/"
+                f"\"port_in_use\", with a message) - never sleep a fixed time instead. An "
+                f"environment unused for a while is stopped automatically (its status "
+                f"message says so); just start it again. Ports may "
+                f"be assigned per session: read each service's \"port\" and \"url\" from the "
+                f"status instead of assuming the usual ones. A 409 saying the session-"
+                f"environment limit is reached means other sessions are using theirs; report "
+                f"it rather than stopping them. A temporary database is optional (by "
+                f"default the services use the shared DEV database): create it only when "
+                f"the task needs isolated data, with "
+                f'curl -s -X POST "$PM_STUDIO_URL/local-env/{system}/resources/<resource>/create?{q}" '
+                f'-H "$PM_STUDIO_AGENT_HEADER", then restart the service that uses it '
+                f"(its status says \"restart_needed\"). Leave services running when you "
+                f"finish unless the task says otherwise.]"
+            )
         if spec is not None and spec.gitflow:
             try:
                 gitflow_rules = (self.repo_root / spec.gitflow).read_text()
@@ -408,15 +588,38 @@ class TaskRegistry:
                 f"will be independently verified against them after this task "
                 f"finishes:]\n{gitflow_rules}"
             )
+        # Every [agents.mcp] server (agent_mcp.py), and only those: --strict-mcp-config
+        # makes config.toml the single source. The temp config file lives exactly as
+        # long as the agent's process.
+        mcp = contextlib.ExitStack()
+        mcp_args, _ = mcp.enter_context(
+            agent_mcp.AGENT_MCP.launch_args(pm=False, extra_env=extra_env)
+        )
+        timeout = QUICK_TASK_TIMEOUT_SECONDS if quick else DEV_AGENT_TIMEOUT_SECONDS
+        # [models] quick, when set: looking and screenshotting rarely needs the session's
+        # biggest model, and a quick task is the stakeholder waiting on an answer.
+        model = (models_module.QUICK_MODEL if quick else None) or self.model
+        def on_message(message: dict) -> None:
+            if on_progress is not None:
+                for event in progress_events(message):
+                    on_progress(event)
+
         try:
-            proc = subprocess.run(
+            returncode, data, stray, stderr = run_agent(
                 [
                     "claude",
-                    "-p", prompt,
-                    "--output-format", "json",
+                    "-p",
+                    # stream-json (needs --verbose with -p): each step reaches the task's
+                    # card while it runs - see _run_and_record's progress.
+                    "--output-format", "stream-json",
+                    "--verbose",
                     "--permission-mode", "bypassPermissions",
-                    "--model", self.model,
+                    *mcp_args,
+                    "--model", model,
                 ],
+                # On stdin, not argv: Windows caps a command line at 32,767 characters
+                # and a task with gitflow rules and dev instructions appended can pass it.
+                prompt,
                 # Repo root, not workspace_dir: dev agents build product code, and the
                 # product sources live at the root - running from the root keeps new
                 # files landing in the real source tree instead of inside the PM's
@@ -424,23 +627,20 @@ class TaskRegistry:
                 # The workspace dir is inside the repo, so no --add-dir is needed to
                 # reach it.
                 cwd=str(self.repo_root),
-                capture_output=True,
-                text=True,
-                timeout=DEV_AGENT_TIMEOUT_SECONDS,
+                env={**subprocess_env(self.session_id), **extra_env},
+                timeout=timeout,
+                on_message=on_message,
             )
-        except subprocess.TimeoutExpired:
-            return True, f"Dev agent timed out after {DEV_AGENT_TIMEOUT_SECONDS}s.", {}
         except FileNotFoundError:
             return True, "The `claude` CLI is not installed or not on PATH.", {}
+        finally:
+            mcp.close()
 
-        stdout = proc.stdout.strip()
-        if not stdout:
-            return True, f"No output (exit {proc.returncode}). stderr: {proc.stderr.strip()[:2000]}", {}
-        try:
-            data = json.loads(stdout)
-        except json.JSONDecodeError:
-            return proc.returncode != 0, stdout[:4000], {}
-
+        if returncode is None:
+            return True, f"Dev agent timed out after {timeout}s.", {}
+        if data is None:
+            detail = stray.strip()[:4000] or f"stderr: {stderr.strip()[:2000]}"
+            return True, f"No result (exit {returncode}). {detail}", {}
         result_text = data.get("result") or json.dumps(data)[:4000]
-        is_error = bool(data.get("is_error")) or proc.returncode != 0
+        is_error = bool(data.get("is_error")) or returncode != 0
         return is_error, result_text, agent_usage(data)

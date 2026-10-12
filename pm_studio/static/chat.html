@@ -159,6 +159,20 @@
     font-style: italic;
     border: 1px dashed var(--border);
   }
+  /* Live progress of a PM turn: one row per turn, a line per step (what it wrote on the
+     way, which tools it used), folded into a one-line summary once the reply lands. */
+  .row.activity .bubble {
+    background: transparent;
+    color: var(--muted);
+    font-size: 0.85em;
+    border: 1px dashed var(--border);
+    max-width: 85%;
+  }
+  .row.activity summary { cursor: pointer; font-style: italic; }
+  .row.activity ol { margin: 6px 0 0; padding-left: 18px; }
+  .row.activity li { margin: 2px 0; white-space: pre-wrap; }
+  .row.activity li.tool { font-style: italic; }
+  .row.activity li.text { color: var(--fg); }
   form {
     display: flex;
     gap: 8px;
@@ -326,6 +340,28 @@
   .judge-verdict.violation { color: var(--status-error); }
   .judge-verdict.inconclusive { color: var(--status-running); }
   .task-card .judge-body { margin-top: 6px; white-space: pre-wrap; }
+  /* Files the dev task left for the stakeholder: images as thumbnails (click for full
+     size), anything else as a plain link. */
+  .task-card .artifacts { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px; }
+  .task-card .artifacts a.thumb img {
+    display: block; max-width: 220px; max-height: 160px;
+    border: 1px solid var(--border); border-radius: 8px; object-fit: cover;
+  }
+  .task-card .artifacts a.file { font-size: 0.9em; }
+  .task-card .other-files { margin-top: 8px; font-size: 0.9em; }
+  /* The dev agent's live steps: the current one always visible while it runs, the rest
+     in a disclosure whose open/closed state survives the card's re-renders. */
+  .task-card .now { margin-top: 8px; font-size: 0.9em; color: var(--muted); font-style: italic; }
+  .task-card .steps { margin-top: 6px; font-size: 0.85em; }
+  .task-card .steps summary { cursor: pointer; color: var(--muted); }
+  .task-card .steps ol { margin: 6px 0 0; padding-left: 18px; }
+  .task-card .steps li { margin: 2px 0; white-space: pre-wrap; }
+  .task-card .steps li.tool { font-style: italic; color: var(--muted); }
+  .task-card .other-files summary { cursor: pointer; color: var(--muted); }
+  .task-card .quick-tag {
+    margin-left: 6px; font-size: 0.8em; padding: 1px 6px;
+    border: 1px solid var(--border); border-radius: 999px; color: var(--muted);
+  }
   .card {
     background: var(--bg);
     border: 1px solid var(--border);
@@ -798,6 +834,7 @@
     card.innerHTML = `
       <div class="card-top">
         <span class="badge ${task.status}"><span class="dot">${badge.dot}</span>${badge.label}</span>
+        ${task.quick ? `<span class="quick-tag" title="Look, don't build: no code changes">Quick check</span>` : ""}
         <span class="meta">${metaText}</span>
       </div>
       <details class="desc-disclosure">
@@ -830,6 +867,77 @@
       if (judge.summary) lines.push(judge.summary);
       card.querySelector(".judge-body").textContent = lines.join("\n") || "No detail recorded.";
     }
+    const steps = task.progress || [];
+    if (steps.length) {
+      if (task.status === "running") {
+        const now = document.createElement("div");
+        now.className = "now";
+        now.textContent = `▸ ${steps[steps.length - 1].text}`;
+        card.appendChild(now);
+      }
+      const details = document.createElement("details");
+      details.className = "steps";
+      const summary = document.createElement("summary");
+      summary.textContent = task.status === "running"
+        ? `Steps so far (${steps.length})`
+        : `Worked through ${steps.length} step${steps.length === 1 ? "" : "s"}`;
+      const list = document.createElement("ol");
+      for (const step of steps) {
+        const item = document.createElement("li");
+        item.className = step.kind === "text" ? "text" : "tool";
+        item.textContent = step.text;
+        list.appendChild(item);
+      }
+      details.append(summary, list);
+      card.appendChild(details);
+    }
+    if (task.artifacts && task.artifacts.length) {
+      // Images up front - they are what the stakeholder asked to see. Everything else
+      // (a browser tool's console logs and page snapshots, reports) is folded away.
+      const isImage = (artifact) => /\.(png|jpe?g|gif|webp)$/i.test(artifact.name);
+      const link = (artifact) => {
+        const a = document.createElement("a");
+        a.href = `/tasks/${encodeURIComponent(sessionId)}/${encodeURIComponent(task.id)}/artifacts/`
+          + artifact.name.split("/").map(encodeURIComponent).join("/");
+        a.target = "_blank";
+        a.rel = "noopener";
+        a.title = artifact.name;
+        return a;
+      };
+      const images = task.artifacts.filter(isImage);
+      const others = task.artifacts.filter((artifact) => !isImage(artifact));
+      if (images.length) {
+        const wrap = document.createElement("div");
+        wrap.className = "artifacts";
+        for (const artifact of images) {
+          const a = link(artifact);
+          a.className = "thumb";
+          const img = document.createElement("img");
+          img.src = a.href;
+          img.alt = artifact.name;
+          img.loading = "lazy";
+          a.appendChild(img);
+          wrap.appendChild(a);
+        }
+        card.appendChild(wrap);
+      }
+      if (others.length) {
+        const details = document.createElement("details");
+        details.className = "other-files";
+        const summary = document.createElement("summary");
+        summary.textContent = `Other files (${others.length})`;
+        const list = document.createElement("div");
+        list.className = "artifacts";
+        for (const artifact of others) {
+          const a = link(artifact);
+          a.className = "file";
+          a.textContent = artifact.name;
+          list.appendChild(a);
+        }
+        details.append(summary, list);
+        card.appendChild(details);
+      }
+    }
     return card;
   }
 
@@ -841,7 +949,15 @@
     const rendered = renderTaskCard(task);
     tagItemTs(rendered, taskTs(task));
     const existing = taskCards.get(task.id);
-    if (existing) existing.replaceWith(rendered);
+    // A running task re-renders on every step: keep whatever the reader had expanded.
+    if (existing) {
+      for (const cls of ["steps", "desc-disclosure"]) {
+        const was = existing.querySelector(`details.${cls}`);
+        const now = rendered.querySelector(`details.${cls}`);
+        if (was && now) now.open = was.open;
+      }
+      existing.replaceWith(rendered);
+    }
     else log.appendChild(rendered);
     taskCards.set(task.id, rendered);
     if (near) scrollToBottom();
@@ -1091,6 +1207,55 @@
   // order it receives.
   let awaitingAck = [];
 
+  // The running turn's progress row (see .row.activity): created on its first step,
+  // folded by finishProgress when the turn's reply or error arrives. Live only - a reload
+  // shows the transcript, which keeps just the final reply.
+  let activity = null;
+
+  function addProgress(event) {
+    const near = isNearBottom();
+    if (!activity) {
+      const row = document.createElement("div");
+      row.className = "row activity";
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+      const details = document.createElement("details");
+      details.open = true;
+      const summary = document.createElement("summary");
+      summary.textContent = "PM is working…";
+      const list = document.createElement("ol");
+      details.append(summary, list);
+      bubble.appendChild(details);
+      row.appendChild(bubble);
+      log.appendChild(row);
+      activity = { details, summary, list, steps: 0 };
+    }
+    const item = document.createElement("li");
+    item.className = event.kind === "text" ? "text" : "tool";
+    item.textContent = event.text;
+    activity.list.appendChild(item);
+    activity.steps += 1;
+    activity.summary.textContent = `PM is working… (${activity.steps} step${activity.steps === 1 ? "" : "s"})`;
+    if (near) scrollToBottom();
+  }
+
+  function finishProgress(replyText) {
+    if (!activity) return;
+    // The reply is the last thing the PM wrote: don't show it twice.
+    const last = activity.list.lastElementChild;
+    if (replyText && last && last.classList.contains("text") && last.textContent.trim() === replyText.trim()) {
+      last.remove();
+      activity.steps -= 1;
+    }
+    if (activity.steps <= 0) {
+      activity.details.closest(".row").remove();
+    } else {
+      activity.details.open = false;
+      activity.summary.textContent = `Worked through ${activity.steps} step${activity.steps === 1 ? "" : "s"}`;
+    }
+    activity = null;
+  }
+
   function connectChat() {
     chatSocket = new WebSocket(`ws://${location.host}/ws/chat/${sessionId}`);
     chatSocket.onopen = () => addRow("status", "Connected.");
@@ -1125,10 +1290,15 @@
           }
           addRow("status", event.auto ? "PM is checking a finished task..." : "PM is thinking...");
           break;
+        case "pm_progress":
+          addProgress(event);
+          break;
         case "pm_reply":
+          finishProgress(event.text);
           addRow("pm", event.text);
           break;
         case "pm_error":
+          finishProgress(null);
           addRow("status", `Error: ${event.message}`);
           break;
         case "error":

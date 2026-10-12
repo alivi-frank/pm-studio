@@ -205,6 +205,8 @@ GITIGNORE_ENTRIES: tuple[str, ...] = (
     "{workspace_rel}/activity.jsonl",
     "{workspace_rel}/trackers.json",
     "{workspace_rel}/people.json",
+    # The local-env supervisor's record of provisioned resources (local_env.py).
+    "{workspace_rel}/local-env/",
     # The stores write `<name>.tmp` then atomically replace; a snapshot landing inside
     # that window would otherwise catch one.
     "{workspace_rel}/*.tmp",

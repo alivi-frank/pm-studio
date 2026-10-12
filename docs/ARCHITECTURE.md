@@ -703,18 +703,39 @@ from the store every turn, so a rename cannot go stale here.
 
 ### Turn execution
 `_run_pm_turn(text)` runs:
-`claude -p <text> --output-format json --system-prompt <sys> --allowedTools <allowlist>
---model <model> [--resume <claude_session_id>]`, `cwd=repo_root` (NOT workspace_dir —
-relative paths must resolve against real sources). Save `data["session_id"]` for resume.
-Return `{"type":"pm_reply","text":result}` or `{"type":"pm_error","message":...}` (with
-literal stderr/exit evidence on failure).
+`claude -p --output-format stream-json --verbose --system-prompt-file <sys> --allowedTools
+<allowlist> --model <model> [--resume <claude_session_id>]` with `text` on stdin,
+`cwd=repo_root` (NOT workspace_dir — relative paths must resolve against real sources),
+through `_stream_claude`, which reads the JSON lines as they arrive. Every assistant text
+block and tool call becomes a `{"type":"pm_progress","kind":"text"|"tool","text":...}`
+event (`progress_events`; tool calls get a label built from what they are for, never the
+raw command, which carries the agent token). The final `{"type":"result"}` line has the
+fields `--output-format json` used to print: save its `session_id` for resume and return
+`{"type":"pm_reply","text":result}` or `{"type":"pm_error","message":...}` (with literal
+stderr/exit evidence on failure).
 
 `_run_turn(...)` wraps it: sets `turn_active=True` + fires `on_activity_change` (in a
 try/finally so it always clears), yields `{"type":"pm_working"}` first, takes `pm_lock`
 (serializes manual turns vs. auto-continuations — two concurrent `--resume` calls on one
-session id would race), appends to `chat_history.json`, snapshots under `git_lock`
-(`PM turn: <text[:72]>` / `PM auto-continue after dev task <id> (<status>)`), yields the
-final event.
+session id would race), runs the turn on a worker thread and yields its `pm_progress`
+events live (never persisted), appends the reply to `chat_history.json`, snapshots under
+`git_lock` (`PM turn: <text[:72]>` / `PM auto-continue after dev task <id> (<status>)`),
+yields the final event. The chat folds the progress into a "Worked through N steps" row.
+
+The roadmap context block (`_with_roadmap_context`) is sent in full only when the
+conversation has none to build on — a fresh or reset conversation, the first turn after a
+restart, the turn after a failed one — and every `ROADMAP_FULL_EVERY` (8) turns; otherwise
+a turn carries only the changed lines (`roadmap_delta`) or a one-line "unchanged". A
+resumed conversation keeps every block it was ever sent, so re-sending the whole roadmap
+each turn made every turn slower and costlier than the last.
+
+`claude -p --resume` keeps the system prompt a conversation **started** with and ignores
+the `--system-prompt-file` of later turns. So `_with_current_instructions` re-states the
+full current prompt at the top of a resumed turn whenever it differs from the last one
+this process sent (always on the first turn after a restart, which also minted a new
+agent token — without this every curl in a resumed conversation would 401), marked as
+replacing the original. Scope, mode and MCP changes reach a running conversation the same
+way. A failed turn clears the record, so the next one re-states again.
 
 ### Transcript
 `chat_history.json` — a list of `{role, text, ts, attachments?}` with roles
@@ -883,6 +904,37 @@ else is active so callers skip the block entirely rather than injecting noise.
   unmerged branch.
 - `cleanup(id)` — post-merge worktree removal (refuse unless status == merged).
   `delete(id)` — force removal (never for default). Both → archived.
+- Every worktree removal (`_remove_worktree`) first calls
+  `session_checkout.release_system_checkouts(REPO_ROOT, worktree, force=force)` (see
+  below); a checkout it had to keep turns cleanup/terminate into a `ValueError` naming
+  it, while `delete` (force) discards it like the rest of the session.
+
+### Product-code checkouts in sessions (`session_checkout.py`)
+A session worktree materializes submodule gitlinks as empty directories, so by default
+nested-repo systems are a primary-checkout affair (§4). `ensure_system_checkout(repo_root,
+worktree, system_path, link_paths=())` fills them on demand, idempotently and without a
+network clone:
+- Submodules = the superproject `.gitmodules` paths equal to / under `system_path`, plus
+  their own nested submodules (recursively) when initialized in the primary checkout.
+- Each one initialized in the primary becomes a **linked worktree of the primary
+  submodule repo**: `git -C <primary>/<P> worktree add --detach <session>/<P> <sha>`,
+  where `<sha>` is the gitlink the *session's* HEAD pins (`git ls-tree HEAD <P>`; for a
+  nested one, its parent's session checkout). Missing locally → `git fetch origin <sha>`
+  → else the primary's HEAD, with a note. Objects/refs are shared, so a feature branch the
+  dev agent creates there is visible from the primary at once; the superproject sees the
+  submodule clean until its HEAD actually moves. Uninitialized / non-empty targets are
+  notes; `CheckoutError` only when nothing could be prepared.
+- `link_paths` (repo-relative paths/globs, `**` never descends into `node_modules`/`.git`)
+  share heavy dependency dirs from the primary: Windows junctions (`_winapi.CreateJunction`,
+  fallback `mklink /J`; no admin needed), POSIX symlinks. Existing paths are never
+  overwritten. Created links are listed in `<session git-dir>/pm-studio-links.json`.
+- `release_system_checkouts(repo_root, worktree, force=False)` removes those links (rmdir
+  on the junction — never `rmtree`, the target is the primary's), then each submodule
+  worktree listed by `git worktree list --porcelain` under the session, deepest first,
+  via `git worktree remove --force`, restores the empty gitlink dir and `git worktree
+  prune`s. Required anyway: git refuses to remove a worktree containing populated
+  submodules. Without `force`, a checkout with uncommitted changes or commits reachable
+  from no branch/remote is kept and reported with a note starting `KEPT_PREFIX`.
 - `set_meta(id, title, goal)` — trim; empty/whitespace = "no change" (a PM can't blank
   its own identity by accident); clamp title ≤ 60, goal ≤ 200; persist + broadcast.
 - `set_model(id, model)` — validate, persist, AND update the live runtime
