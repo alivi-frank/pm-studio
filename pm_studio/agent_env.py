@@ -14,12 +14,14 @@ operator's own machine setup:
     AWS_CONFIG_FILE holding just those profiles and the sso-sessions/source profiles
     they reference; the first one becomes AWS_PROFILE. Empty means no AWS profile at all.
 
-`python -m pm_studio.agent_env` prints what agents will and will not get (names only).
+`python -m pm_studio.agent_env` prints what agents will and will not get (names only);
+`--ensure-login` (run by the launchers) signs the agents in through the browser when needed.
 """
 
 import configparser
 import fnmatch
 import functools
+import json
 import os
 import re
 import subprocess
@@ -187,8 +189,49 @@ def subprocess_env(session_id: str | None = None) -> dict[str, str]:
     return env
 
 
+def auth_status(env: dict[str, str] | None = None) -> dict:
+    """`claude auth status --json` for the agents' Claude config: {"loggedIn": bool, ...}.
+    {"loggedIn": False, "error": ...} when the CLI is missing or answers nonsense."""
+    try:
+        proc = subprocess.run(
+            ["claude", "auth", "status", "--json"], env=env, capture_output=True,
+            text=True, encoding="utf-8", timeout=60,
+        )
+        data = json.loads(proc.stdout or "{}")
+    except FileNotFoundError:
+        return {"loggedIn": False, "error": "the `claude` CLI is not on PATH"}
+    except (subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+        return {"loggedIn": False, "error": str(exc)}
+    return data if isinstance(data, dict) else {"loggedIn": False, "error": "unexpected output"}
+
+
+def ensure_login(env: dict[str, str] | None) -> int:
+    """For the server's launcher: the agents' Claude config logged in, or a browser
+    sign-in to fix it (`claude auth login` - no REPL to quit). Never blocks the server
+    from starting: a failed sign-in is reported and agents fail later with the reason."""
+    status = auth_status(env)
+    if status.get("loggedIn"):
+        who = status.get("email") or status.get("authMethod") or "an account"
+        print(f"[pm_studio] agents are signed in to Claude ({who}).")
+        return 0
+    if status.get("error"):
+        print(f"[pm_studio] WARNING: cannot check the agents' Claude sign-in: {status['error']}", file=sys.stderr)
+        return 1
+    print("[pm_studio] The agents' Claude config is not signed in - opening the browser to sign in...")
+    login = subprocess.call(["claude", "auth", "login"], env=env)
+    if login == 0 and auth_status(env).get("loggedIn"):
+        print("[pm_studio] agents signed in.")
+        return 0
+    print("[pm_studio] WARNING: agents are still not signed in; PM chats and dev tasks will fail "
+          "until they are (make agent-login).", file=sys.stderr)
+    return 1
+
+
 def main(argv: list[str]) -> int:
     env, summary = _build()
+    if "--ensure-login" in argv:
+        # Isolation off: agents use the operator's own Claude login, nothing to check here.
+        return 0 if env is None else ensure_login(env)
     if env is None:
         print("Agent isolation is OFF (PM_AGENT_HOME not set): agents inherit this environment as-is.")
         return 0

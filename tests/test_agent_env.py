@@ -90,5 +90,48 @@ class AgentEnvTest(unittest.TestCase):
         self.assertEqual(written.sections(), [])
 
 
+class EnsureLoginTest(unittest.TestCase):
+    """The launcher's check: signed in -> nothing; not signed in -> `claude auth login`;
+    never an interactive REPL, never blocking the server for a broken CLI."""
+
+    def _run(self, statuses, login_rc=0):
+        calls = []
+        replies = list(statuses)
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return mock.Mock(stdout=replies.pop(0))
+
+        def fake_call(cmd, **kwargs):
+            calls.append(cmd)
+            return login_rc
+
+        with mock.patch.object(agent_env_mod.subprocess, "run", fake_run), \
+                mock.patch.object(agent_env_mod.subprocess, "call", fake_call), \
+                mock.patch("sys.stdout"), mock.patch("sys.stderr"):
+            rc = agent_env_mod.ensure_login({"CLAUDE_CONFIG_DIR": "x"})
+        return rc, calls
+
+    def test_signed_in_does_nothing_else(self) -> None:
+        rc, calls = self._run(['{"loggedIn": true, "email": "a@b"}'])
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [["claude", "auth", "status", "--json"]])
+
+    def test_not_signed_in_runs_the_browser_login_and_rechecks(self) -> None:
+        rc, calls = self._run(['{"loggedIn": false}', '{"loggedIn": true}'])
+        self.assertEqual(rc, 0)
+        self.assertIn(["claude", "auth", "login"], calls)
+        self.assertEqual(calls[-1], ["claude", "auth", "status", "--json"])
+
+    def test_a_failed_login_is_reported_not_fatal(self) -> None:
+        rc, _ = self._run(['{"loggedIn": false}', '{"loggedIn": false}'], login_rc=1)
+        self.assertEqual(rc, 1)
+
+    def test_a_missing_cli_is_reported(self) -> None:
+        with mock.patch.object(agent_env_mod.subprocess, "run", side_effect=FileNotFoundError), \
+                mock.patch("sys.stderr"):
+            self.assertEqual(agent_env_mod.auth_status(None)["loggedIn"], False)
+
+
 if __name__ == "__main__":
     unittest.main()
