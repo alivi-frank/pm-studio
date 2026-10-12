@@ -41,6 +41,17 @@ find needs a code change, say so in your report instead of making it.]
 
 """
 
+# Every dev task: when what the task depends on is not reachable, the useful result is a
+# fast, precise report - not an agent improvising another way in (one once searched the
+# whole disk for MCP configuration files after a database connection was refused).
+UNAVAILABLE_SOURCE_RULE = """
+
+[If a tool or data source this task needs is unavailable - an MCP server that fails to \
+connect, a service that will not start, missing credentials - retry at most once, then stop \
+and report the literal error and what would fix it. Never search the filesystem for \
+configuration files, credentials or connection strings, and never try another way to reach \
+the same data that you were not given.]"""
+
 
 def ensure_system_code(worktree: Path, system: str) -> list[str]:
     """Makes `system`'s code present in a session worktree, where submodules start as
@@ -504,7 +515,7 @@ class TaskRegistry:
         the prompt, exported as PM_STUDIO_ARTIFACTS_DIR and offered to [agents.mcp]
         args as ${PM_STUDIO_ARTIFACTS_DIR} - so e.g. a browser server can write its
         screenshots straight there."""
-        prompt = (QUICK_TASK_PREAMBLE if quick else "") + description
+        prompt = (QUICK_TASK_PREAMBLE if quick else "") + description + UNAVAILABLE_SOURCE_RULE
         if checkout_error:
             prompt += (
                 f"\n\n[Note: PM Studio could not check this system's code out into this "

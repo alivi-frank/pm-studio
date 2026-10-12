@@ -755,7 +755,10 @@ def _mcp_prompt_note(names: list[str]) -> str:
     return (
         f"\n\nThis deployment also gives you these MCP servers: {tools}. Use them only "
         "to look things up (for example DEV data) - never to change anything; they run "
-        "unattended on the stakeholder's behalf."
+        "unattended on the stakeholder's behalf. If one of them fails to connect or errors "
+        "(connection reset, timeout, authentication), retry at most once, then STOP: tell "
+        "the stakeholder the literal error and what it needs (a tunnel, credentials, a "
+        "setting) - do not dispatch a dev task to get the same data another way."
     )
 
 

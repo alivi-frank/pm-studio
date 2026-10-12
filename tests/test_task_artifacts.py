@@ -363,3 +363,23 @@ class LiveProgressTest(_RegistryCase):
             is_error, result, _ = self.registry._execute("d", "web")
         self.assertTrue(is_error)
         self.assertIn("timed out", result)
+
+
+class UnavailableSourceRuleTest(_RegistryCase):
+    """A dev task whose data source is unreachable reports it - it never hunts the disk
+    for configuration or credentials to get in another way."""
+
+    def test_every_task_carries_the_stop_and_report_rule(self) -> None:
+        for quick in (True, False):
+            _, fake = self._run(f"u{quick}", quick=quick)
+            prompt = fake.calls[0]["input"]
+            self.assertIn("Never search the filesystem for configuration files, credentials", prompt)
+            self.assertLess(prompt.index("Look at it"), prompt.index("retry at most once"))
+
+
+class McpPromptNoteTest(unittest.TestCase):
+    def test_the_pm_is_told_to_stop_on_a_failing_mcp_server(self) -> None:
+        note = agent_module._mcp_prompt_note(["dev-db"])
+        self.assertIn("retry at most once, then STOP", note)
+        self.assertIn("do not dispatch a dev task to get the same data another way", note)
+        self.assertEqual(agent_module._mcp_prompt_note([]), "")
