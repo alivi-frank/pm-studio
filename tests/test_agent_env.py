@@ -1,0 +1,94 @@
+import configparser
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from pm_studio import agent_env as agent_env_mod
+
+
+AWS_CONFIG = """\
+[sso-session corp]
+sso_start_url = https://example.awsapps.com/start
+sso_region = us-east-1
+
+[profile app-dev]
+sso_session = corp
+sso_account_id = 111111111111
+sso_role_name = Dev
+
+[profile app-prod]
+sso_session = corp
+sso_account_id = 222222222222
+sso_role_name = Admin
+
+[profile chained]
+source_profile = app-dev
+role_arn = arn:aws:iam::111111111111:role/x
+"""
+
+
+class AgentEnvTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / ".env").write_text("JIRA_API_TOKEN=t\nPLAIN_FROM_DOTENV=x\nEPICRIDE_SECRET_A_B={}\n", encoding="utf-8")
+        (self.tmp / "aws-config").write_text(AWS_CONFIG, encoding="utf-8")
+        agent_env_mod._build.cache_clear()
+        self.addCleanup(agent_env_mod._build.cache_clear)
+        self.config = mock.patch.object(agent_env_mod, "CONFIG", mock.Mock(repo_root=self.tmp))
+        self.config.start()
+        self.addCleanup(self.config.stop)
+
+    def _env(self, **extra: str) -> dict:
+        base = {
+            "PATH": "/bin",
+            "JIRA_API_TOKEN": "t",
+            "PLAIN_FROM_DOTENV": "x",
+            "EPICRIDE_SECRET_A_B": "{}",
+            "GITHUB_TOKEN": "g",
+            "AWS_ACCESS_KEY_ID": "k",
+            "AWS_PROFILE": "app-prod",
+            "AWS_CONFIG_FILE": str(self.tmp / "aws-config"),
+            "AWS_REGION": "us-east-1",
+        }
+        base.update(extra)
+        with mock.patch.dict(os.environ, base, clear=True):
+            return agent_env_mod._build()
+
+    def test_off_without_home(self) -> None:
+        env, _ = self._env()
+        self.assertIsNone(env)
+
+    def test_isolates_claude_config_and_credentials(self) -> None:
+        env, summary = self._env(PM_AGENT_HOME="agent-home", PM_AGENT_AWS_PROFILES="app-dev")
+        self.assertEqual(env["CLAUDE_CONFIG_DIR"], str((self.tmp / "agent-home" / "claude").resolve()))
+        for gone in ("JIRA_API_TOKEN", "PLAIN_FROM_DOTENV", "GITHUB_TOKEN", "AWS_ACCESS_KEY_ID", "PM_AGENT_HOME"):
+            self.assertNotIn(gone, env)
+        self.assertEqual(env["EPICRIDE_SECRET_A_B"], "{}")
+        self.assertEqual(env["AWS_REGION"], "us-east-1")
+        self.assertEqual(env["PATH"], "/bin")
+        self.assertIn("JIRA_API_TOKEN", summary["dropped"])
+
+    def test_aws_config_holds_only_listed_profiles(self) -> None:
+        env, summary = self._env(PM_AGENT_HOME=str(self.tmp / "h"), PM_AGENT_AWS_PROFILES="chained,missing")
+        self.assertEqual(env["AWS_PROFILE"], "chained")
+        written = configparser.RawConfigParser()
+        written.read(env["AWS_CONFIG_FILE"], encoding="utf-8")
+        self.assertEqual(
+            sorted(written.sections()),
+            ["profile app-dev", "profile chained", "sso-session corp"],
+        )
+        self.assertEqual(summary["aws_missing"], ["missing"])
+        self.assertEqual(Path(env["AWS_SHARED_CREDENTIALS_FILE"]).read_text(), "")
+
+    def test_no_profiles_means_no_aws(self) -> None:
+        env, _ = self._env(PM_AGENT_HOME=str(self.tmp / "h"))
+        self.assertNotIn("AWS_PROFILE", env)
+        written = configparser.RawConfigParser()
+        written.read(env["AWS_CONFIG_FILE"], encoding="utf-8")
+        self.assertEqual(written.sections(), [])
+
+
+if __name__ == "__main__":
+    unittest.main()
