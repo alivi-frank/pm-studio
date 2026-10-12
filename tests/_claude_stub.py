@@ -17,7 +17,7 @@ from pm_studio import tasks as tasks_module
 
 
 def _as_stream(fake):
-    def run_agent(command, text, *, cwd, env, timeout, on_message):
+    def run_agent(command, text, *, cwd, env, timeout, on_message, on_start=None):
         proc = fake(command, input=text, cwd=cwd, env=env, timeout=timeout,
                     capture_output=True, text=True, encoding="utf-8")
         stdout = (proc.stdout or "").strip()

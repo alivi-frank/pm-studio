@@ -173,6 +173,12 @@
   .row.activity li { margin: 2px 0; white-space: pre-wrap; }
   .row.activity li.tool { font-style: italic; }
   .row.activity li.text { color: var(--fg); }
+  /* A tool step's outcome (✓/✗, what came back, how long), filled in when its result
+     arrives - in the live PM progress and on task cards alike. */
+  .step-outcome { font-style: normal; margin-left: 6px; color: var(--muted); }
+  li.step-ok .step-outcome { color: #2e7d32; }
+  li.step-failed { color: #c62828; }
+  li.step-failed .step-outcome { color: #c62828; font-weight: 600; }
   form {
     display: flex;
     gap: 8px;
@@ -325,6 +331,7 @@
   }
   .task-card.done { border-left-color: var(--status-done); }
   .task-card.error { border-left-color: var(--status-error); }
+  .task-card.stopped { border-left-color: var(--muted); }
   .task-card.running { animation: card-pulse 2s ease-in-out infinite; }
   @keyframes card-pulse {
     0%, 100% { box-shadow: 0 0 0 0 rgba(42, 120, 214, 0); }
@@ -357,6 +364,7 @@
   .task-card .steps ol { margin: 6px 0 0; padding-left: 18px; }
   .task-card .steps li { margin: 2px 0; white-space: pre-wrap; }
   .task-card .steps li.tool { font-style: italic; color: var(--muted); }
+  .task-card .steps li.tool.step-failed { color: #c62828; }
   .task-card .other-files summary { cursor: pointer; color: var(--muted); }
   .task-card .quick-tag {
     margin-left: 6px; font-size: 0.8em; padding: 1px 6px;
@@ -385,6 +393,7 @@
   .badge.running { color: var(--status-running); }
   .badge.done, .badge.clean, .badge.active { color: var(--status-done); }
   .badge.error, .badge.failed, .badge.conflict { color: var(--status-error); }
+  .badge.stopped { color: var(--muted); }
   .badge.auto_resolved, .badge.merging { color: var(--status-auto); }
   .badge.running .dot { animation: pulse 1.4s ease-in-out infinite; }
   @keyframes pulse {
@@ -442,6 +451,22 @@
     cursor: pointer;
   }
   button.merge-btn:disabled { opacity: 0.5; cursor: default; }
+  /* Stop what is running: the PM's turn (on its status row), a dev task (on its card),
+     everything in the session (in the strip). Quiet until needed - outlined, not filled. */
+  button.stop-btn, button.merge-btn.stop-all {
+    padding: 2px 10px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: none;
+    color: var(--status-error);
+    font: inherit;
+    font-size: 0.8em;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button.merge-btn.stop-all { padding: 8px 16px; border-radius: 8px; font-size: 0.85em; }
+  button.stop-btn:disabled { opacity: 0.5; cursor: default; }
+  .row.status .bubble.has-stop > div { display: inline; margin-right: 8px; }
 
   /* ---- jump-to-latest pill + unread "New" divider ---- */
   #log-wrap {
@@ -641,6 +666,7 @@
     running: { dot: "●", label: "Running" },
     done: { dot: "✓", label: "Done" },
     error: { dot: "✗", label: "Error" },
+    stopped: { dot: "■", label: "Stopped" },
   };
 
   const SESSION_BADGE = {
@@ -836,6 +862,9 @@
         <span class="badge ${task.status}"><span class="dot">${badge.dot}</span>${badge.label}</span>
         ${task.quick ? `<span class="quick-tag" title="Look, don't build: no code changes">Quick check</span>` : ""}
         <span class="meta">${metaText}</span>
+        ${task.status === "running" && task.kind !== "merge_resolution"
+          ? `<button type="button" class="stop-btn" title="Stop this dev task"${stoppingTasks.has(task.id) ? " disabled>Stopping…" : ">Stop"}</button>`
+          : ""}
       </div>
       <details class="desc-disclosure">
         <summary><span class="desc-label">Task</span>&nbsp;<span class="desc-preview"></span></summary>
@@ -850,6 +879,8 @@
     const preview = firstLine.length > 90 ? firstLine.slice(0, 90) + "…" : firstLine;
     card.querySelector(".desc-preview").textContent = preview;
     card.querySelector(".description").textContent = task.description;
+    const stopBtn = card.querySelector(".stop-btn");
+    if (stopBtn) stopBtn.addEventListener("click", () => stopTask(task.id, stopBtn));
     if (task.result) {
       card.querySelector("pre").textContent = task.result;
     }
@@ -886,6 +917,7 @@
         const item = document.createElement("li");
         item.className = step.kind === "text" ? "text" : "tool";
         item.textContent = step.text;
+        showStepOutcome(item, step);
         list.appendChild(item);
       }
       details.append(summary, list);
@@ -941,6 +973,29 @@
     return card;
   }
 
+  // Tasks this page asked to stop and has not heard back about: a running card
+  // re-renders on every step, and keeps its Stop button disabled meanwhile.
+  const stoppingTasks = new Set();
+
+  function stopTask(taskId, button) {
+    stoppingTasks.add(taskId);
+    button.disabled = true;
+    button.textContent = "Stopping…";
+    fetch(`/tasks/${encodeURIComponent(sessionId)}/${encodeURIComponent(taskId)}/stop`, { method: "POST" })
+      .then((r) => {
+        if (!r.ok) return r.json().then((body) => { throw new Error(body.detail ?? `stop failed (${r.status})`); });
+        return r.json();
+      })
+      .then((body) => { stoppingTasks.delete(taskId); if (body.task) upsertTaskCard(body.task); })
+      .catch((err) => {
+        stoppingTasks.delete(taskId);
+        addRow("status", `Could not stop the task: ${err.message}`);
+        const card = taskCards.get(taskId);
+        const current = card && card.querySelector(".stop-btn");
+        if (current) { current.disabled = false; current.textContent = "Stop"; }
+      });
+  }
+
   // Upsert a task's inline card. A task seen for the first time appends its card at the
   // current bottom of the timeline (it's happening now); a known task replaces its
   // existing card in place, keeping its chronological position in the stream.
@@ -972,6 +1027,9 @@
     const statusBadge = SESSION_BADGE[session.status] ?? SESSION_BADGE.active;
     const canMerge = !session.is_default && (session.status === "active" || session.status === "conflict");
     const canCleanup = !session.is_default && session.status === "merged";
+    // Anything with a worktree can have something running (a PM turn, dev tasks, its
+    // local environment).
+    const canStop = Boolean(session.worktree_path);
 
     stripSummaryContent.innerHTML = `
       <span class="strip-branch"></span>
@@ -996,6 +1054,7 @@
       <div class="strip-actions">
         ${canMerge ? `<button class="merge-btn" id="merge-btn">Merge to main</button>` : ""}
         ${canCleanup ? `<button class="merge-btn" id="cleanup-btn">Clean up worktree</button>` : ""}
+        ${canStop ? `<button class="merge-btn stop-all" id="stop-all-btn" title="Stop the PM's turn, every running dev task and this session's local environment">Stop everything</button>` : ""}
       </div>
       ${resultHtml}
     `;
@@ -1024,6 +1083,34 @@
           .then(renderSessionStrip);
       });
     }
+    const stopAllBtn = document.getElementById("stop-all-btn");
+    if (stopAllBtn) stopAllBtn.addEventListener("click", () => stopEverything(stopAllBtn));
+  }
+
+  // "Stop everything" in the strip: the PM's turn and the messages queued behind it,
+  // every running dev task, and the session's local services (its resources are kept).
+  function stopEverything(button) {
+    if (!confirm("Stop everything this session is running? The PM's current turn, every running dev task and this session's local environment are stopped, and messages still waiting for the PM are discarded.")) {
+      return;
+    }
+    button.disabled = true;
+    button.textContent = "Stopping…";
+    fetch(`/sessions/${sessionId}/stop`, { method: "POST" })
+      .then((r) => {
+        if (!r.ok) return r.json().then((body) => { throw new Error(body.detail ?? `stop failed (${r.status})`); });
+        return r.json();
+      })
+      .then((report) => {
+        const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+        const parts = [];
+        if (report.pm_turn) parts.push("the PM's turn");
+        if (report.tasks.length) parts.push(plural(report.tasks.length, "dev task"));
+        if (report.services.length) parts.push(plural(report.services.length, "local service"));
+        if (report.discarded.length) parts.push(`${plural(report.discarded.length, "queued message")} (discarded)`);
+        addRow("status", parts.length ? `Stopped ${parts.join(", ")}.` : "Nothing was running.");
+      })
+      .catch((err) => addRow("status", `Could not stop the session: ${err.message}`))
+      .finally(() => { button.disabled = false; button.textContent = "Stop everything"; });
   }
 
   function connectSessions() {
@@ -1212,7 +1299,32 @@
   // shows the transcript, which keeps just the final reply.
   let activity = null;
 
+  // A tool step's outcome once its result is in: "✓ 3 rows · 1.2 s" / "✗ read ECONNRESET
+  // · 30 s". `step` is a task record's progress item or a pm_progress "result" event.
+  function showStepOutcome(item, step) {
+    if (!step || typeof step.ok !== "boolean") return;
+    const seconds = typeof step.duration_ms === "number" ? step.duration_ms / 1000 : null;
+    const took = seconds === null ? "" : seconds < 1 ? `${Math.round(step.duration_ms)} ms` : `${seconds.toFixed(seconds < 10 ? 1 : 0)} s`;
+    const parts = [step.ok ? "✓" : "✗", step.outcome ? String(step.outcome) : "", took].filter(Boolean);
+    let span = item.querySelector(".step-outcome");
+    if (!span) {
+      span = document.createElement("span");
+      span.className = "step-outcome";
+      item.appendChild(span);
+    }
+    span.textContent = parts.length > 1 ? `${parts[0]} ${parts.slice(1).join(" · ")}` : parts[0];
+    item.classList.toggle("step-ok", step.ok);
+    item.classList.toggle("step-failed", !step.ok);
+  }
+
   function addProgress(event) {
+    if (event.kind === "result") {
+      // Updates the step with that id; never a new line.
+      if (!activity || !event.id) return;
+      const step = Array.from(activity.list.children).find((li) => li.dataset.stepId === String(event.id));
+      if (step) showStepOutcome(step, event);
+      return;
+    }
     const near = isNearBottom();
     if (!activity) {
       const row = document.createElement("div");
@@ -1233,6 +1345,7 @@
     const item = document.createElement("li");
     item.className = event.kind === "text" ? "text" : "tool";
     item.textContent = event.text;
+    if (event.id) item.dataset.stepId = String(event.id);
     activity.list.appendChild(item);
     activity.steps += 1;
     activity.summary.textContent = `PM is working… (${activity.steps} step${activity.steps === 1 ? "" : "s"})`;
@@ -1291,6 +1404,44 @@
     return row;
   }
 
+  // The running turn's Stop button, on its "PM is thinking..." status row. One at a
+  // time: the turn's reply or error (or a newer turn starting) takes it away.
+  let pmStopBtn = null;
+
+  function showPmStop(bubble) {
+    hidePmStop();
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "stop-btn";
+    button.textContent = "Stop";
+    button.title = "Stop the PM's turn - messages still waiting for it are discarded";
+    button.addEventListener("click", () => {
+      button.disabled = true;
+      button.textContent = "Stopping…";
+      fetch(`/chat/${sessionId}/stop`, { method: "POST" })
+        .then((r) => {
+          if (!r.ok) return r.json().then((body) => { throw new Error(body.detail ?? `stop failed (${r.status})`); });
+          return r.json();
+        })
+        // The turn's own pm_error ("Stopped by ...") arrives over the socket; a turn that
+        // had already ended leaves nothing to wait for.
+        .then((report) => { if (!report.pm_turn) hidePmStop(); })
+        .catch((err) => {
+          addRow("status", `Could not stop the PM: ${err.message}`);
+          button.disabled = false;
+          button.textContent = "Stop";
+        });
+    });
+    bubble.classList.add("has-stop");
+    bubble.appendChild(button);
+    pmStopBtn = button;
+  }
+
+  function hidePmStop() {
+    if (pmStopBtn) pmStopBtn.remove();
+    pmStopBtn = null;
+  }
+
   function connectChat() {
     chatSocket = new WebSocket(`ws://${location.host}/ws/chat/${sessionId}`);
     chatSocket.onopen = () => addRow("status", "Connected.");
@@ -1323,20 +1474,33 @@
             const queued = log.querySelector(`.row.queued[data-queued-id="${event.queued_id}"]`);
             if (queued) queued.classList.remove("queued");
           }
-          addRow("status", event.auto ? "PM is checking a finished task..." : "PM is thinking...");
+          showPmStop(addRow("status", event.auto ? "PM is checking a finished task..." : "PM is thinking..."));
           break;
         case "pm_progress":
           addProgress(event);
           break;
         case "pm_reply":
+          hidePmStop();
           finishProgress(event.text);
           addRow("pm", event.text);
           break;
         case "pm_error":
+          hidePmStop();
           finishProgress(null);
           addRow("status", `Error: ${event.message}`);
           if (isSignInError(event.message)) log.appendChild(signInHint());
           break;
+        case "pm_queue_discarded": {
+          // A stop threw away the messages still waiting for the PM (see POST
+          // /chat/{id}/stop): their queued bubbles go, and one line says so.
+          const ids = event.ids || [];
+          for (const id of ids) {
+            const row = log.querySelector(`.row[data-queued-id="${id}"]`);
+            if (row) row.remove();
+          }
+          addRow("status", `Discarded ${ids.length} queued message${ids.length === 1 ? "" : "s"} - send again if still needed.`);
+          break;
+        }
         case "error":
           sessionGone = true;
           addRow("status", `${event.message} - this session may have been merged and cleaned up.`);
@@ -1456,7 +1620,7 @@
       // the unread pass and as a non-unread status row, so it never disturbs the divider.
       const activity = session && session.activity;
       if (activity && activity.state === "working" && activity.reason === "thinking") {
-        addRow("status", "PM is thinking...");
+        showPmStop(addRow("status", "PM is thinking..."));
       }
     });
   }

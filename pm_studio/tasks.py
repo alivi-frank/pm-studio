@@ -11,7 +11,9 @@ from . import gitsnapshot, judge, roadmap, session_checkout
 from . import agent_mcp
 from .agent_env import subprocess_env
 from .config import CONFIG, DEV_INSTRUCTIONS_NAME, LOCAL_DIR_NAME
-from .agent import _stream_claude, progress_events
+from .agent import _stream_claude, ProgressTracker
+from .agent import STOP_WAIT_SECONDS, kill_process_tree
+from . import mcp_activity
 from .costing import agent_usage
 from . import models as models_module
 from .models import DEFAULT_MODEL
@@ -78,6 +80,18 @@ def list_artifacts(directory: Path) -> list[dict]:
     ]
 
 
+def _duration_text(seconds: float) -> str:
+    """How long a stopped task ran, for its result: 42s, 3m 05s, 1h 02m."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {secs:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m"
+
+
 def validate_dispatch_system(system: str) -> str | None:
     """Why a dev-task dispatch's `system` is unacceptable, or None when it's fine.
 
@@ -136,6 +150,12 @@ class TaskRegistry:
         # Live-updatable (see SessionManager.set_model) - read fresh by _execute on
         # every dev task, so a change takes effect on the next dispatch.
         self.model = model
+        # Each running dev task's `claude` process and thread, and who asked to stop the
+        # ones being stopped (see stop_task). Memory only: a restart kills them anyway.
+        self._procs: dict[str, subprocess.Popen] = {}
+        self._threads: dict[str, threading.Thread] = {}
+        self._stops: dict[str, str] = {}
+        self._procs_lock = threading.Lock()
         self._reconcile_stale_tasks()
 
     def _reconcile_stale_tasks(self) -> None:
@@ -162,6 +182,61 @@ class TaskRegistry:
                 "the merge may still be stuck mid-conflict."
             )
             self._write_task(task)
+
+    # ---- stop (the stakeholder, a session ending, or the server shutting down) ----
+
+    def _track(self, task_id: str, proc: subprocess.Popen) -> None:
+        """on_start for a dev task's `claude` process: remembered so stop_task can kill
+        it, and killed on the spot when the stop came before the process existed."""
+        with self._procs_lock:
+            self._procs[task_id] = proc
+            stopping = task_id in self._stops
+        if stopping:
+            kill_process_tree(proc)
+
+    def _request_stop(self, task_id: str, who: str) -> threading.Thread | None:
+        """Marks the task as being stopped by `who` and kills its process tree, if it
+        has one yet. Returns the task's thread, for the caller to wait on."""
+        with self._procs_lock:
+            self._stops[task_id] = who
+            proc = self._procs.get(task_id)
+            thread = self._threads.get(task_id)
+        if proc is not None:
+            kill_process_tree(proc)
+        return thread
+
+    @staticmethod
+    def _stoppable(task: dict) -> bool:
+        # A merge-conflict resolution belongs to the merge flow, which verifies and
+        # aborts it itself; only the PM's own dev tasks are stopped from outside.
+        return task.get("status") == "running" and task.get("kind") != "merge_resolution"
+
+    def stop_task(
+        self, task_id: str, who: str = "the user", wait: float = STOP_WAIT_SECONDS
+    ) -> dict | None:
+        """Stops a running dev task: kills its `claude` process and everything it
+        started, and its thread records it with status "stopped" ("Stopped by <who>
+        after <duration>.", no judge, and no PM auto-continue - see server.py's
+        _on_task_update). Waits up to `wait` seconds for that record and returns the
+        task as it then stands; None when the task does not exist or is not running."""
+        task = self.get_task(task_id)
+        if task is None or not self._stoppable(task):
+            return None
+        thread = self._request_stop(task_id, who)
+        if thread is not None:
+            thread.join(timeout=wait)
+        return self.get_task(task_id) or task
+
+    def stop_all(self, who: str = "the user", wait: float = STOP_WAIT_SECONDS) -> list[dict]:
+        """Stops every running dev task of this session (see stop_task), all at once,
+        and returns them as they then stand."""
+        running = [task for task in self.list_tasks() if self._stoppable(task)]
+        threads = [self._request_stop(task["id"], who) for task in running]
+        deadline = time.monotonic() + wait
+        for thread in threads:
+            if thread is not None:
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        return [self.get_task(task["id"]) or task for task in running]
 
     def subscribe(self, callback: Callable[[dict], None]) -> None:
         self._subscribers.append(callback)
@@ -291,11 +366,14 @@ class TaskRegistry:
             "head_before": head_before,
         }
         self._write_task(task)
-        threading.Thread(
+        thread = threading.Thread(
             target=self._run_and_record,
             args=(task_id, description, started_at, system, head_before, None, quick),
             daemon=True,
-        ).start()
+        )
+        with self._procs_lock:
+            self._threads[task_id] = thread
+        thread.start()
         return task
 
     def _prepare_code(self, system: str) -> tuple[list[str], str]:
@@ -355,8 +433,19 @@ class TaskRegistry:
         progress: list[dict] = []
 
         def on_progress(event: dict) -> None:
-            progress.append({"kind": event["kind"], "text": event["text"][:MAX_STEP_CHARS],
-                             "ts": time.time()})
+            if event["kind"] == "result":
+                # A tool's outcome updates its own step (matched by tool_use_id); a step
+                # already trimmed off the bounded list has nothing left to update.
+                step = next((s for s in progress if s.get("id") == event.get("id")), None)
+                if step is None:
+                    return
+                step.update(ok=event["ok"], outcome=event["outcome"][:MAX_STEP_CHARS],
+                            duration_ms=event["duration_ms"])
+            else:
+                step = {"kind": event["kind"], "text": event["text"][:MAX_STEP_CHARS], "ts": time.time()}
+                if event.get("id"):
+                    step["id"] = event["id"]
+                progress.append(step)
             del progress[:-MAX_PROGRESS_STEPS]
             running = self.get_task(task_id)
             if running is not None and running.get("status") == "running":
@@ -365,9 +454,15 @@ class TaskRegistry:
 
         is_error, result_text, usage = self._execute(
             description, system, quick=quick, artifacts_dir=artifacts_dir,
-            checkout_error=checkout_error, on_progress=on_progress,
+            checkout_error=checkout_error, on_progress=on_progress, progress_task_id=task_id,
+            stoppable_id=task_id,
         )
-        status_label = "error" if is_error else "done"
+        # Stopped (see stop_task) is its own outcome: not a failure to fix with a
+        # follow-up, and nothing for the judge - the work was cut off on purpose.
+        stopped_by = self._stops.get(task_id)
+        if stopped_by:
+            result_text = f"Stopped by {stopped_by} after {_duration_text(time.time() - started_at)}."
+        status_label = "stopped" if stopped_by else "error" if is_error else "done"
         with self.git_lock:
             gitsnapshot.snapshot(f"Dev task {task_id} ({status_label}): {description[:72]}", self.repo_root)
             head_after = self._git_head()
@@ -404,12 +499,15 @@ class TaskRegistry:
         # already carry the verdict - a PM told "done" without it would build on
         # unjudged work. The card shows "running" a little longer; that's the honest
         # state, since the task isn't settled until it's judged.
-        verdict = self._judge(
+        verdict = None if stopped_by else self._judge(
             system, description, head_before, head_after, nested_before, nested_after
         )
         if verdict is not None:
             final["judge"] = verdict
         self._write_task(final)
+        with self._procs_lock:
+            self._threads.pop(task_id, None)
+            self._stops.pop(task_id, None)
 
     def _judge(
         self, system: str, description: str, head_before: str, head_after: str,
@@ -491,6 +589,8 @@ class TaskRegistry:
         self, description: str, system: str = "", *, quick: bool = False,
         artifacts_dir: Path | None = None, checkout_error: str = "",
         on_progress: Callable[[dict], None] | None = None,
+        progress_task_id: str = "",
+        stoppable_id: str = "",
     ) -> tuple[bool, str, dict]:
         """Runs a single headless dev-agent turn in this registry's workspace.
         Returns (is_error, result_text, agent_usage). The usage figures come straight
@@ -610,9 +710,16 @@ class TaskRegistry:
         # [models] quick, when set: looking and screenshotting rarely needs the session's
         # biggest model, and a quick task is the stakeholder waiting on an answer.
         model = (models_module.QUICK_MODEL if quick else None) or self.model
+        # Steps with their outcomes, and every MCP call into the activity log - for a
+        # merge resolution too (no task id there). See agent.ProgressTracker.
+        tracker = ProgressTracker(
+            session_id=self.session_id, source="task", task_id=progress_task_id,
+            activity=mcp_activity.ACTIVITY_LOG,
+        )
+
         def on_message(message: dict) -> None:
-            if on_progress is not None:
-                for event in progress_events(message):
+            for event in tracker.events(message):
+                if on_progress is not None:
                     on_progress(event)
 
         try:
@@ -641,11 +748,16 @@ class TaskRegistry:
                 env={**subprocess_env(self.session_id), **extra_env},
                 timeout=timeout,
                 on_message=on_message,
+                # `stoppable_id` (a dev task's id) makes the run stoppable: see stop_task.
+                **({"on_start": lambda proc: self._track(stoppable_id, proc)} if stoppable_id else {}),
             )
         except FileNotFoundError:
             return True, "The `claude` CLI is not installed or not on PATH.", {}
         finally:
             mcp.close()
+            if stoppable_id:
+                with self._procs_lock:
+                    self._procs.pop(stoppable_id, None)
 
         if returncode is None:
             return True, f"Dev agent timed out after {timeout}s.", {}

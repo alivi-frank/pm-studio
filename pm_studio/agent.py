@@ -18,9 +18,11 @@ from typing import Callable, Iterator, TYPE_CHECKING
 from . import gitsnapshot
 from .accounts import AGENT_HEADER_NAME, AGENT_TOKEN
 from . import agent_mcp
+from . import mcp_activity
 from .agent_env import subprocess_env
 from .config import CONFIG, LOCAL_DIR_NAME
 from .costing import agent_usage
+from .local_env import _group_kwargs, _kill_tree
 from .roadmap import (
     PRODUCTS,
     SYSTEMS,
@@ -658,7 +660,8 @@ follow-up task when the fix is clear - don't make the stakeholder debug engineer
 don't retry the same failing approach indefinitely: if a task fails twice in a row on what looks \
 like the same underlying problem, stop and explain the problem to the stakeholder instead of \
 burning a third attempt blind. If "status" is "running", it's still working - just note that if \
-asked.
+asked. If "status" is "stopped", the stakeholder stopped it on purpose: don't dispatch it again \
+unless they ask you to.
 5. Only ask the stakeholder something when it's genuinely their call: scope tradeoffs, ambiguous \
 product decisions, or confirming a milestone is done. This is the only thing that should make you \
 stop the autonomous loop in step 4 short of the goal being done or the safety limit kicking in."""
@@ -824,7 +827,11 @@ def _tool_label(name: str, tool_input: dict) -> str:
         return f"Reading {url.split('/')[2] if url.count('/') >= 2 else url}"
     if name.startswith("mcp__"):
         server, _, tool = name[len("mcp__"):].partition("__")
-        return f"Using {server}: {tool.replace('_', ' ')}" if tool else f"Using {server}"
+        label = f"Using {server}: {tool.replace('_', ' ')}" if tool else f"Using {server}"
+        # Only the sanitizer's whitelist of arguments (SQL, URL, element, file name) -
+        # never typed text, values, bodies or tokens (see mcp_activity.args_summary).
+        summary = mcp_activity.args_summary(tool, tool_input)
+        return f"{label} ({summary})" if summary else label
     return f"Using {name}"
 
 
@@ -842,17 +849,111 @@ def progress_events(message: dict) -> list[dict]:
         if block.get("type") == "text" and str(block.get("text") or "").strip():
             events.append({"type": "pm_progress", "kind": "text", "text": block["text"]})
         elif block.get("type") == "tool_use":
-            events.append({
+            event = {
                 "type": "pm_progress", "kind": "tool",
                 "text": _tool_label(str(block.get("name") or ""), block.get("input") or {}),
-            })
+            }
+            if block.get("id"):
+                # The tool_use_id: the later "result" event for this step carries it too.
+                event["id"] = str(block["id"])
+            events.append(event)
     return events
+
+
+class ProgressTracker:
+    """progress_events plus each tool call's OUTCOME, for one PM turn or dev task.
+
+    Stateful, because the outcome arrives on a later line: an assistant message's
+    `tool_use` block (id, name, input) starts a step, and a user message's `tool_result`
+    block (tool_use_id, content, is_error) ends it. For that, events() emits
+    {"type": "pm_progress", "kind": "result", "id", "ok", "outcome", "duration_ms"} -
+    an update of the step with that id, never a new one. `outcome` is the first line of
+    the error for a failure; for an MCP tool that worked, only the result's shape ("12
+    rows", "ok") - never its contents, which can hold patient data; "" otherwise.
+
+    Each MCP call (`mcp__<server>__<tool>`) is also appended to `activity` (an
+    mcp_activity.McpActivityLog) when its result arrives."""
+
+    MAX_PENDING = 500
+
+    def __init__(
+        self, *, session_id: str = "", source: str = "pm", task_id: str = "",
+        activity: "mcp_activity.McpActivityLog | None" = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.session_id = session_id
+        self.source = source
+        self.task_id = task_id
+        self.activity = activity
+        self._clock = clock
+        self._pending: dict[str, tuple[str, dict, float]] = {}
+
+    def events(self, message: dict) -> list[dict]:
+        kind = message.get("type")
+        content = (message.get("message") or {}).get("content")
+        if kind == "assistant":
+            for block in content if isinstance(content, list) else []:
+                if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id"):
+                    tool_input = block.get("input")
+                    self._pending[str(block["id"])] = (
+                        str(block.get("name") or ""),
+                        tool_input if isinstance(tool_input, dict) else {},
+                        self._clock(),
+                    )
+                    while len(self._pending) > self.MAX_PENDING:
+                        self._pending.pop(next(iter(self._pending)))
+            return progress_events(message)
+        if kind != "user" or not isinstance(content, list):
+            return []
+        events: list[dict] = []
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            step_id = str(block.get("tool_use_id") or "")
+            started = self._pending.pop(step_id, None)
+            if started is None:
+                continue
+            name, tool_input, began = started
+            ok = not block.get("is_error")
+            duration_ms = max(0, int(round((self._clock() - began) * 1000)))
+            is_mcp = name.startswith("mcp__")
+            if not ok:
+                outcome = mcp_activity.error_summary(block.get("content"))
+            elif is_mcp:
+                outcome = mcp_activity.result_summary(block.get("content"))
+            else:
+                outcome = ""
+            events.append({
+                "type": "pm_progress", "kind": "result", "id": step_id,
+                "ok": ok, "outcome": outcome, "duration_ms": duration_ms,
+            })
+            if is_mcp and self.activity is not None:
+                server, _, tool = name[len("mcp__"):].partition("__")
+                with contextlib.suppress(Exception):  # the log never breaks a turn
+                    self.activity.record(mcp_activity.make_entry(
+                        session=self.session_id, source=self.source, task_id=self.task_id,
+                        server=server, tool=tool, args=mcp_activity.args_summary(tool, tool_input),
+                        ok=ok, outcome=outcome, duration_ms=duration_ms,
+                    ))
+        return events
 
 
 # Every PM turn's `claude` process while it runs (see _stream_claude), so the server can
 # end them on shutdown instead of waiting minutes for a turn to finish.
 _LIVE_TURNS: set[subprocess.Popen] = set()
 _LIVE_TURNS_LOCK = threading.Lock()
+# How long a stop (PMAgent.stop_turn, TaskRegistry.stop_task) waits for what it killed
+# to finish recording itself, so the caller gets - and the page shows - the final state.
+STOP_WAIT_SECONDS = 15.0
+
+
+def kill_process_tree(proc: subprocess.Popen) -> None:
+    """Kills a `claude` process and everything it started (its MCP servers, node
+    children, a Bash tool's commands). _stream_claude starts each one in its own process
+    group, so local_env's _kill_tree reaches the whole tree: `taskkill /T /F` on Windows,
+    killpg on the group elsewhere. Never raises - the process may already be gone."""
+    with contextlib.suppress(Exception):
+        _kill_tree(proc)
 
 
 def stop_running_turns() -> int:
@@ -861,14 +962,14 @@ def stop_running_turns() -> int:
     with _LIVE_TURNS_LOCK:
         procs = list(_LIVE_TURNS)
     for proc in procs:
-        with contextlib.suppress(OSError):
-            proc.kill()
+        kill_process_tree(proc)
     return len(procs)
 
 
 def _stream_claude(
     command: list[str], text: str, *, cwd: str, env: dict, timeout: float,
     on_message: Callable[[dict], None],
+    on_start: Callable[[subprocess.Popen], None] | None = None,
 ) -> tuple[int | None, dict | None, str, str]:
     """Runs `claude ... --output-format stream-json --verbose` with `text` on stdin,
     handing every JSON line but the last to `on_message` as it arrives.
@@ -878,13 +979,22 @@ def _stream_claude(
     session_id/is_error/result/usage read as before - or None if the process ended
     without one; returncode is None when it was killed for running past `timeout`.
     stdin and stderr are pumped on their own threads, so neither pipe can fill up and
-    stall the process while stdout is being read."""
+    stall the process while stdout is being read.
+
+    `on_start` gets the process the moment it exists, so a caller can remember it and
+    stop it (kill_process_tree) while it runs; a stopped run simply ends early, with
+    whatever result it got to. The process is started in its own process group, which
+    is what lets that kill - and the timeout's - reach everything it spawned."""
     proc = subprocess.Popen(
         command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         cwd=cwd, env=env, text=True, encoding="utf-8", errors="replace",
+        **_group_kwargs(),
     )
     with _LIVE_TURNS_LOCK:
         _LIVE_TURNS.add(proc)
+    if on_start is not None:
+        with contextlib.suppress(Exception):  # a broken listener never breaks a run
+            on_start(proc)
     stderr_parts: list[str] = []
     timed_out = threading.Event()
 
@@ -899,8 +1009,7 @@ def _stream_claude(
 
     def kill() -> None:
         timed_out.set()
-        with contextlib.suppress(OSError):
-            proc.kill()
+        kill_process_tree(proc)
 
     pumps = [threading.Thread(target=feed, daemon=True), threading.Thread(target=drain_stderr, daemon=True)]
     for pump in pumps:
@@ -1041,6 +1150,11 @@ class PMAgent:
         # Where the running turn's pm_progress events go (see _run_pm_turn_with_progress);
         # None between turns.
         self._progress_sink: Callable[[dict], None] | None = None
+        # The running turn's `claude` process (None between turns), and why it is being
+        # stopped once someone asked to (see stop_turn) - "Stopped by ...", the message
+        # the turn then ends with.
+        self._turn_proc: subprocess.Popen | None = None
+        self._stop_reason: str | None = None
         # The roadmap context last put in front of this conversation, and how many turns
         # have gone by on deltas since the last full one (see _with_roadmap_context).
         # Memory only: after a restart the first turn simply sends it in full again.
@@ -1397,6 +1511,34 @@ class PMAgent:
                 self.on_activity_change()
             except Exception:
                 pass
+
+    def _on_turn_start(self, proc: subprocess.Popen) -> None:
+        """_stream_claude's on_start for this PM's turns: remembers the process, and kills
+        it on the spot when a stop was asked for before it existed (see stop_turn)."""
+        self._turn_proc = proc
+        if self._stop_reason is not None:
+            kill_process_tree(proc)
+
+    def stop_turn(self, who: str = "the user", wait: float = STOP_WAIT_SECONDS) -> bool:
+        """Stops the PM turn running right now, if there is one: kills its `claude`
+        process tree, and the turn ends as a pm_error "Stopped by <who>." - written to
+        the transcript like any failed turn. A turn still getting ready (no process yet)
+        is killed the moment its process starts. Waits up to `wait` seconds for the turn
+        to finish recording itself. Returns whether there was a turn to stop. Messages
+        queued behind it are the server's to discard (see server._stop_session)."""
+        if not self.turn_active:
+            return False
+        self._stop_reason = f"Stopped by {who}."
+        proc = self._turn_proc
+        if proc is not None:
+            kill_process_tree(proc)
+        deadline = time.monotonic() + wait
+        while self._stop_reason is not None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        # The transcript and snapshot are written under pm_lock once the process is gone.
+        if self.pm_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            self.pm_lock.release()
+        return True
 
     def archive_current(self, reason: str) -> None:
         """Copies the current SPEC.md/chat_history.json into workspace/archive before
@@ -1775,6 +1917,9 @@ class PMAgent:
                     gitsnapshot.snapshot(commit_message, self.repo_root)
             yield final_event
         finally:
+            # A stop that came after the process ended must not carry over to the next
+            # turn (see stop_turn).
+            self._stop_reason = None
             self.turn_active = False
             self._notify_activity_change()
 
@@ -1865,10 +2010,14 @@ class PMAgent:
             command += ["--resume", self.claude_session_id]
 
         sink = self._progress_sink
+        # Steps plus their outcomes, and the MCP activity log (see ProgressTracker).
+        tracker = ProgressTracker(
+            session_id=self.session_id, source="pm", activity=mcp_activity.ACTIVITY_LOG,
+        )
 
         def on_message(message: dict) -> None:
-            if sink is not None:
-                for event in progress_events(message):
+            for event in tracker.events(message):
+                if sink is not None:
                     sink(event)
 
         try:
@@ -1884,14 +2033,19 @@ class PMAgent:
                 env=subprocess_env(self.session_id),
                 timeout=PM_TIMEOUT_SECONDS,
                 on_message=on_message,
+                on_start=self._on_turn_start,
             )
         except FileNotFoundError:
             return {"type": "pm_error", "message": "The `claude` CLI is not installed or not on PATH."}
         finally:
+            self._turn_proc = None
+            stopped, self._stop_reason = self._stop_reason, None
             with contextlib.suppress(OSError):
                 system_prompt_path.unlink(missing_ok=True)
             mcp.close()
 
+        if stopped:
+            return {"type": "pm_error", "message": stopped}
         if returncode is None:
             return {"type": "pm_error", "message": f"PM agent timed out after {PM_TIMEOUT_SECONDS}s."}
         if data is None:

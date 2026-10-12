@@ -305,6 +305,21 @@
   .mcp-source code { font-family: ui-monospace, monospace; word-break: break-all; }
   .mcp-target { font-family: ui-monospace, monospace; font-size: 0.92em; color: var(--ink-muted); word-break: break-all; }
   .mcp-note { margin: 6px 0 0; font-size: 0.78em; color: var(--ink-muted); }
+  /* What agents did with each server (GET /agents/mcp/activity) and the Test result. */
+  .mcp-last { margin-top: 4px; font-size: 0.88em; color: var(--ink-secondary); word-break: break-word; }
+  .mcp-last.ok { color: var(--ok); }
+  .mcp-last.bad { color: var(--error); font-weight: 600; }
+  .mcp-test { margin-top: 4px; font-size: 0.88em; color: var(--ink-secondary); word-break: break-word; }
+  .mcp-test.ok { color: var(--ok); }
+  .mcp-test.bad { color: var(--error); }
+  .mcp-test:empty { display: none; }
+  .mcp-calls { margin-top: 4px; font-size: 0.85em; }
+  .mcp-calls summary { cursor: pointer; color: var(--ink-muted); }
+  .mcp-calls table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+  .mcp-calls td { padding: 2px 6px 2px 0; vertical-align: top; color: var(--ink-secondary); }
+  .mcp-calls td.args { font-family: ui-monospace, monospace; word-break: break-all; }
+  .mcp-calls tr.bad td { color: var(--error); }
+  .mcp-calls .mcp-calls-wrap { overflow-x: auto; }
   .env-sub { margin: 10px 0 0; font-size: 0.8em; color: var(--ink-muted); font-weight: 600; }
   .env-outputs { display: grid; gap: 2px; margin-top: 4px; font-size: 0.92em; color: var(--ink-secondary); }
   .env-outputs:empty { display: none; }
@@ -1612,6 +1627,113 @@
   let mcpSeq = 0;
   let mcpData = null;
   let mcpPanel = null;
+  // GET /agents/mcp/activity (newest calls + per-server counters), fetched with each
+  // poll; the Test results by server name; which "Recent calls" lists are expanded.
+  let mcpActivity = null;
+  const mcpTests = {};
+  const mcpCallsOpen = new Set();
+  const MCP_RECENT_CALLS = 15;
+
+  function durationText(ms) {
+    if (typeof ms !== "number") return "";
+    return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`;
+  }
+
+  function mcpLastCall(name) {
+    const stats = mcpActivity && mcpActivity.servers && mcpActivity.servers[name];
+    if (!stats || !stats.calls) return el("div", "mcp-last", "No calls by agents yet.");
+    if (stats.last_ok) {
+      const node = el("div", "mcp-last ok", `last call: ✓ ${ago(stats.last_call_at) || ""}`);
+      node.title = new Date(stats.last_call_at * 1000).toLocaleString();
+      return node;
+    }
+    const err = stats.last_error || {};
+    const streak = stats.consecutive_errors || 1;
+    const what = streak > 1 ? `✗ ${streak} failed in a row` : `last call: ✗ ${ago(stats.last_call_at) || ""}`;
+    const node = el("div", "mcp-last bad", `${what}: ${String(err.outcome || "failed")}`);
+    node.title = stats.last_ok_at
+      ? `last worked ${ago(stats.last_ok_at)} (${new Date(stats.last_ok_at * 1000).toLocaleString()})`
+      : "has not worked in the retained history";
+    return node;
+  }
+
+  function mcpRecentCalls(name) {
+    const entries = ((mcpActivity && mcpActivity.entries) || []).filter((e) => e && e.server === name);
+    if (!entries.length) return null;
+    const details = el("details", "mcp-calls");
+    details.open = mcpCallsOpen.has(name);
+    details.addEventListener("toggle", () => {
+      if (details.open) mcpCallsOpen.add(name);
+      else mcpCallsOpen.delete(name);
+    });
+    const shown = entries.slice(0, MCP_RECENT_CALLS);
+    details.appendChild(el("summary", null, `Recent calls (${shown.length})`));
+    const wrap = el("div", "mcp-calls-wrap");
+    const table = el("table");
+    shown.forEach((e) => {
+      const tr = el("tr", e.ok ? null : "bad");
+      const when = el("td", null, typeof e.ts === "number" ? new Date(e.ts * 1000).toLocaleTimeString() : "");
+      if (typeof e.ts === "number") when.title = new Date(e.ts * 1000).toLocaleString();
+      tr.appendChild(when);
+      const who = e.source === "task" ? `task ${e.task_id || ""}` : String(e.source || "");
+      tr.appendChild(el("td", null, [e.session, who].filter(Boolean).join(" · ")));
+      tr.appendChild(el("td", null, String(e.tool || "")));
+      tr.appendChild(el("td", "args", String(e.args || "")));
+      tr.appendChild(el("td", null, `${e.ok ? "✓" : "✗"}${e.outcome ? ` ${e.outcome}` : ""}`));
+      tr.appendChild(el("td", null, durationText(e.duration_ms)));
+      table.appendChild(tr);
+    });
+    wrap.appendChild(table);
+    details.appendChild(wrap);
+    return details;
+  }
+
+  function mcpTestLine(name) {
+    const t = mcpTests[name];
+    if (!t) return null;
+    if (t.running) return el("div", "mcp-test", "Testing: starting the server, MCP handshake, probe…");
+    const r = t.result || {};
+    if (t.error) return el("div", "mcp-test bad", t.error);
+    if (r.ok === null) return el("div", "mcp-test", String(r.error || "not supported"));
+    const took = durationText(r.duration_ms);
+    if (r.ok) {
+      const tools = Array.isArray(r.tools) ? r.tools : [];
+      const parts = [`✓ connected`, `${tools.length} tool${tools.length === 1 ? "" : "s"}`];
+      if (r.probe) parts.push(`probe ${r.probe}: ${r.probe_outcome || "ok"}`);
+      if (took) parts.push(took);
+      const node = el("div", "mcp-test ok", parts.join(" · "));
+      if (tools.length) node.title = tools.join(", ");
+      return node;
+    }
+    return el("div", "mcp-test bad", `✗ failed at ${String(r.stage || "?")}: ${String(r.error || "unknown error")}${took ? ` (${took})` : ""}`);
+  }
+
+  async function runMcpTest(name) {
+    mcpTests[name] = { running: true };
+    renderMcp();
+    let entry;
+    try {
+      const response = await fetch(`/agents/mcp/${encodeURIComponent(name)}/test`, {
+        method: "POST", headers: { Accept: "application/json" },
+      });
+      const payload = await response.json().catch(() => null);
+      if (response.ok && payload) entry = { result: payload };
+      else if (response.status === 403) entry = { error: "You don't have permission to test agent tools." };
+      else entry = { error: detailText(payload && payload.detail) || `Could not run the test (${response.status}).` };
+    } catch (err) {
+      entry = { error: "Could not run the test." };
+    }
+    mcpTests[name] = entry;
+    await refreshMcpActivity(); // a probe call is logged: the "last call" line moves too
+    renderMcp();
+  }
+
+  async function refreshMcpActivity() {
+    try {
+      const response = await fetch("/agents/mcp/activity?limit=200", { headers: { Accept: "application/json" } });
+      if (response.ok) mcpActivity = await response.json();
+    } catch (err) { /* transient - keep the last one */ }
+  }
 
   function ago(epochSeconds) {
     if (typeof epochSeconds !== "number") return null;
@@ -1774,6 +1896,21 @@
       if (srv.message) notes.push(String(srv.message));
       const msg = el("div", st.tone === "bad" ? "env-msg bad" : "env-msg", notes.join(" — "));
       row.appendChild(msg);
+      if (mcpCanManage && srv.name) {
+        // A real connection test: start, MCP handshake, tools/list, the `probe` call.
+        const test = button(mcpTests[srv.name] && mcpTests[srv.name].running ? "Testing…" : "Test", "ghost");
+        test.disabled = !!(mcpTests[srv.name] && mcpTests[srv.name].running);
+        test.title = srv.probe
+          ? `Start it as agents do, do the MCP handshake and call ${srv.probe}`
+          : "Start it as agents do and do the MCP handshake (add a probe in config.toml to also call a tool)";
+        test.addEventListener("click", () => runMcpTest(String(srv.name)));
+        line.appendChild(test);
+      }
+      if (mcpActivity && srv.name) row.appendChild(mcpLastCall(String(srv.name)));
+      const testLine = srv.name ? mcpTestLine(String(srv.name)) : null;
+      if (testLine) row.appendChild(testLine);
+      const calls = srv.name && mcpActivity ? mcpRecentCalls(String(srv.name)) : null;
+      if (calls) row.appendChild(calls);
       mcpPanel.list.appendChild(row);
     });
   }
@@ -1794,6 +1931,7 @@
       }
       if (response.ok) payload = await response.json();
     } catch (err) { /* transient - keep what is on screen */ }
+    if (payload) await refreshMcpActivity();
     if (seq !== mcpSeq) return;
     if (payload) {
       mcpData = payload;

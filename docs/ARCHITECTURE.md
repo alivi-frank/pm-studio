@@ -575,7 +575,7 @@ class TaskRegistry:
 ```
 - Task records are JSON files at `<workspace_dir>/tasks/<id>.json`:
   `{id: 8hex, kind: "dev"|"merge_resolution", description, system, status:
-  "running"|"done"|"error", started_at, finished_at, result, head_before, head_after,
+  "running"|"done"|"error"|"stopped", started_at, finished_at, result, head_before, head_after,
   system_repos_before?, system_repos_after?, judge?}` — the `system_repos_*` maps
   (`{rel: {head, dirty}}`) exist only for systems with their own nested repositories
   (see `_system_repo_dirs`).
@@ -641,8 +641,17 @@ class TaskRegistry:
   flip to `error`, `finished_at=now`, result = "Interrupted: the PM Studio server
   restarted while this task was still running… If this was a merge-conflict resolution,
   check `git status` by hand."
+- **Stopping.** `start_task` keeps each task's thread, and `_execute` (with
+  `stoppable_id`) passes `on_start` to `run_agent`, so the registry holds the running
+  `claude` process per task id. `stop_task(id, who)` / `stop_all(who)` record who asked,
+  kill the process tree (`agent.kill_process_tree`; a stop that comes before the process
+  exists kills it from `on_start`) and wait up to `STOP_WAIT_SECONDS` (15) for the thread
+  to write the final record: status `stopped`, result `Stopped by {who} after
+  {duration}.`, the snapshot as usual, **no judge**. Merge resolutions are not stoppable
+  from outside (the merge flow owns them). `_reconcile_stale_tasks` only touches
+  `running`, so a `stopped` record is final like `done`/`error`.
 - Subscriber pattern: `subscribe(cb)`; every `_write_task` notifies. The server wires
-  this to websocket broadcast + PM auto-continue.
+  this to websocket broadcast + PM auto-continue (done/error only — never `stopped`).
 - `model` is a plain attribute read fresh per dispatch, so live model changes apply to
   the next task.
 
@@ -709,7 +718,14 @@ from the store every turn, so a rename cannot go stale here.
 through `_stream_claude`, which reads the JSON lines as they arrive. Every assistant text
 block and tool call becomes a `{"type":"pm_progress","kind":"text"|"tool","text":...}`
 event (`progress_events`; tool calls get a label built from what they are for, never the
-raw command, which carries the agent token). The final `{"type":"result"}` line has the
+raw command, which carries the agent token; an MCP call's label adds a sanitized argument
+summary - SQL, URL, element, file name, never typed text or secrets). Tool calls carry
+their `id` (the tool_use_id), and a `ProgressTracker` per turn - also used by dev tasks,
+whose record's `progress` steps get updated in place - matches each later `tool_result`
+to its step and emits `{"type":"pm_progress","kind":"result","id","ok","outcome",
+"duration_ms"}`: the outcome is the error's first line on failure, an MCP result's shape
+only ("12 rows", "ok") on success, never its contents. Each MCP call is also appended to
+`<workspace>/mcp-activity.jsonl` (`mcp_activity.py`). The final `{"type":"result"}` line has the
 fields `--output-format json` used to print: save its `session_id` for resume and return
 `{"type":"pm_reply","text":result}` or `{"type":"pm_error","message":...}` (with literal
 stderr/exit evidence on failure).
@@ -736,6 +752,22 @@ this process sent (always on the first turn after a restart, which also minted a
 agent token — without this every curl in a resumed conversation would 401), marked as
 replacing the original. Scope, mode and MCP changes reach a running conversation the same
 way. A failed turn clears the record, so the next one re-states again.
+
+### Stopping a turn
+`_stream_claude(..., on_start=)` hands the process to `on_start` right after `Popen`, and
+starts it in its own process group (`local_env._group_kwargs`), so
+`kill_process_tree` (`local_env._kill_tree`: `taskkill /PID <pid> /T /F` on Windows,
+`killpg` SIGTERM→SIGKILL elsewhere) reaches the MCP servers and commands it spawned — the
+timeout kill uses it too. A PM turn's `on_start` is `_on_turn_start`, which keeps the
+process in `_turn_proc`. `stop_turn(who)` (only while `turn_active`) sets `_stop_reason =
+"Stopped by <who>."` and kills the tree; a turn with no process yet is killed by
+`_on_turn_start` the moment it gets one. `_run_pm_turn` then returns
+`{"type":"pm_error","message":_stop_reason}`, which `_run_turn` records like any failed
+turn; the reason is cleared there and in `_run_turn`'s `finally`, so a late stop never
+carries into the next turn. `stop_turn` waits (≤ `STOP_WAIT_SECONDS`) for the turn to
+record itself. Shutdown (`stop_running_turns`) tree-kills every `claude` process
+`_stream_claude` is running — PM turns and dev tasks — after `stop_all` has marked each
+session's running dev tasks stopped: the process groups are out of Ctrl+C's reach.
 
 ### Transcript
 `chat_history.json` — a list of `{role, text, ts, attachments?}` with roles
@@ -904,6 +936,9 @@ else is active so callers skip the block entirely rather than injecting noise.
   unmerged branch.
 - `cleanup(id)` — post-merge worktree removal (refuse unless status == merged).
   `delete(id)` — force removal (never for default). Both → archived.
+- Before `archive`, `terminate`, `cleanup` and `delete`, the server stops the session
+  (`server._stop_for_lifecycle` → `_stop_session`: queued messages, PM turn, dev tasks,
+  local services), so nothing of a session keeps running once it is ended or hidden.
 - Every worktree removal (`_remove_worktree`) first calls
   `session_checkout.release_system_checkouts(REPO_ROOT, worktree, force=force)` (see
   below); a checkout it had to keep turns cleanup/terminate into a `ValueError` naming
@@ -967,6 +1002,9 @@ background-thread → websocket hops via `loop.call_soon_threadsafe(asyncio.crea
 | `GET /chat/{id}/pending` | messages accepted but not yet started — the chat page appends these below the transcript on load, deduped against it by `id` |
 | `GET /chat/{id}/uploads/{filename}` | attachment files (basename-sanitized) |
 | `POST /chat/{id}/reset` | archive + clear |
+| `POST /chat/{id}/stop` | `run_session`. Stops the PM turn in flight (it ends as `pm_error` "Stopped by …", transcribed) and discards the queued messages (memory + `pending_messages.json`; open pages get `pm_queue_discarded {ids}`). `{session, pm_turn, discarded}` |
+| `POST /tasks/{id}/{tid}/stop` | `dispatch_dev_task`. Stops one running dev task → status `stopped`; `{session, task}`. 404 unknown task, 409 not running / merge resolution |
+| `POST /sessions/{id}/stop` | `run_session`. `_stop_session`: discard queue, stop PM turn, `stop_all` dev tasks, `local_env.stop_session` (services only — resources and checkout kept). `{session, pm_turn, tasks, services, discarded}`; empty when idle. 404 unknown session. Archive / terminate / cleanup / delete run the same stop first (`_stop_for_lifecycle`), before `_release_local_env` |
 | `POST /tasks/{id}` `{"task": "...", "system": "..."}` | dispatch dev task (immediate return); `system` required once `[systems]` is declared — it routes the system's `gitflow` rules into the dev agent's prompt — and refused when it isn't (400 naming the valid ids either way) |
 | `GET /tasks/{id}`, `GET /tasks/{id}/{tid}` | list / one |
 | `GET /roadmap/data` | `{products, product_parents, systems, product_systems, unattributed, items-by-product, people}`. Every change (and project) carries `assigned` — who is on it, from the local assignment or the linked ticket, with `conflict` when they disagree. The load table is NOT in this payload: the board derives it from the sections it draws, so an optimistic assignment cannot leave a stale figure above the card that just moved |
@@ -1020,7 +1058,8 @@ and an auto-continuation broadcast firing at an arbitrary time) and concurrent
 ### Task completion fan-out
 `TaskRegistry.subscribe` → on every task write: broadcast `task_update` on
 `/ws/tasks/{id}`; broadcast an enriched `session_updated` on `/ws/sessions` (activity
-changed); and **only for `kind=="dev"` reaching done/error**, spawn a thread running
+changed); and **only for `kind=="dev"` reaching done/error** (never `stopped` — someone
+stopped it on purpose; its spend is still recorded), spawn a thread running
 `handle_task_completion`, broadcasting each resulting event to every open chat socket
 for that session with `"auto": true` (a merge-resolver finishing must NOT make the PM
 narrate an unrelated merge).

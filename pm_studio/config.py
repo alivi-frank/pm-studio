@@ -27,6 +27,7 @@ _load_env_file). It stays outside because it holds the actual secrets and the ho
 git-ignores it, while `pm_studio_local/` is committed.
 """
 
+import json
 import os
 import re
 import sys
@@ -1416,7 +1417,9 @@ def _check_local_placeholders(local: LocalEnvSpec, where: str, config_path: Path
 AGENT_MCP_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 AGENT_MCP_TRANSPORTS = ("stdio", "http", "sse")
 _AGENTS_KEYS = frozenset({"mcp"})
-_AGENT_MCP_KEYS = frozenset({"command", "args", "type", "url", "headers", "env", "pm"})
+_AGENT_MCP_KEYS = frozenset({"command", "args", "type", "url", "headers", "env", "pm", "probe"})
+_AGENT_MCP_PROBE_KEYS = frozenset({"tool", "args"})
+AGENT_MCP_TOOL_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 class AgentConfigError(ValueError):
@@ -1448,6 +1451,49 @@ class AgentMcpServer:
     headers: tuple[tuple[str, str], ...] = ()
     env: tuple[tuple[str, str], ...] = ()
     pm: bool = False
+    # Optional `probe = { tool = "query", args = { sql = "select 1" } }`: a harmless call
+    # the connection test (POST /agents/mcp/{name}/test) makes after the handshake.
+    probe: "AgentMcpProbe | None" = None
+
+
+@dataclass(frozen=True)
+class AgentMcpProbe:
+    """`probe` of an [agents.mcp.<name>] table. `args_json` is the args table as JSON
+    (kept as text so the server spec stays hashable); string values may use ${VAR}."""
+
+    tool: str
+    args_json: str = "{}"
+
+    @property
+    def args(self) -> dict:
+        return json.loads(self.args_json)
+
+
+def _parse_probe(value, where: str) -> AgentMcpProbe:
+    example = 'probe = { tool = "query", args = { sql = "select 1" } }'
+    if not isinstance(value, dict):
+        raise AgentConfigError(f"{where} `probe` = {value!r}; it must be a table, e.g. {example}")
+    unknown = sorted(set(value) - _AGENT_MCP_PROBE_KEYS)
+    if unknown:
+        raise AgentConfigError(
+            f"{where} `probe` has unknown key(s) {', '.join(unknown)}; allowed: tool, args"
+        )
+    tool = value.get("tool")
+    if not isinstance(tool, str) or not AGENT_MCP_TOOL_NAME.match(tool):
+        raise AgentConfigError(
+            f"{where} `probe.tool` = {tool!r}; it must be the name of one of the server's "
+            f"tools (letters, digits, '_', '.', '-'), e.g. {example}"
+        )
+    args = value.get("args", {})
+    if not isinstance(args, dict):
+        raise AgentConfigError(f"{where} `probe.args` = {args!r}; it must be a table, e.g. {example}")
+    try:
+        args_json = json.dumps(args, sort_keys=True)
+    except (TypeError, ValueError) as exc:
+        raise AgentConfigError(
+            f"{where} `probe.args` holds a value JSON cannot carry (dates/times are not allowed): {exc}"
+        ) from exc
+    return AgentMcpProbe(tool=tool, args_json=args_json)
 
 
 def _string_table(value, where: str, key: str) -> tuple[tuple[str, str], ...]:
@@ -1503,6 +1549,7 @@ def parse_agent_mcp(raw: dict) -> tuple[AgentMcpServer, ...]:
         if not isinstance(pm, bool):
             raise AgentConfigError(f"{where} `pm` = {pm!r}; it must be true or false")
         env = _string_table(entry.get("env", {}), where, "env")
+        probe = _parse_probe(entry["probe"], where) if "probe" in entry else None
         transport = entry.get("type")
         if command is not None:
             if not isinstance(command, str) or not command.strip():
@@ -1516,6 +1563,7 @@ def parse_agent_mcp(raw: dict) -> tuple[AgentMcpServer, ...]:
                 raise AgentConfigError(f"{where} has `headers` on a stdio server; headers are for url servers")
             servers.append(AgentMcpServer(
                 name=name, transport="stdio", command=command.strip(), args=tuple(args), env=env, pm=pm,
+                probe=probe,
             ))
             continue
         if not isinstance(url, str) or not url.strip():
@@ -1528,6 +1576,7 @@ def parse_agent_mcp(raw: dict) -> tuple[AgentMcpServer, ...]:
         servers.append(AgentMcpServer(
             name=name, transport=transport, url=url.strip(),
             headers=_string_table(entry.get("headers", {}), where, "headers"), env=env, pm=pm,
+            probe=probe,
         ))
     return tuple(servers)
 

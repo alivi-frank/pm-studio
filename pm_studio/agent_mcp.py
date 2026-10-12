@@ -38,6 +38,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
@@ -46,6 +47,8 @@ import tempfile
 import threading
 import time
 import tomllib
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Callable, Iterator
 from urllib.parse import urlsplit
@@ -57,6 +60,7 @@ from .config import (
     AgentMcpServer,
     parse_agent_mcp,
 )
+from . import mcp_activity
 
 # ${VAR} or ${VAR:-default}. The default may be empty (`${VAR:-}`).
 VAR_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -71,6 +75,11 @@ UNAVAILABLE = "unavailable"
 # POST /agents/mcp/{name}/check: a stdio server that is still running this long after
 # launch (stdin held open, as Claude Code does) counts as starting fine.
 CHECK_ALIVE_SECONDS = 3.0
+# POST /agents/mcp/{name}/test: the whole handshake (start, initialize, tools/list and
+# the optional probe call) must finish within this; npx's first-use download counts.
+TEST_TIMEOUT_SECONDS = 30.0
+MCP_PROTOCOL_VERSION = "2025-06-18"
+MAX_TOOL_PAGES = 10
 
 
 def _log(message: str) -> None:
@@ -104,6 +113,214 @@ def adapt_command(command: str, args: list[str], windows: bool) -> tuple[str, li
     if windows and command in NODE_LAUNCHERS:
         return "cmd", ["/c", command, *args]
     return command, list(args)
+
+
+class _TestFailure(Exception):
+    """One stage of the connection test failed; the message is already safe to show."""
+
+
+class _StdioSession:
+    """A JSON-RPC conversation with a stdio MCP server: newline-delimited JSON on its
+    stdin/stdout, started in its own process group so close() can end the whole tree
+    (`cmd /c npx ...` is three processes deep)."""
+
+    def __init__(self, argv: list[str], env: dict, cwd: str | None, deadline: float) -> None:
+        self.argv, self.env, self.cwd, self.deadline = argv, env, cwd, deadline
+        self.proc: subprocess.Popen | None = None
+        self._messages: "queue.Queue[dict | None]" = queue.Queue()
+        self._stderr: list[str] = []
+        self._next_id = 0
+
+    def start(self) -> None:
+        from .local_env import _group_kwargs
+
+        try:
+            self.proc = subprocess.Popen(
+                self.argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=self.env, cwd=self.cwd, **_group_kwargs(),
+            )
+        except OSError as exc:
+            raise _TestFailure(f"could not start: {exc.strerror or type(exc).__name__}") from exc
+        threading.Thread(target=self._read_stdout, daemon=True).start()
+        threading.Thread(target=self._read_stderr, daemon=True).start()
+
+    def _read_stdout(self) -> None:
+        with contextlib.suppress(Exception):
+            for raw in self.proc.stdout:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line:
+                    continue
+                try:
+                    message = json.loads(line)
+                except ValueError:
+                    continue  # a server logging to stdout; not protocol
+                if isinstance(message, dict):
+                    self._messages.put(message)
+        self._messages.put(None)
+
+    def _read_stderr(self) -> None:
+        with contextlib.suppress(Exception):
+            for raw in self.proc.stderr:
+                line = raw.decode("utf-8", "replace").strip()
+                if line:
+                    self._stderr.append(line)
+                    del self._stderr[:-20]
+
+    def _exited(self) -> _TestFailure:
+        code = None
+        with contextlib.suppress(Exception):
+            code = self.proc.wait(timeout=2)
+        last = self._stderr[-1] if self._stderr else ""
+        detail = f": {mcp_activity.error_summary(last)}" if last else ""
+        return _TestFailure(f"the server exited (code {code}){detail}")
+
+    def _send(self, message: dict) -> None:
+        try:
+            self.proc.stdin.write((json.dumps(message) + "\n").encode("utf-8"))
+            self.proc.stdin.flush()
+        except (OSError, ValueError) as exc:
+            raise self._exited() from exc
+
+    def notify(self, method: str, params: dict | None = None) -> None:
+        message = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            message["params"] = params
+        self._send(message)
+
+    def request(self, method: str, params: dict) -> dict:
+        self._next_id += 1
+        request_id = self._next_id
+        self._send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+        while True:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise _TestFailure(f"no answer to {method} in time")
+            try:
+                message = self._messages.get(timeout=remaining)
+            except queue.Empty:
+                raise _TestFailure(f"no answer to {method} in time") from None
+            if message is None:
+                raise self._exited()
+            if "method" in message and "id" in message:
+                # A request from the server (ping, roots/list...): answer, keep waiting.
+                reply = {"jsonrpc": "2.0", "id": message["id"]}
+                if message["method"] == "ping":
+                    reply["result"] = {}
+                else:
+                    reply["error"] = {"code": -32601, "message": "not supported by the PM Studio test"}
+                self._send(reply)
+                continue
+            if message.get("id") != request_id:
+                continue  # a notification (logging, progress)
+            if "error" in message:
+                raise _TestFailure(mcp_activity.jsonrpc_error_summary(message["error"]))
+            result = message.get("result")
+            return result if isinstance(result, dict) else {}
+
+    def close(self) -> None:
+        if self.proc is None:
+            return
+        from .local_env import _kill_tree
+
+        with contextlib.suppress(Exception):
+            self.proc.stdin.close()
+        with contextlib.suppress(Exception):
+            _kill_tree(self.proc)
+
+
+class _HttpSession:
+    """The same conversation over MCP's streamable HTTP transport: one POST per message,
+    the answer as JSON or as an SSE stream, the session id carried in Mcp-Session-Id."""
+
+    def __init__(self, url: str, headers: dict, deadline: float) -> None:
+        self.url, self.headers, self.deadline = url, dict(headers), deadline
+        self.session_id: str | None = None
+        self._next_id = 0
+
+    def start(self) -> None:
+        pass
+
+    def _post(self, message: dict, method: str = "POST"):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise _TestFailure("no answer in time")
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            **self.headers,
+        }
+        if self.session_id:
+            headers["Mcp-Session-Id"] = self.session_id
+        data = json.dumps(message).encode("utf-8") if method == "POST" else None
+        request = urllib.request.Request(self.url, data=data, method=method, headers=headers)
+        try:
+            return urllib.request.urlopen(request, timeout=remaining)
+        except urllib.error.HTTPError as exc:
+            raise _TestFailure(f"HTTP {exc.code} {mcp_activity.error_summary(str(exc.reason or ''))}") from exc
+        except (urllib.error.URLError, OSError) as exc:
+            reason = getattr(exc, "reason", exc)
+            raise _TestFailure(mcp_activity.error_summary(str(reason))) from exc
+
+    def notify(self, method: str, params: dict | None = None) -> None:
+        message = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            message["params"] = params
+        with self._post(message) as response:
+            response.read(65536)
+
+    def request(self, method: str, params: dict) -> dict:
+        self._next_id += 1
+        request_id = self._next_id
+        with self._post({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}) as response:
+            self.session_id = response.headers.get("Mcp-Session-Id") or self.session_id
+            if "text/event-stream" in (response.headers.get("Content-Type") or ""):
+                message = self._from_stream(response, request_id)
+            else:
+                try:
+                    message = json.loads(response.read(4 * 1024 * 1024).decode("utf-8", "replace"))
+                except ValueError as exc:
+                    raise _TestFailure(f"{method}: the answer is not JSON") from exc
+        if not isinstance(message, dict):
+            raise _TestFailure(f"{method}: no answer")
+        if "error" in message:
+            raise _TestFailure(mcp_activity.jsonrpc_error_summary(message["error"]))
+        result = message.get("result")
+        return result if isinstance(result, dict) else {}
+
+    @staticmethod
+    def _from_stream(response, request_id: int) -> dict | None:
+        data: list[str] = []
+        for raw in response:
+            line = raw.decode("utf-8", "replace").rstrip("\r\n")
+            if line.startswith("data:"):
+                data.append(line[5:].lstrip())
+                continue
+            if line or not data:
+                continue
+            with contextlib.suppress(ValueError):
+                message = json.loads("\n".join(data))
+                if isinstance(message, dict) and message.get("id") == request_id:
+                    return message
+            data = []
+        return None
+
+    def close(self) -> None:
+        if self.session_id:
+            with contextlib.suppress(Exception):
+                self._post({}, method="DELETE").close()
+
+
+def _expand_json(value, environ, missing: list[str]):
+    """A probe's args with ${VAR} resolved in every string, at any depth."""
+    if isinstance(value, str):
+        text, gaps = expand(value, environ)
+        missing.extend(gaps)
+        return text
+    if isinstance(value, list):
+        return [_expand_json(item, environ, missing) for item in value]
+    if isinstance(value, dict):
+        return {key: _expand_json(item, environ, missing) for key, item in value.items()}
+    return value
 
 
 class AgentMcp:
@@ -288,6 +505,8 @@ class AgentMcp:
                 "command": spec.command if spec.transport == "stdio" else None,
                 "url_host": url_host,
                 "pm": spec.pm,
+                # The probe's tool name only (POST .../test calls it); never its args.
+                "probe": spec.probe.tool if spec.probe else None,
                 "status": status,
                 "missing_env": missing,
                 "message": message,
@@ -358,6 +577,103 @@ class AgentMcp:
                 if proc.stdin:
                     proc.stdin.close()
                 _kill_tree(proc)
+
+    def test(
+        self, name: str, timeout: float = TEST_TIMEOUT_SECONDS,
+        activity: "mcp_activity.McpActivityLog | None" = None,
+    ) -> dict:
+        """POST /agents/mcp/{name}/test: a real connection test. Starts the server
+        exactly as an agent gets it (the resolved launch entry, OS-adapted, with the
+        agents' environment), speaks MCP - `initialize`, `notifications/initialized`,
+        `tools/list` - and, when the server declares a `probe`, calls that tool. All
+        within `timeout` seconds; the process tree is killed afterwards.
+
+        Returns {name, transport, ok, stage, tools, probe_outcome, error, duration_ms}:
+        `stage` is where it stopped ("start", "initialize", "tools", "probe"); on success
+        the last stage run. `probe_outcome` is the result's shape only ("1 row", "ok"),
+        `error` one safe line. A probe call is also recorded in `activity` (source
+        "test"), so a server that works again stops showing as failing.
+        http servers get the same handshake over streamable HTTP; sse ones are not
+        supported yet (ok None). Raises KeyError for an unknown name."""
+        spec = next((s for s in self.servers() if s.name == name), None)
+        if spec is None:
+            raise KeyError(name)
+        began = time.monotonic()
+        deadline = began + timeout
+        result: dict = {
+            "name": name, "transport": spec.transport, "ok": False, "stage": "start",
+            "tools": [], "probe": spec.probe.tool if spec.probe else None,
+            "probe_outcome": None, "error": None, "duration_ms": 0,
+        }
+
+        def finish(**fields) -> dict:
+            result.update(fields)
+            result["duration_ms"] = int(round((time.monotonic() - began) * 1000))
+            return result
+
+        status, missing, entry = self._state(spec)
+        if status == SKIPPED:
+            return finish(error=f"set {', '.join(missing)} in .env")
+        if status == UNAVAILABLE:
+            return finish(error=f"{spec.command!r} not found on PATH")
+        if spec.transport == "sse":
+            return finish(ok=None, error="the connection test is not supported for sse servers yet")
+        if spec.transport == "stdio":
+            from .agent_env import subprocess_env  # the environment agents run with
+
+            env = subprocess_env()
+            env.update(entry.get("env", {}))
+            session = _StdioSession(
+                [entry["command"], *entry["args"]], env, str(CONFIG.repo_root), deadline,
+            )
+        else:
+            session = _HttpSession(entry["url"], entry.get("headers", {}), deadline)
+        try:
+            session.start()
+            result["stage"] = "initialize"
+            session.request("initialize", {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "pm-studio-test", "version": "1"},
+            })
+            session.notify("notifications/initialized")
+            result["stage"] = "tools"
+            tools: list[str] = []
+            cursor = None
+            for _ in range(MAX_TOOL_PAGES):
+                listing = session.request("tools/list", {"cursor": cursor} if cursor else {})
+                tools += [str(t.get("name")) for t in listing.get("tools") or [] if isinstance(t, dict)]
+                cursor = listing.get("nextCursor")
+                if not cursor:
+                    break
+            result["tools"] = tools
+            if spec.probe is None:
+                return finish(ok=True)
+            result["stage"] = "probe"
+            gaps: list[str] = []
+            args = _expand_json(spec.probe.args, self._env(), gaps)
+            if gaps:
+                return finish(error=f"the probe needs {', '.join(dict.fromkeys(gaps))} set in .env")
+            if spec.probe.tool not in tools:
+                return finish(error=f"the server has no tool {spec.probe.tool!r}")
+            probe_began = time.monotonic()
+            called = session.request("tools/call", {"name": spec.probe.tool, "arguments": args})
+            ok = not called.get("isError")
+            outcome = (mcp_activity.result_summary if ok else mcp_activity.error_summary)(called.get("content"))
+            if activity is not None:
+                with contextlib.suppress(Exception):
+                    activity.record(mcp_activity.make_entry(
+                        session="", source="test", server=name, tool=spec.probe.tool,
+                        args=mcp_activity.args_summary(spec.probe.tool, args), ok=ok, outcome=outcome,
+                        duration_ms=int(round((time.monotonic() - probe_began) * 1000)),
+                    ))
+            if ok:
+                return finish(ok=True, probe_outcome=outcome)
+            return finish(error=outcome)
+        except _TestFailure as exc:
+            return finish(error=str(exc))
+        finally:
+            session.close()
 
 
 # The process-wide instance, seeded with the startup CONFIG (constructing it only

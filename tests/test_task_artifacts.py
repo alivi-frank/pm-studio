@@ -329,7 +329,7 @@ class LiveProgressTest(_RegistryCase):
         registry = self.registry
         registry._write_task({"id": "s1", "status": "running", "started_at": 1.0, "description": "d"})
 
-        def run_agent(command, text, *, cwd, env, timeout, on_message):
+        def run_agent(command, text, *, cwd, env, timeout, on_message, on_start=None):
             on_message(self._assistant({"type": "text", "text": "Starting the API."}))
             on_message(self._assistant({"type": "tool_use", "name": "Bash", "input": {
                 "command": 'curl -s -X POST "$PM_STUDIO_URL/local-env/epicride/api/start?session=s" -H "$H"'}}))
@@ -345,7 +345,7 @@ class LiveProgressTest(_RegistryCase):
         self.assertEqual([s["kind"] for s in final["progress"]], ["text", "tool"])
 
     def test_the_step_list_is_bounded(self) -> None:
-        def run_agent(command, text, *, cwd, env, timeout, on_message):
+        def run_agent(command, text, *, cwd, env, timeout, on_message, on_start=None):
             for i in range(tasks_module.MAX_PROGRESS_STEPS + 10):
                 on_message(self._assistant({"type": "text", "text": f"step {i} " + "x" * 500}))
             return 0, {"type": "result", "result": "done"}, "", ""
@@ -356,6 +356,37 @@ class LiveProgressTest(_RegistryCase):
         self.assertEqual(len(steps), tasks_module.MAX_PROGRESS_STEPS)
         self.assertTrue(steps[-1]["text"].startswith(f"step {tasks_module.MAX_PROGRESS_STEPS + 9} "))
         self.assertLessEqual(max(len(s["text"]) for s in steps), tasks_module.MAX_STEP_CHARS)
+
+    def test_a_tool_outcome_updates_its_own_step_in_place(self) -> None:
+        from pm_studio import mcp_activity
+
+        def run_agent(command, text, *, cwd, env, timeout, on_message, **kwargs):
+            on_message(self._assistant(
+                {"type": "tool_use", "id": "a", "name": "mcp__dev-db__query", "input": {"sql": "select 1"}},
+                {"type": "tool_use", "id": "b", "name": "Read", "input": {"file_path": "/r/README.md"}},
+            ))
+            on_message({"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "b", "content": "file text"},
+                {"type": "tool_result", "tool_use_id": "a", "content": "read ECONNRESET", "is_error": True},
+            ]}})
+            on_message(self._assistant({"type": "text", "text": "The database is unreachable."}))
+            return 0, {"type": "result", "result": "done"}, "", ""
+
+        log = mcp_activity.McpActivityLog(self.repo / "ws" / "mcp-activity.jsonl")
+        with mock.patch.object(tasks_module, "run_agent", run_agent), \
+                mock.patch.object(mcp_activity, "ACTIVITY_LOG", log):
+            self.registry._run_and_record("s3", "d", 1.0, "web", "", None, False)
+        steps = self.registry.get_task("s3")["progress"]
+        self.assertEqual([s["kind"] for s in steps], ["tool", "tool", "text"])
+        db, read, _ = steps
+        self.assertEqual((db["id"], db["ok"], db["outcome"]), ("a", False, "read ECONNRESET"))
+        self.assertEqual(db["text"], "Using dev-db: query (select 1)")
+        self.assertIsInstance(db["duration_ms"], int)
+        self.assertEqual((read["ok"], read["outcome"]), (True, ""))
+        # Only the MCP call is logged, attributed to this task.
+        (entry,) = log.entries()
+        self.assertEqual((entry["source"], entry["task_id"], entry["server"], entry["ok"]),
+                         ("task", "s3", "dev-db", False))
 
     def test_a_timeout_is_reported(self) -> None:
         with mock.patch.object(tasks_module, "run_agent",

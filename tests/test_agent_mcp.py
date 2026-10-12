@@ -335,6 +335,229 @@ class ResolutionTest(unittest.TestCase):
             registry.check("nope")
 
 
+class ProbeParseTest(unittest.TestCase):
+    def test_probe_is_parsed_strictly(self) -> None:
+        import tomllib
+
+        (db,) = parse_agent_mcp(tomllib.loads(textwrap.dedent("""\
+            [agents.mcp.dev-db]
+            command = "npx"
+            probe = { tool = "query", args = { sql = "select 1", limit = 1 } }
+        """)))
+        self.assertEqual(db.probe.tool, "query")
+        self.assertEqual(db.probe.args, {"sql": "select 1", "limit": 1})
+        hash(db)
+        (plain,) = parse_agent_mcp({"agents": {"mcp": {"x": {"command": "x"}}}})
+        self.assertIsNone(plain.probe)
+        (no_args,) = parse_agent_mcp({"agents": {"mcp": {"x": {"url": "http://h", "probe": {"tool": "ping"}}}}})
+        self.assertEqual(no_args.probe.args, {})
+
+    def test_probe_errors(self) -> None:
+        import datetime
+
+        cases = {
+            "not a table": "query",
+            "no tool": {"args": {}},
+            "tool not a string": {"tool": 1},
+            "tool with spaces": {"tool": "drop table"},
+            "unknown key": {"tool": "query", "sql": "select 1"},
+            "args not a table": {"tool": "query", "args": ["select 1"]},
+            "args with a date": {"tool": "query", "args": {"at": datetime.date(2026, 1, 1)}},
+        }
+        for name, probe in cases.items():
+            with self.subTest(name), self.assertRaises(AgentConfigError):
+                parse_agent_mcp({"agents": {"mcp": {"x": {"command": "x", "probe": probe}}}})
+
+    def test_status_names_the_probe_tool_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = _registry(Path(tmp), text=textwrap.dedent("""\
+                [agents.mcp.dev-db]
+                command = "npx"
+                probe = { tool = "query", args = { sql = "select 'TOPSECRET'" } }
+            """))
+            status = registry.status()
+        self.assertEqual(status["servers"][0]["probe"], "query")
+        self.assertNotIn("TOPSECRET", json.dumps(status))
+
+
+FAKE_MCP_SERVER = r'''
+import json, os, sys
+
+mode = os.environ.get("FAKE_MCP_MODE", "ok")
+
+def send(message):
+    sys.stdout.write(json.dumps(message) + "\n")
+    sys.stdout.flush()
+
+print("starting up (stdout noise)", flush=True)
+for line in sys.stdin:
+    message = json.loads(line)
+    method, mid = message.get("method"), message.get("id")
+    if method == "initialize":
+        if mode == "crash":
+            sys.stderr.write("Error: connect ECONNREFUSED postgres://agent:pw@db:5432/x\n")
+            sys.stderr.flush()
+            sys.exit(2)
+        if mode == "hang":
+            continue
+        send({"jsonrpc": "2.0", "method": "notifications/message", "params": {"level": "info"}})
+        send({"jsonrpc": "2.0", "id": "srv-1", "method": "ping"})
+        send({"jsonrpc": "2.0", "id": mid, "result": {
+            "protocolVersion": message["params"]["protocolVersion"],
+            "capabilities": {"tools": {}}, "serverInfo": {"name": "fake", "version": "0"}}})
+    elif method == "notifications/initialized":
+        continue
+    elif mid == "srv-1":
+        continue  # our answer to the ping
+    elif method == "tools/list":
+        if message.get("params", {}).get("cursor") == "page2":
+            send({"jsonrpc": "2.0", "id": mid, "result": {"tools": [{"name": "list_tables"}]}})
+        else:
+            send({"jsonrpc": "2.0", "id": mid, "result": {"tools": [{"name": "query"}], "nextCursor": "page2"}})
+    elif method == "tools/call":
+        sql = message["params"]["arguments"].get("sql")
+        if sql == "select 1":
+            send({"jsonrpc": "2.0", "id": mid, "result": {"content": [
+                {"type": "text", "text": json.dumps([{"patient": "Jane Doe"}])}]}})
+        else:
+            send({"jsonrpc": "2.0", "id": mid, "result": {"isError": True, "content": [
+                {"type": "text", "text": "read ECONNRESET\nstack..."}]}})
+'''
+
+
+class ConnectionTestTest(unittest.TestCase):
+    """POST /agents/mcp/{name}/test against a real child process speaking MCP stdio."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = Path(self._tmp.name)
+        self.script = self.tmp / "fake_mcp.py"
+        self.script.write_text(FAKE_MCP_SERVER, encoding="utf-8")
+
+    def _registry(self, probe: str = "", mode: str = "ok") -> AgentMcp:
+        script = str(self.script).replace("\\", "/")
+        text = textwrap.dedent(f"""\
+            [agents.mcp.fake]
+            command = "python"
+            args = ["{script}"]
+            env = {{ FAKE_MCP_MODE = "{mode}" }}
+        """) + (f"probe = {probe}\n" if probe else "") + textwrap.dedent("""\
+
+            [agents.mcp.remote]
+            type = "sse"
+            url = "http://localhost:1/sse"
+        """)
+        registry = _registry(self.tmp, text=text, environ={"PROBE_SQL": "select 1"},
+                             which=lambda name: sys.executable if name == "python" else None)
+        original = registry._resolve
+
+        def resolve(spec, extra_env=None):
+            entry, missing = original(spec, extra_env)
+            if entry.get("command") == "python":
+                entry["command"] = sys.executable
+            return entry, missing
+
+        registry._resolve = resolve
+        return registry
+
+    def test_handshake_lists_tools_across_pages(self) -> None:
+        result = self._registry().test("fake")
+        self.assertEqual((result["ok"], result["stage"], result["error"]), (True, "tools", None))
+        self.assertEqual(result["tools"], ["query", "list_tables"])
+        self.assertIsNone(result["probe_outcome"])
+        self.assertIsInstance(result["duration_ms"], int)
+
+    def test_probe_reports_the_shape_and_is_logged(self) -> None:
+        from pm_studio.mcp_activity import McpActivityLog
+
+        log = McpActivityLog(self.tmp / "mcp-activity.jsonl")
+        registry = self._registry(probe='{ tool = "query", args = { sql = "${PROBE_SQL}" } }')
+        result = registry.test("fake", activity=log)
+        self.assertEqual((result["ok"], result["stage"], result["probe_outcome"]), (True, "probe", "1 row"))
+        self.assertNotIn("Jane", json.dumps(result))
+        (entry,) = log.entries()
+        self.assertEqual((entry["source"], entry["server"], entry["tool"], entry["args"], entry["ok"]),
+                         ("test", "fake", "query", "select 1", True))
+
+    def test_a_failing_probe_says_why(self) -> None:
+        result = self._registry(probe='{ tool = "query", args = { sql = "select 2" } }').test("fake")
+        self.assertEqual((result["ok"], result["stage"], result["error"]), (False, "probe", "read ECONNRESET"))
+        missing = self._registry(probe='{ tool = "nope" }').test("fake")
+        self.assertEqual((missing["ok"], missing["stage"]), (False, "probe"))
+        self.assertIn("no tool 'nope'", missing["error"])
+
+    def test_a_server_that_dies_reports_its_last_error_line_redacted(self) -> None:
+        result = self._registry(mode="crash").test("fake")
+        self.assertEqual((result["ok"], result["stage"]), (False, "initialize"))
+        self.assertIn("ECONNREFUSED", result["error"])
+        self.assertNotIn(":pw@", result["error"])
+
+    def test_a_server_that_never_answers_times_out(self) -> None:
+        result = self._registry(mode="hang").test("fake", timeout=2.0)
+        self.assertEqual((result["ok"], result["stage"]), (False, "initialize"))
+        self.assertIn("in time", result["error"])
+        self.assertLess(result["duration_ms"], 15000)
+
+    def test_http_server_handshake(self) -> None:
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        seen: list[tuple[str, str | None, str | None]] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                seen.append((body.get("method"), self.headers.get("Authorization"), self.headers.get("Mcp-Session-Id")))
+                if "id" not in body:
+                    self.send_response(202)
+                    self.end_headers()
+                    return
+                result = (
+                    {"protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": {"name": "w"}}
+                    if body["method"] == "initialize" else {"tools": [{"name": "search"}]}
+                )
+                payload = json.dumps({"jsonrpc": "2.0", "id": body["id"], "result": result}).encode()
+                sse = body["method"] == "tools/list"
+                if sse:
+                    payload = b"event: message\ndata: " + payload + b"\n\n"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream" if sse else "application/json")
+                self.send_header("Mcp-Session-Id", "sess-1")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_DELETE(self):
+                seen.append(("DELETE", None, self.headers.get("Mcp-Session-Id")))
+                self.send_response(200)
+                self.end_headers()
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        port = server.server_address[1]
+        registry = _registry(self.tmp, text=(
+            f'[agents.mcp.web]\nurl = "http://127.0.0.1:{port}/mcp"\n'
+            'headers = { Authorization = "Bearer ${DOCS_TOKEN}" }\n'
+        ))
+        result = registry.test("web")
+        self.assertEqual((result["ok"], result["stage"], result["tools"]), (True, "tools", ["search"]))
+        self.assertEqual(seen[0], ("initialize", f"Bearer {SECRET_TOKEN}", None))
+        self.assertEqual([s[0] for s in seen], ["initialize", "notifications/initialized", "tools/list", "DELETE"])
+        self.assertEqual(seen[2][2], "sess-1")
+        self.assertNotIn(SECRET_TOKEN, json.dumps(result))
+
+    def test_unsupported_and_unknown(self) -> None:
+        registry = self._registry()
+        self.assertIsNone(registry.test("remote")["ok"])
+        with self.assertRaises(KeyError):
+            registry.test("nope")
+
+
 class LaunchCommandTest(unittest.TestCase):
     """The flags each kind of agent is actually launched with."""
 
@@ -511,6 +734,15 @@ class RoutesTest(unittest.TestCase):
         with self.assertRaises(HTTPException) as caught:
             server_module.agents_mcp_check("nope", self.request)
         self.assertEqual(caught.exception.status_code, 404)
+        with self.assertRaises(HTTPException) as caught:
+            server_module.agents_mcp_test("nope", self.request)
+        self.assertEqual(caught.exception.status_code, 404)
+
+    def test_test_route_returns_the_result(self) -> None:
+        with mock.patch.object(self.registry, "test", return_value={"ok": True, "stage": "tools"}) as run:
+            self.assertEqual(server_module.agents_mcp_test("dev-db", self.request)["stage"], "tools")
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args, ("dev-db",))
 
     def test_reload_requires_manage_local_env(self) -> None:
         from pm_studio.accounts import User

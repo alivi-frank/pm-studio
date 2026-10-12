@@ -94,6 +94,7 @@
   .badge.running { color: var(--status-running); }
   .badge.done, .badge.clean, .badge.active { color: var(--status-done); }
   .badge.error, .badge.failed, .badge.conflict { color: var(--status-error); }
+  .badge.stopped { color: var(--ink-muted); }
   .badge.auto_resolved, .badge.merging { color: var(--status-auto); }
   .badge.running .dot { animation: pulse 1.4s ease-in-out infinite; }
   @keyframes pulse {
@@ -188,6 +189,7 @@
     running: { dot: "●", label: "Running" },
     done: { dot: "✓", label: "Done" },
     error: { dot: "✗", label: "Error" },
+    stopped: { dot: "■", label: "Stopped" },
   };
 
   const SESSION_BADGE = {

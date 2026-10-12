@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, RedirectResponse, JSONResponse, Redi
 
 from . import agent_env as agent_env_module
 from . import agent_mcp, mailer
+from . import mcp_activity
 from .accounts import (
     AGENT_HEADER_NAME,
     LOGIN_TTL_SECONDS,
@@ -204,6 +205,63 @@ def _release_local_env(session_id: str, actor) -> None:
         return
     if any(report[k] for k in ("stopped", "destroying", "forgotten", "aborted")):
         _audit(actor, "local_env.released", session_id, json.dumps(report))
+
+
+def _who(actor) -> str:
+    """Who a stop is attributed to on the record ("Stopped by <who>.")."""
+    return (actor.name or actor.email) if actor is not None else "the user"
+
+
+def _discard_pending_messages(session_id: str, runtime) -> list[str]:
+    """Throws away every message the session accepted but has not started - from the
+    in-memory queue and from its queue file, or a reconnecting page would run them
+    after all (see _resume_pending) - and tells open chat pages which ones went.
+    Returns their ids."""
+    ids = [str(record["id"]) for record in runtime.pm_agent.load_pending()]
+    _discard_queued_turns(session_id)
+    for message_id in ids:
+        runtime.pm_agent.drop_pending(message_id)
+    if ids:
+        _broadcast_chat_event_threadsafe(session_id, {"type": "pm_queue_discarded", "ids": ids})
+    return ids
+
+
+def _stop_session(session_id: str, who: str = "the user") -> dict:
+    """Stops everything a session has running: the messages queued behind its PM
+    (discarded), the PM turn in flight, every running dev task, and the services of its
+    local environment - stopped, not released: its resources and checkout stay for the
+    next start (_release_local_env gives those back when the session ends). Each part
+    is attempted even when another fails - a session must always be stoppable, and
+    whatever lifecycle step follows must still run. Returns what it stopped; a session
+    with nothing running gets empty lists."""
+    report: dict = {"session": session_id, "pm_turn": False, "tasks": [], "services": [], "discarded": []}
+    runtime = sessions.get_runtime(session_id)
+    steps = []
+    if runtime is not None:
+        steps += [
+            ("discarded", lambda: _discard_pending_messages(session_id, runtime)),
+            ("pm_turn", lambda: bool(runtime.pm_agent.stop_turn(who))),
+            ("tasks", lambda: [str(task["id"]) for task in runtime.task_registry.stop_all(who)]),
+        ]
+    steps.append(("services", lambda: [str(name) for name in local_env.stop_session(session_id, f"Stopped by {who}.")]))
+    for key, step in steps:
+        try:
+            report[key] = step()
+        except Exception as exc:
+            print(f"[pm_studio] stopping {key} of session {session_id} failed: {exc}")
+    return report
+
+
+def _stopped_anything(report: dict) -> bool:
+    return any(report[key] for key in ("pm_turn", "tasks", "services", "discarded"))
+
+
+def _stop_for_lifecycle(session_id: str, actor, doing: str) -> None:
+    """The stop every path that ends or hides a session runs first (archive, terminate,
+    clean up, delete): nothing of a session keeps running once it is out of sight."""
+    report = _stop_session(session_id, f"{_who(actor)} {doing}")
+    if _stopped_anything(report):
+        _audit(actor, "session.stopped", session_id, json.dumps(report))
 
 
 def _signals_rate_for(person_id: str) -> tuple[float | None, str]:
@@ -565,8 +623,9 @@ def _on_task_update(session_id: str, task: dict) -> None:
             )
     # Only ordinary dev tasks re-engage the PM - a merge-conflict resolution isn't part
     # of its own plan (see tasks.py's "kind" field) and finishing one shouldn't make it
-    # start narrating an unrelated merge to the stakeholder.
-    if task.get("status") in ("done", "error"):
+    # start narrating an unrelated merge to the stakeholder. A stopped task is settled
+    # (its spend is recorded) but never re-engages the PM: someone stopped it on purpose.
+    if task.get("status") in ("done", "error", "stopped"):
         usage = task.get("agent_usage") or {}
         if usage.get("cost_usd") or usage.get("input_tokens"):
             # Measured spend, recorded against the dispatcher but carrying no extra
@@ -738,11 +797,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # server does not reach them), which makes stopping them here the server's job.
         # The manager's atexit hook is the backstop for exits that skip the lifespan.
         local_env.shutdown()
+        # Dev tasks first, so each one that gets to record itself in time reads
+        # "stopped" rather than failed (one that does not is reconciled at the next start).
+        tasks_stopped = 0
+        for runtime in list(sessions.runtimes.values()):
+            try:
+                tasks_stopped += len(runtime.task_registry.stop_all("the server shutting down", wait=0))
+            except Exception as exc:
+                print(f"[pm_studio] stopping dev tasks failed: {exc}")
         # A PM turn mid-flight holds an executor thread on its `claude` process, and the
         # interpreter joins those threads on exit - so Ctrl+C would wait out the turn.
+        # Every agent runs in its own process group, out of Ctrl+C's reach, so this is
+        # what ends them (whole trees: MCP servers and all).
         stopped = stop_running_turns()
-        if stopped:
-            print(f"[pm_studio] stopped {stopped} PM turn(s) still running")
+        if stopped or tasks_stopped:
+            print(f"[pm_studio] stopped {stopped} agent process(es) still running "
+                  f"({tasks_stopped} dev task(s))")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -1613,6 +1683,7 @@ def cleanup_session(session_id: str, request: Request) -> dict:
     actor = _require(request, "manage_session_lifecycle")
     existing = sessions.get(session_id)
     if existing is not None and existing.status == "merged":
+        _stop_for_lifecycle(session_id, actor, "cleaning up the session")
         _release_local_env(session_id, actor)
     try:
         session = sessions.cleanup(session_id)
@@ -1627,6 +1698,7 @@ def delete_session(session_id: str, request: Request) -> dict:
     actor = _require(request, "manage_session_lifecycle")
     existing = sessions.get(session_id)
     if existing is not None and not existing.is_default:
+        _stop_for_lifecycle(session_id, actor, "deleting the session")
         _release_local_env(session_id, actor)
     try:
         session = sessions.delete(session_id)
@@ -1638,9 +1710,13 @@ def delete_session(session_id: str, request: Request) -> dict:
 
 @app.post("/sessions/{session_id}/archive")
 def archive_session(session_id: str, request: Request) -> dict:
-    """Hides the session from the default session list. Purely a visibility flag -
-    doesn't touch the session's lifecycle status, worktree, or branch."""
-    _require(request, "manage_session_lifecycle")
+    """Hides the session from the default session list. A visibility flag - doesn't
+    touch the session's lifecycle status, worktree, or branch - but a hidden session
+    keeps nothing running: its PM turn, dev tasks and local services are stopped first
+    (its environment's resources are kept, for when it is unarchived)."""
+    actor = _require(request, "manage_session_lifecycle")
+    if sessions.get(session_id) is not None:
+        _stop_for_lifecycle(session_id, actor, "archiving the session")
     try:
         session = sessions.archive(session_id)
     except KeyError as exc:
@@ -1656,6 +1732,21 @@ def unarchive_session(session_id: str, request: Request) -> dict:
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return session.to_dict()
+
+
+@app.post("/sessions/{session_id}/stop")
+def stop_session(session_id: str, request: Request) -> dict:
+    """Stops everything the session has running - the PM turn, the messages queued
+    behind it, every running dev task and its local environment's services (resources
+    are kept) - and leaves the session itself as it is, ready for the next message.
+    Returns what it stopped: {pm_turn, tasks, services, discarded}, all empty when
+    nothing was running."""
+    actor = _require(request, "run_session")
+    if sessions.get(session_id) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}")
+    report = _stop_session(session_id, _who(actor))
+    _audit(actor, "session.stopped", session_id, json.dumps(report))
+    return report
 
 
 @app.post("/sessions/{session_id}/sync")
@@ -1685,6 +1776,7 @@ def terminate_session(session_id: str, request: Request) -> dict:
     actor = _require(request, "manage_session_lifecycle")
     existing = sessions.get(session_id)
     if existing is not None and not existing.is_default and existing.status in ("active", "conflict"):
+        _stop_for_lifecycle(session_id, actor, "terminating the session")
         _release_local_env(session_id, actor)
     try:
         session = sessions.terminate(session_id)
@@ -4204,6 +4296,22 @@ def reset_chat(session_id: str, request: Request) -> dict:
     return {"status": "reset"}
 
 
+@app.post("/chat/{session_id}/stop")
+def stop_chat(session_id: str, request: Request) -> dict:
+    """Stops the PM turn in flight - it ends as an error, "Stopped by <who>.", written
+    to the transcript like any failed turn - and discards the messages queued behind
+    it, so nothing starts in its place. Dev tasks keep running (POST
+    /tasks/{session_id}/{task_id}/stop, or /sessions/{session_id}/stop for everything).
+    Returns {pm_turn: whether a turn was running, discarded: queued message ids}."""
+    actor = _require(request, "run_session")
+    runtime = _get_runtime(session_id)
+    discarded = _discard_pending_messages(session_id, runtime)
+    stopped = runtime.pm_agent.stop_turn(_who(actor))
+    report = {"session": session_id, "pm_turn": stopped, "discarded": discarded}
+    _audit(actor, "chat.stopped", session_id, json.dumps(report))
+    return report
+
+
 @app.post("/tasks/{session_id}")
 def create_task(session_id: str, request: Request, payload: dict = Body(...)) -> dict:
     """Dispatching a dev agent is the one endpoint that is equivalent to running
@@ -4256,6 +4364,26 @@ def list_tasks(session_id: str) -> list[dict]:
 def get_task(session_id: str, task_id: str) -> dict:
     task = _get_runtime(session_id).task_registry.get_task(task_id)
     return task if task is not None else {"error": "not found"}
+
+
+@app.post("/tasks/{session_id}/{task_id}/stop")
+def stop_task(session_id: str, task_id: str, request: Request) -> dict:
+    """Stops a running dev task: kills its agent and everything it started, and records
+    it as "stopped" - not judged, and not something the PM is woken up to react to.
+    409 when the task is not running (or is a merge-conflict resolution, which the
+    merge flow owns). Returns the task as it then stands."""
+    actor = _require(request, "dispatch_dev_task")
+    registry = _get_runtime(session_id).task_registry
+    task = registry.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Unknown task: {task_id}")
+    stopped = registry.stop_task(task_id, _who(actor))
+    if stopped is None:
+        raise HTTPException(
+            status_code=409, detail=f"Task {task_id} is not running (status: {task.get('status')})."
+        )
+    _audit(actor, "dev_task.stopped", session_id, task_id)
+    return {"session": session_id, "task": stopped}
 
 
 @app.get("/tasks/{session_id}/{task_id}/artifacts/{name:path}")
@@ -4323,8 +4451,9 @@ def _enqueue_pm_turn(session_id: str, item: dict) -> int:
 
 def _discard_queued_turns(session_id: str) -> None:
     """Throws away every message a session has queued but not started. Hops onto the
-    event loop first: the only caller is the reset endpoint, which FastAPI runs on a
-    worker thread, and these registries belong to the loop."""
+    event loop first: its callers are endpoints (reset, and the stops - see
+    _discard_pending_messages), which FastAPI runs on worker threads, and these
+    registries belong to the loop."""
 
     def drop() -> None:
         queue = _chat_queues.get(session_id)
@@ -4798,6 +4927,29 @@ def agents_mcp_check(name: str, request: Request) -> dict:
         raise HTTPException(status_code=404, detail=f"No [agents.mcp.{name}] server is configured.") from exc
     _audit(actor, "agents.mcp_checked", name, json.dumps({"ok": result.get("ok")}))
     return result
+
+
+@app.post("/agents/mcp/{name}/test")
+def agents_mcp_test(name: str, request: Request) -> dict:
+    """A real connection test (agent_mcp.AgentMcp.test): starts the server as agents
+    get it, does the MCP handshake (initialize, tools/list) and calls its configured
+    `probe`, within 30 s. A plain `def`, so the wait parks a worker thread."""
+    actor = _require(request, "manage_local_env")
+    try:
+        result = agent_mcp.AGENT_MCP.test(name, activity=mcp_activity.ACTIVITY_LOG)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"No [agents.mcp.{name}] server is configured.") from exc
+    _audit(actor, "agents.mcp_tested", name, json.dumps({"ok": result.get("ok"), "stage": result.get("stage")}))
+    return result
+
+
+@app.get("/agents/mcp/activity")
+def agents_mcp_activity(request: Request, server: str = "", limit: int = 50) -> dict:
+    """The newest MCP tool calls agents made (mcp_activity.py) - tool, a sanitized
+    argument summary, ok/outcome/duration; never results - plus per-server counters
+    (calls, errors, last_error, last_ok_at, consecutive_errors)."""
+    _require(request, "view")
+    return mcp_activity.ACTIVITY_LOG.report(server=server or None, limit=max(1, min(limit, 500)))
 
 
 def _can(request: Request, capability: Capability) -> bool:

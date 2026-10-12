@@ -15,6 +15,7 @@ import threading
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from pm_studio import agent as agent_module
 from pm_studio.agent import PMAgent, progress_events, roadmap_delta
@@ -142,7 +143,8 @@ class ProgressEventsTest(unittest.TestCase):
         self.assertEqual(label("Write", {"file_path": "/w/SPEC.md"}), "Writing SPEC.md")
         self.assertEqual(label("Glob", {"pattern": "src/**/*.ts"}), "Searching for src/**/*.ts")
         self.assertEqual(label("WebFetch", {"url": "https://example.com/a/b"}), "Reading example.com")
-        self.assertEqual(label("mcp__dev-db__query", {"sql": "select 1"}), "Using dev-db: query")
+        self.assertEqual(label("mcp__dev-db__query", {"sql": "select 1"}), "Using dev-db: query (select 1)")
+        self.assertEqual(label("mcp__dev-db__list_tables", {}), "Using dev-db: list tables")
 
 
 class TurnProgressTest(unittest.TestCase):
@@ -169,6 +171,21 @@ class TurnProgressTest(unittest.TestCase):
         )
         self.assertEqual([e["role"] for e in self.agent.load_history()], ["user", "pm"])
         self.assertIsNone(self.agent._progress_sink)
+
+    def test_a_real_turn_streams_the_step_and_its_outcome_and_logs_the_mcp_call(self) -> None:
+        def stream(command, text, *, on_message, **kwargs):
+            on_message(_tool_use("t1", "mcp__dev-db__query", {"sql": "select 1"}))
+            on_message(_tool_result("t1", "read ECONNRESET", is_error=True))
+            return 0, {"type": "result", "result": "The database is down.", "session_id": "c1"}, "", ""
+
+        log = _Log()
+        with mock.patch.object(agent_module, "_stream_claude", stream), \
+                mock.patch.object(agent_module.mcp_activity, "ACTIVITY_LOG", log):
+            events = list(self.agent.handle_user_message("hi"))
+        progress = [e for e in events if e["type"] == "pm_progress"]
+        self.assertEqual([(e["kind"], e["id"]) for e in progress], [("tool", "t1"), ("result", "t1")])
+        self.assertEqual((progress[1]["ok"], progress[1]["outcome"]), (False, "read ECONNRESET"))
+        self.assertEqual([(e["source"], e["server"], e["ok"]) for e in log.entries], [("pm", "dev-db", False)])
 
     def test_an_exception_in_the_turn_becomes_a_pm_error(self) -> None:
         def broken(text: str) -> dict:
@@ -282,6 +299,167 @@ class RoadmapDeltaTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _tool_use(tool_id: str, name: str, tool_input: dict) -> dict:
+    return _assistant({"type": "tool_use", "id": tool_id, "name": name, "input": tool_input})
+
+
+def _tool_result(tool_id: str, content, is_error: bool = False) -> dict:
+    block = {"type": "tool_result", "tool_use_id": tool_id, "content": content}
+    if is_error:
+        block["is_error"] = True
+    return {"type": "user", "message": {"role": "user", "content": [block]}}
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 100.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class _Log:
+    def __init__(self) -> None:
+        self.entries: list[dict] = []
+
+    def record(self, entry: dict) -> None:
+        self.entries.append(entry)
+
+
+class ProgressTrackerTest(unittest.TestCase):
+    """A step is emitted when the tool starts, and updated (same id) with ok, a safe
+    outcome and the duration when its result arrives - the ECONNRESET that used to be
+    invisible for minutes is now on the step line."""
+
+    def setUp(self) -> None:
+        self.clock = _Clock()
+        self.log = _Log()
+        self.tracker = agent_module.ProgressTracker(
+            session_id="s1", source="pm", activity=self.log, clock=self.clock,
+        )
+
+    def test_step_then_result_update_with_ok_outcome_and_duration(self) -> None:
+        (start,) = self.tracker.events(_tool_use("t1", "mcp__dev-db__query", {"sql": "select id from rides"}))
+        self.assertEqual(start, {
+            "type": "pm_progress", "kind": "tool", "id": "t1",
+            "text": "Using dev-db: query (select id from rides)",
+        })
+        self.clock.now += 1.25
+        rows = json.dumps([{"id": 1, "patient": "Jane Doe"}, {"id": 2, "patient": "John Roe"}])
+        (done,) = self.tracker.events(_tool_result("t1", [{"type": "text", "text": rows}]))
+        self.assertEqual(done, {
+            "type": "pm_progress", "kind": "result", "id": "t1",
+            "ok": True, "outcome": "2 rows", "duration_ms": 1250,
+        })
+        self.assertNotIn("Jane", json.dumps(done))
+        (entry,) = self.log.entries
+        self.assertEqual(
+            {k: entry[k] for k in ("session", "source", "server", "tool", "args", "ok", "outcome", "duration_ms")},
+            {"session": "s1", "source": "pm", "server": "dev-db", "tool": "query",
+             "args": "select id from rides", "ok": True, "outcome": "2 rows", "duration_ms": 1250},
+        )
+        self.assertNotIn("Jane", json.dumps(entry))
+
+    def test_an_error_carries_its_first_line(self) -> None:
+        self.tracker.events(_tool_use("t2", "mcp__dev-db__query", {"sql": "select 1"}))
+        (done,) = self.tracker.events(_tool_result(
+            "t2", "MCP error -32603: read ECONNRESET\n    at TCP.onStreamRead (node:internal)", is_error=True,
+        ))
+        self.assertFalse(done["ok"])
+        self.assertEqual(done["outcome"], "MCP error -32603: read ECONNRESET")
+        self.assertFalse(self.log.entries[0]["ok"])
+
+    def test_error_lines_lose_credentials(self) -> None:
+        self.tracker.events(_tool_use("t3", "mcp__dev-db__query", {"sql": "select 1"}))
+        (done,) = self.tracker.events(_tool_result(
+            "t3", "connect to postgres://agent:s3cret@db:5432/dev failed, password=hunter2", is_error=True,
+        ))
+        self.assertNotIn("s3cret", done["outcome"])
+        self.assertNotIn("hunter2", done["outcome"])
+        self.assertIn("postgres://***@db:5432/dev", done["outcome"])
+
+    def test_non_mcp_tools_get_outcomes_but_no_log_entry(self) -> None:
+        self.tracker.events(_tool_use("b1", "Bash", {"command": "npm test"}))
+        (ok,) = self.tracker.events(_tool_result("b1", "all green"))
+        self.assertEqual((ok["ok"], ok["outcome"]), (True, ""))
+        self.tracker.events(_tool_use("b2", "Bash", {"command": "npm test"}))
+        (failed,) = self.tracker.events(_tool_result("b2", "Exit code 1\nlots of output", is_error=True))
+        self.assertEqual((failed["ok"], failed["outcome"]), (False, "Exit code 1"))
+        self.assertEqual(self.log.entries, [])
+
+    def test_unknown_results_and_other_lines_carry_nothing(self) -> None:
+        self.assertEqual(self.tracker.events(_tool_result("never-started", "x")), [])
+        self.assertEqual(self.tracker.events({"type": "user", "message": {"content": "plain prompt"}}), [])
+        self.assertEqual(self.tracker.events({"type": "system", "subtype": "init"}), [])
+
+    def test_a_broken_log_never_breaks_the_turn(self) -> None:
+        class Broken:
+            def record(self, entry):
+                raise OSError("disk full")
+
+        tracker = agent_module.ProgressTracker(activity=Broken())
+        tracker.events(_tool_use("t", "mcp__x__y", {}))
+        (done,) = tracker.events(_tool_result("t", "ok"))
+        self.assertTrue(done["ok"])
+
+    def test_a_screenshot_result_is_summarised_not_shipped(self) -> None:
+        self.tracker.events(_tool_use("p1", "mcp__playwright__browser_take_screenshot",
+                                      {"filename": "C:/art/t1/login-page.png"}))
+        (done,) = self.tracker.events(_tool_result("p1", [{"type": "image", "data": "AAAA", "mimeType": "image/png"}]))
+        self.assertEqual(done["outcome"], "image")
+        self.assertEqual(self.log.entries[0]["args"], "login-page.png")
+
+
+class McpSanitizerTest(unittest.TestCase):
+    def _label(self, name: str, tool_input: dict) -> str:
+        (event,) = progress_events(_assistant({"type": "tool_use", "name": name, "input": tool_input}))
+        return event["text"]
+
+    def test_typed_text_and_passwords_never_show(self) -> None:
+        label = self._label("mcp__playwright__browser_type",
+                            {"element": "Password field", "ref": "e12", "text": "hunter2", "submit": True})
+        self.assertEqual(label, "Using playwright: browser type (typing into Password field)")
+        for args in (
+            {"password": "hunter2"}, {"token": "hunter2"}, {"secret": "hunter2"},
+            {"credentials": "hunter2"}, {"body": "hunter2"}, {"value": "hunter2"},
+            {"function": "() => 'hunter2'"},
+            {"fields": [{"name": "Password", "type": "textbox", "ref": "e1", "value": "hunter2"}]},
+        ):
+            with self.subTest(args=args):
+                self.assertNotIn("hunter2", self._label("mcp__any__tool", args))
+        self.assertEqual(
+            self._label("mcp__playwright__browser_fill_form", {"fields": [{"value": "a"}, {"value": "b"}]}),
+            "Using playwright: browser fill form (filling 2 fields)",
+        )
+
+    def test_clicks_urls_and_screenshots(self) -> None:
+        self.assertEqual(self._label("mcp__playwright__browser_click", {"element": "Sign in button", "ref": "e3"}),
+                         "Using playwright: browser click (Sign in button)")
+        self.assertEqual(
+            self._label("mcp__playwright__browser_navigate", {"url": "https://u:pw@app.local:3000/login?token=abc#x"}),
+            "Using playwright: browser navigate (https://app.local:3000/login?…)",
+        )
+        self.assertEqual(
+            self._label("mcp__playwright__browser_take_screenshot", {"filename": "C:\\art\\t1\\home.png"}),
+            "Using playwright: browser take screenshot (home.png)",
+        )
+
+    def test_sql_is_one_line_and_trimmed(self) -> None:
+        sql = "SELECT id,\n       name\n  FROM rides\n WHERE " + " AND ".join(f"c{i} = {i}" for i in range(60))
+        label = self._label("mcp__dev-db__query", {"sql": sql})
+        summary = label[len("Using dev-db: query ("):-1]
+        self.assertTrue(summary.startswith("SELECT id, name FROM rides WHERE c0 = 0"))
+        self.assertNotIn("\n", summary)
+        self.assertLessEqual(len(summary), 140)
+        self.assertTrue(summary.endswith("…"))
+
+    def test_curl_labels_keep_hiding_the_agent_header(self) -> None:
+        from pm_studio.accounts import AGENT_TOKEN
+
+        label = self._label("Bash", {"command": f'curl -s http://h/tasks/s1 -H "X: {AGENT_TOKEN}"'})
+        self.assertNotIn(AGENT_TOKEN, label)
 
 
 class DevStepLabelTest(unittest.TestCase):

@@ -1308,6 +1308,50 @@ shows the error in the status. At startup the server logs one line, e.g.
 | `GET /agents/auth` | view | the agents' Claude sign-in: `{isolated, config_dir, logged_in, email, auth_method, subscription, error, login_running, login_output}` (`?refresh=true` skips the 60 s cache) |
 | `POST /agents/auth/login` | manage_local_env | starts `claude auth login` for the agents' config - a browser sign-in on this machine that finishes by itself; poll `GET /agents/auth` |
 | `POST /agents/mcp/{name}/check` | manage_local_env | starts a stdio server once (OS-adapted, stdin held open) and reports whether it is still running after 3 s; does not speak MCP |
+| `POST /agents/mcp/{name}/test` | manage_local_env | a real connection test (below): `{name, transport, ok, stage, tools, probe, probe_outcome, error, duration_ms}` |
+| `GET /agents/mcp/activity?server=&limit=50` | view | the newest MCP calls agents made, newest first (`limit` up to 500), plus per-server counters: `{entries: [...], servers: {<name>: {calls, errors, consecutive_errors, last_error: {ts, tool, outcome}, last_ok_at, last_call_at, last_ok}}, max_entries}` |
+
+**Probe.** An optional `probe` names one harmless tool call the connection test makes
+after the handshake. It is parsed as strictly as the rest of the table (only `tool` and
+`args`; `tool` a tool name, `args` a table of JSON-compatible values - no dates) and is
+part of the hot-reloaded `[agents]` table. String values in `args` may use `${VAR}`.
+
+```toml
+[agents.mcp.dev-db]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-postgres", "${AGENT_MCP_DEV_DB_URL}"]
+probe = { tool = "query", args = { sql = "select 1" } }
+```
+
+**Connection test.** `POST /agents/mcp/{name}/test` (the **Test** button on the Systems
+page) starts the server exactly as agents get it - the same resolved entry, OS-adapted
+command and the agents' environment, from the repo root - and speaks MCP over stdio:
+`initialize`, `notifications/initialized`, `tools/list` (following `nextCursor`), then
+`tools/call` for the `probe` if there is one. Everything must finish within 30 s; the
+server's whole process tree is killed afterwards. `stage` says where it stopped (`start`,
+`initialize`, `tools`, `probe`; on success the last one run), `tools` lists the tool
+names, `probe_outcome` is the probe result's shape only (`"1 row"`, `"ok"`) and `error`
+one line (the server's last stderr line when it exits, credentials in URLs and
+`password=` pairs blanked). An `http` server gets the same handshake over streamable HTTP
+(JSON or SSE answers, `Mcp-Session-Id` carried); `sse` servers are not supported yet
+(`ok: null`). A probe call is also recorded in the activity log (source `test`).
+
+**What agents did: step outcomes and the activity log.** Every tool step on a chat's
+live progress and on a dev task's card shows its outcome when the result arrives - ✓/✗,
+how long it took, and for an MCP call the arguments that are safe to show and what came
+back: `Using dev-db: query (select id from rides limit 5)` → `✓ 5 rows · 0.4 s`, or
+`✗ read ECONNRESET`. Only a whitelist of arguments is ever shown - SQL (`sql`/`query`/
+`statement`, one line, ~140 chars), URLs (`url`/`href`, without credentials or query
+values), the `element` a browser acts on, a screenshot's `filename` (base name), a key
+press, a table name; typed text, values, passwords, tokens, bodies and scripts never are
+(a browser_type step reads "typing into Password field"). Results are never shown or stored,
+only their shape. Each MCP call is also appended to `<workspace>/mcp-activity.jsonl`
+(ts, session, source `pm`/`task` + task id, server, tool, argument summary, ok, outcome,
+duration_ms). The log keeps the newest 2,000 calls (it is trimmed once it passes 2,400,
+so an append stays one write), is machine-local and is never committed (it is on the
+snapshot's never-commit list and in the `init` .gitignore). The Systems page shows, per
+server, "last call: ✓ 2 min ago" or "✗ 5 failed in a row: read ECONNRESET", and a
+**Recent calls** list.
 
 **Signing the agents in.** The agents' Claude config (`PM_AGENT_HOME`, or your own) must be
 signed in, or every PM chat and dev task fails. The server checks at startup and logs
@@ -1355,6 +1399,22 @@ mistaken for the task's work; a failed checkout is told to the agent and recorde
 `checkout_error`). The PM of such a session gets the checkout curl above in its prompt and
 allowlist — scoped to its own session — so it can read code it plans against instead of
 reporting empty folders as missing code.
+
+**Stopping.** Anything running can be stopped from the chat page — the PM's turn (Stop on
+its "PM is thinking..." row), a dev task (Stop on its card), or the whole session (Stop
+everything, in the session strip). A stop kills the agent's whole process tree (its MCP
+servers and commands included). A stopped PM turn ends as an error, `Stopped by {who}.`,
+recorded in the transcript; a stopped dev task is recorded with status `stopped` (result
+`Stopped by {who} after {duration}.`, not judged, and the PM is not woken up to react to
+it). Messages still waiting for the PM are discarded with the turn. A session's local
+services are stopped but its resources kept. Archiving, terminating, cleaning up or
+deleting a session stops it first.
+
+| Route | Capability | |
+|---|---|---|
+| `POST /chat/{session}/stop` | run_session | stops the PM turn in flight and discards the queued messages; `{session, pm_turn, discarded}` |
+| `POST /tasks/{session}/{task}/stop` | dispatch_dev_task | stops one running dev task; `{session, task}` with the task as recorded. 404 unknown task, 409 when not running (or a merge resolution) |
+| `POST /sessions/{session}/stop` | run_session | all of the above plus the session's local services; `{session, pm_turn, tasks, services, discarded}`, empty when nothing was running. 404 unknown session |
 
 ## `PM_INSTRUCTIONS.md`
 

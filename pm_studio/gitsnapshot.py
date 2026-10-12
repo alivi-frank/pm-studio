@@ -45,6 +45,10 @@ SENSITIVE_WORKSPACE_FILES = (
     # machine-local bookkeeping about resources on THIS developer's machine; committed,
     # it would make every other checkout believe it owns databases it never created.
     "local-env",
+    # The MCP activity log (mcp_activity.py): which database queries and browser steps
+    # agents ran on THIS machine, with their errors. Operational data, machine-local; an
+    # error line or a SQL WHERE clause can carry more than anyone meant to commit.
+    "mcp-activity.jsonl",
 )
 
 

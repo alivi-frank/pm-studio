@@ -2334,6 +2334,20 @@ class LocalEnvManager:
                 file=sys.stderr,
             )
 
+    def stop_session(self, session_id: str, message: str = "") -> list[str]:
+        """Stops every service a session's environment is running, in every system -
+        the session's own, never the shared ones - and keeps everything else: its
+        resources and prepared checkout stay for the next start (release_session is
+        what gives those back, once the session ends). `message` is the reason each
+        stopped service then shows. Returns the "system/service" names it stopped."""
+        if session_id == SHARED:
+            return []
+        with self._lock:
+            stopped, procs = self._stop_session_runs_locked(session_id, message)
+        self._kill_all(procs)
+        self._log_stop(session_id, stopped, "on request")
+        return stopped
+
     def reap_idle(self, now: float | None = None) -> list[dict]:
         """One idle-stop pass (see `[local_env] idle_stop_minutes`): stops the
         session-scoped services of every session that has made no local-env call for
