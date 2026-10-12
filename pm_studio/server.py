@@ -960,7 +960,7 @@ async def _ws_reject(websocket: WebSocket, capability: Capability = "view") -> b
 # FileResponse does not implement conditional requests (that lives in StaticFiles, which
 # this deliberately isn't), so revalidation re-sends the body rather than 304-ing. That
 # is the right trade here and nowhere near a general one: this server binds to localhost
-# for one user, and the whole set is well under 100 KB.
+# for one user, and the whole set is a few hundred KB.
 def _app_asset(name: str, media_type: str | None = None) -> FileResponse:
     return FileResponse(
         STATIC_DIR / name,
@@ -977,6 +977,17 @@ def nav_css() -> FileResponse:
 @app.get("/static/nav.js")
 def nav_js() -> FileResponse:
     return _app_asset("nav.js", "application/javascript")
+
+
+# The chat's markdown renderer (marked) and HTML sanitizer (DOMPurify), vendored.
+@app.get("/static/marked.min.js")
+def marked_js() -> FileResponse:
+    return _app_asset("marked.min.js", "application/javascript")
+
+
+@app.get("/static/purify.min.js")
+def purify_js() -> FileResponse:
+    return _app_asset("purify.min.js", "application/javascript")
 
 
 @app.get("/login")
