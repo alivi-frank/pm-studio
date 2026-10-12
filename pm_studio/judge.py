@@ -28,6 +28,7 @@ import json
 import subprocess
 from pathlib import Path
 
+from .agent_env import subprocess_env
 from .costing import agent_usage
 from .models import MODELS
 
@@ -260,15 +261,22 @@ def run_judge(
         proc = subprocess.run(
             [
                 "claude",
-                "-p", prompt,
+                "-p",
                 "--output-format", "json",
                 "--allowedTools", JUDGE_ALLOWED_TOOLS,
+                # No MCP servers whatsoever: the judge reads evidence, nothing else.
+                "--strict-mcp-config",
                 "--model", model,
             ],
+            # On stdin, not argv: the evidence block is uncapped, and Windows caps a
+            # command line at 32,767 characters.
+            input=prompt,
             cwd=str(repo_root),
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=JUDGE_TIMEOUT_SECONDS,
+            env=subprocess_env(),
         )
     except subprocess.TimeoutExpired:
         return inconclusive(f"Judge timed out after {JUDGE_TIMEOUT_SECONDS}s.", model)

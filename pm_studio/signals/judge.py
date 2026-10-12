@@ -26,6 +26,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from ..agent_env import subprocess_env
 from ..costing import agent_usage
 from ..models import MODELS
 
@@ -207,8 +208,8 @@ def run_judge(dossier: dict, *, dossier_path: Path, repo_root: Path, model: str,
     dossier_path.parent.mkdir(parents=True, exist_ok=True)
     dossier_path.write_text(json.dumps(dossier, indent=1, default=str))
     prompt = PROMPT.format(dossier_path=str(dossier_path), excerpt=excerpt(dossier))
-    command = ["claude", "-p", prompt, "--output-format", "json", "--allowedTools", JUDGE_ALLOWED_TOOLS, "--model", model]
-    run = runner or (lambda cmd: subprocess.run(cmd, cwd=str(repo_root), capture_output=True, text=True, timeout=JUDGE_TIMEOUT_SECONDS))
+    command = ["claude", "-p", prompt, "--output-format", "json", "--allowedTools", JUDGE_ALLOWED_TOOLS, "--strict-mcp-config", "--model", model]  # no MCP servers at all
+    run = runner or (lambda cmd: subprocess.run(cmd, cwd=str(repo_root), capture_output=True, text=True, timeout=JUDGE_TIMEOUT_SECONDS, env=subprocess_env()))
     started = time.time()
     try:
         proc = run(command)
