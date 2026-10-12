@@ -133,5 +133,49 @@ class EnsureLoginTest(unittest.TestCase):
             self.assertEqual(agent_env_mod.auth_status(None)["loggedIn"], False)
 
 
+class AgentAuthTest(unittest.TestCase):
+    """GET /agents/auth and POST /agents/auth/login, below the HTTP layer."""
+
+    def setUp(self) -> None:
+        agent_env_mod._auth_cache = None
+        agent_env_mod._login_proc = None
+        agent_env_mod._login_lines.clear()
+
+    def test_status_is_cached_and_refreshable(self) -> None:
+        calls = []
+        status = {"loggedIn": True, "email": "a@b", "authMethod": "claude.ai", "subscriptionType": "team"}
+        with mock.patch.object(agent_env_mod, "auth_status", side_effect=lambda env: calls.append(1) or status), \
+                mock.patch.object(agent_env_mod, "agent_env", return_value={"CLAUDE_CONFIG_DIR": "/h/claude"}):
+            first = agent_env_mod.agent_auth()
+            agent_env_mod.agent_auth()
+            agent_env_mod.agent_auth(refresh=True)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(
+            {k: first[k] for k in ("isolated", "config_dir", "logged_in", "email", "subscription")},
+            {"isolated": True, "config_dir": "/h/claude", "logged_in": True, "email": "a@b", "subscription": "team"},
+        )
+
+    def test_login_runs_once_at_a_time_in_the_background(self) -> None:
+        proc = mock.Mock()
+        proc.poll.return_value = None  # still running
+        proc.stdout = iter([])
+        with mock.patch.object(agent_env_mod.subprocess, "Popen", return_value=proc) as popen, \
+                mock.patch.object(agent_env_mod, "auth_status", return_value={"loggedIn": False}), \
+                mock.patch.object(agent_env_mod, "agent_env", return_value=None):
+            first = agent_env_mod.start_login()
+            agent_env_mod.start_login()
+        popen.assert_called_once()
+        self.assertEqual(popen.call_args.args[0], ["claude", "auth", "login"])
+        self.assertTrue(first["login_running"])
+
+    def test_a_missing_cli_is_reported_without_raising(self) -> None:
+        with mock.patch.object(agent_env_mod.subprocess, "Popen", side_effect=FileNotFoundError), \
+                mock.patch.object(agent_env_mod, "auth_status", return_value={"loggedIn": False, "error": "x"}), \
+                mock.patch.object(agent_env_mod, "agent_env", return_value=None):
+            result = agent_env_mod.start_login()
+        self.assertFalse(result["login_running"])
+        self.assertIn("claude", list(agent_env_mod._login_lines)[0])
+
+
 if __name__ == "__main__":
     unittest.main()

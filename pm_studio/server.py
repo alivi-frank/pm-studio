@@ -11,6 +11,7 @@ from typing import AsyncIterator
 from fastapi import Body, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, RedirectResponse, JSONResponse, RedirectResponse
 
+from . import agent_env as agent_env_module
 from . import agent_mcp, mailer
 from .accounts import (
     AGENT_HEADER_NAME,
@@ -676,6 +677,16 @@ async def _broadcast_chat_event(session_id: str, event: dict) -> None:
         clients.pop(ws, None)
 
 
+def _report_agent_auth() -> None:
+    status = agent_env_module.agent_auth()
+    if status["logged_in"]:
+        print(f"[pm_studio] agents signed in to Claude as {status.get('email') or status.get('auth_method')}")
+    else:
+        reason = status.get("error") or "not signed in"
+        print(f"[pm_studio] WARNING: agents cannot use Claude ({reason}) - sign them in from "
+              "/systems (Agent tools) or with `python -m pm_studio.agent_env --ensure-login`.")
+
+
 def _quiet_connection_resets(loop: asyncio.AbstractEventLoop, context: dict) -> None:
     """Drops one known-harmless error and reports every other one as asyncio would.
 
@@ -695,6 +706,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     global _main_loop
     _main_loop = asyncio.get_event_loop()
     _main_loop.set_exception_handler(_quiet_connection_resets)
+    # Say at startup, not at the first failed chat, when the agents cannot sign in to
+    # Claude. In the background: it runs the CLI, and startup must not wait on it.
+    threading.Thread(target=_report_agent_auth, daemon=True, name="agent-auth-check").start()
     for session_id in list(sessions.runtimes):
         _wire_task_broadcast(session_id)
     sessions.subscribe(_on_session_update)
@@ -4746,6 +4760,23 @@ def local_env_wait(
 def agents_mcp_status(request: Request) -> dict:
     _require(request, "view")
     return agent_mcp.AGENT_MCP.status()
+
+
+@app.get("/agents/auth")
+def agents_auth_status(request: Request, refresh: bool = False) -> dict:
+    """Whether the agents' Claude config (PM_AGENT_HOME, or the operator's own) is
+    signed in, as whom, and whether a sign-in is running. Names and emails only."""
+    _require(request, "view")
+    return agent_env_module.agent_auth(refresh=refresh)
+
+
+@app.post("/agents/auth/login")
+def agents_auth_login(request: Request) -> dict:
+    """Starts `claude auth login` for the agents' config: a browser sign-in on this
+    machine that finishes by itself. Poll GET /agents/auth for the outcome."""
+    actor = _require(request, "manage_local_env")
+    _audit(actor, "agents.sign_in_started", "agents.auth")
+    return agent_env_module.start_login()
 
 
 @app.post("/agents/mcp/reload")

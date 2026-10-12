@@ -193,6 +193,7 @@
     font-size: 0.85em;
   }
   .env-line { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .agent-auth { margin: 6px 0 10px; }
   .env-name { font-weight: 500; }
   .env-detail { color: var(--ink-muted); font-size: 0.92em; }
   .env-detail a { color: var(--accent); }
@@ -1637,6 +1638,9 @@
       head.appendChild(actions);
     }
     p.node.appendChild(head);
+    // The agents' Claude sign-in: without it every PM chat and dev task fails.
+    p.auth = el("div", "env-line agent-auth");
+    p.node.appendChild(p.auth);
     p.configErr = el("div", "env-err");
     p.configErr.setAttribute("role", "alert");
     p.node.appendChild(p.configErr);
@@ -1653,6 +1657,63 @@
     return p;
   }
 
+  let authData = null;
+
+  function renderAuth() {
+    if (!mcpPanel) return;
+    const box = mcpPanel.auth;
+    box.textContent = "";
+    if (!authData) return;
+    const a = authData;
+    const signedIn = !!a.logged_in;
+    const badge = a.login_running
+      ? el("span", "env-badge busy", "signing in…")
+      : el("span", `env-badge ${signedIn ? "ok" : "bad"}`, signedIn ? "signed in" : "not signed in");
+    box.appendChild(badge);
+    box.appendChild(el("span", "env-name", "Claude"));
+    const who = signedIn
+      ? [a.email, a.subscription && `${a.subscription} plan`].filter(Boolean).join(" · ")
+      : (a.error ? String(a.error) : "PM chats and dev tasks fail until the agents sign in");
+    box.appendChild(el("span", "env-detail", who));
+    if (a.isolated) {
+      const chip = el("span", "chip", "own config");
+      chip.title = `Agents use their own Claude config: ${a.config_dir || "PM_AGENT_HOME"}`;
+      box.appendChild(chip);
+    }
+    if (mcpCanManage && !a.login_running) {
+      const action = button(signedIn ? "Sign in again" : "Sign in", signedIn ? "ghost" : undefined);
+      action.addEventListener("click", signInAgents);
+      box.appendChild(action);
+    }
+    if (a.login_running) {
+      const hint = (a.login_output || []).filter((line) => /https?:\/\//.test(line)).pop();
+      box.appendChild(el("span", "env-detail",
+        hint ? `A browser window should have opened; if not, open: ${hint}` : "Finish the sign-in in the browser window that opened."));
+    }
+  }
+
+  async function refreshAuth(force) {
+    try {
+      const response = await fetch(`/agents/auth${force ? "?refresh=true" : ""}`, { headers: { Accept: "application/json" } });
+      if (response.ok) authData = await response.json();
+    } catch (err) { /* transient */ }
+    renderAuth();
+    // While a sign-in runs, check every few seconds so the badge flips when it is done.
+    if (authData && authData.login_running) setTimeout(() => refreshAuth(false), 3000);
+  }
+
+  async function signInAgents() {
+    try {
+      const response = await fetch("/agents/auth/login", { method: "POST", headers: { Accept: "application/json" } });
+      if (response.ok) authData = await response.json();
+      else if (response.status === 403) mcpPanel.actionErr.textContent = "You don't have permission to sign the agents in.";
+    } catch (err) {
+      mcpPanel.actionErr.textContent = "Could not start the sign-in.";
+    }
+    renderAuth();
+    if (authData && authData.login_running) setTimeout(() => refreshAuth(false), 3000);
+  }
+
   function renderMcp() {
     const host = document.getElementById("agent-mcp");
     if (mcpGone || !mcpData) {
@@ -1660,7 +1721,10 @@
       mcpPanel = null;
       return;
     }
-    if (!mcpPanel) mcpPanel = buildMcpPanel();
+    if (!mcpPanel) {
+      mcpPanel = buildMcpPanel();
+      refreshAuth(false);
+    }
     if (mcpPanel.node.parentNode !== host) host.appendChild(mcpPanel.node);
     const d = mcpData;
 

@@ -1256,6 +1256,41 @@
     activity = null;
   }
 
+  // A turn that failed because the agents' Claude config is not signed in (first run,
+  // expired session) gets a way to fix it right here instead of a bare CLI error.
+  const SIGN_IN_ERROR = /please run \/login|not logged in|invalid api key|oauth token (has )?expired|authentication_error|not signed in/i;
+
+  function isSignInError(text) {
+    return SIGN_IN_ERROR.test(String(text || ""));
+  }
+
+  function signInHint() {
+    const row = document.createElement("div");
+    row.className = "row status";
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    const text = document.createElement("span");
+    text.textContent = "The agents are not signed in to Claude. ";
+    const action = document.createElement("button");
+    action.type = "button";
+    action.textContent = "Sign in";
+    action.addEventListener("click", async () => {
+      action.disabled = true;
+      try {
+        const response = await fetch("/agents/auth/login", { method: "POST" });
+        text.textContent = response.ok
+          ? "Finish the sign-in in the browser window that opened, then send your message again. "
+          : `Could not start the sign-in (${response.status}). `;
+      } catch (err) {
+        text.textContent = "Could not start the sign-in. ";
+      }
+      action.remove();
+    });
+    bubble.append(text, action);
+    row.appendChild(bubble);
+    return row;
+  }
+
   function connectChat() {
     chatSocket = new WebSocket(`ws://${location.host}/ws/chat/${sessionId}`);
     chatSocket.onopen = () => addRow("status", "Connected.");
@@ -1300,6 +1335,7 @@
         case "pm_error":
           finishProgress(null);
           addRow("status", `Error: ${event.message}`);
+          if (isSignInError(event.message)) log.appendChild(signInHint());
           break;
         case "error":
           sessionGone = true;

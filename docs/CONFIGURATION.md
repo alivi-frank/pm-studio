@@ -1305,7 +1305,15 @@ shows the error in the status. At startup the server logs one line, e.g.
 |---|---|---|
 | `GET /agents/mcp` | view | `{source, loaded_at, error, servers: [{name, transport, command, url_host, pm, status, missing_env, message}], node: {npx, path}}` — `status` is `ready`, `skipped` (see `missing_env`) or `unavailable`; never values, args or headers |
 | `POST /agents/mcp/reload` | manage_local_env | forces a re-read; same payload |
+| `GET /agents/auth` | view | the agents' Claude sign-in: `{isolated, config_dir, logged_in, email, auth_method, subscription, error, login_running, login_output}` (`?refresh=true` skips the 60 s cache) |
+| `POST /agents/auth/login` | manage_local_env | starts `claude auth login` for the agents' config - a browser sign-in on this machine that finishes by itself; poll `GET /agents/auth` |
 | `POST /agents/mcp/{name}/check` | manage_local_env | starts a stdio server once (OS-adapted, stdin held open) and reports whether it is still running after 3 s; does not speak MCP |
+
+**Signing the agents in.** The agents' Claude config (`PM_AGENT_HOME`, or your own) must be
+signed in, or every PM chat and dev task fails. The server checks at startup and logs
+the result; the Systems page shows it next to these tools with a **Sign in** button, and a
+chat turn that fails for lack of a sign-in offers the same button. From a terminal:
+`python -m pm_studio.agent_env --ensure-login` (a no-op when signed in).
 
 **Only read-only DEV servers belong here.** Agents run these servers unattended, on
 every launch, with no human approving each call — dev agents even with bypassed

@@ -18,6 +18,7 @@ operator's own machine setup:
 `--ensure-login` (run by the launchers) signs the agents in through the browser when needed.
 """
 
+import collections
 import configparser
 import fnmatch
 import functools
@@ -26,6 +27,8 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 from .accounts import AGENT_HEADER_NAME, AGENT_TOKEN
@@ -203,6 +206,79 @@ def auth_status(env: dict[str, str] | None = None) -> dict:
     except (subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
         return {"loggedIn": False, "error": str(exc)}
     return data if isinstance(data, dict) else {"loggedIn": False, "error": "unexpected output"}
+
+
+AUTH_CACHE_SECONDS = 60
+_auth_lock = threading.Lock()
+_auth_cache: tuple[float, dict] | None = None
+_login_proc: subprocess.Popen | None = None
+_login_lines: collections.deque = collections.deque(maxlen=20)
+
+
+def _track_login_output(proc: subprocess.Popen) -> None:
+    """Keeps the sign-in's last output lines (the URL to open, if the browser did not)
+    and drops the cached status when it ends, so the next read is fresh."""
+    global _auth_cache
+    try:
+        for line in proc.stdout:  # type: ignore[union-attr]
+            if line.strip():
+                _login_lines.append(line.rstrip())
+    except (OSError, ValueError):
+        pass
+    proc.wait()
+    with _auth_lock:
+        _auth_cache = None
+
+
+def agent_auth(refresh: bool = False) -> dict:
+    """The agents' Claude sign-in, for the UI (GET /agents/auth): whose config it is,
+    whether it is signed in and as whom, and whether a sign-in is under way. Cached for
+    AUTH_CACHE_SECONDS - it runs the `claude` CLI - unless `refresh`."""
+    global _auth_cache
+    env = agent_env()
+    with _auth_lock:
+        login_running = _login_proc is not None and _login_proc.poll() is None
+        cached = _auth_cache
+    if cached is None or refresh or login_running or time.time() - cached[0] > AUTH_CACHE_SECONDS:
+        status = auth_status(env)
+        with _auth_lock:
+            _auth_cache = (time.time(), status)
+    else:
+        status = cached[1]
+    return {
+        "isolated": env is not None,
+        "config_dir": env.get("CLAUDE_CONFIG_DIR") if env else None,
+        "logged_in": bool(status.get("loggedIn")),
+        "email": status.get("email"),
+        "auth_method": status.get("authMethod"),
+        "subscription": status.get("subscriptionType"),
+        "error": status.get("error"),
+        "login_running": login_running,
+        "login_output": list(_login_lines) if login_running else [],
+    }
+
+
+def start_login() -> dict:
+    """Starts `claude auth login` for the agents' config in the background: it opens the
+    browser on this machine (PM Studio runs on the developer's own) and finishes by
+    itself. One at a time; returns agent_auth()."""
+    global _login_proc
+    env = agent_env()
+    with _auth_lock:
+        if _login_proc is None or _login_proc.poll() is not None:
+            _login_lines.clear()
+            try:
+                _login_proc = subprocess.Popen(
+                    ["claude", "auth", "login"], env=env, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                    encoding="utf-8", errors="replace",
+                )
+            except FileNotFoundError:
+                _login_lines.append("the `claude` CLI is not on PATH")
+                _login_proc = None
+            else:
+                threading.Thread(target=_track_login_output, args=(_login_proc,), daemon=True).start()
+    return agent_auth()
 
 
 def ensure_login(env: dict[str, str] | None) -> int:
