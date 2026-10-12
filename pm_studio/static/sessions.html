@@ -464,7 +464,7 @@
     archived: "○ Archived",
   };
 
-  const pending = new Map(); // session id -> "sync" | "terminate" | "archive" | "unarchive", while a request is in flight
+  const pending = new Map(); // session id -> "sync" | "terminate" | "discard" | "archive" | "unarchive", while a request is in flight
 
   function resultNote(session) {
     // sync_result never affects status, so surface its outcome separately.
@@ -600,10 +600,26 @@
       termBtn.title = "Merges this session into main, archives its final spec/chat, then removes the worktree.";
       termBtn.addEventListener("click", (e) => {
         e.preventDefault();
-        if (!confirm(`Terminate "${heading}"? This merges its work into main (auto-resolving conflicts if needed), archives its final spec/chat, then removes the session. This cannot be undone from the UI.`)) return;
+        if (!confirm(`Terminate "${heading}"? This merges its work into main (auto-resolving conflicts if needed) and commits its final spec and chat history there (alivi_pm archive), then removes the session. This cannot be undone from the UI.`)) return;
         startTerminate(session.id);
       });
       actions.appendChild(termBtn);
+
+      // Ending a session WITHOUT keeping it: no merge, no archived spec/chat. For a
+      // session whose work is not wanted, or whose chat holds something that must not
+      // reach the repository (a pasted credential).
+      const discardBtn = document.createElement("button");
+      discardBtn.type = "button";
+      discardBtn.className = "terminate";
+      discardBtn.textContent = busy === "discard" ? "Discarding…" : "Discard";
+      discardBtn.disabled = Boolean(busy) || session.status === "merging";
+      discardBtn.title = "Stops and removes this session without merging anything into main and without archiving its spec/chat.";
+      discardBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        if (!confirm(`Discard "${heading}"? Everything it is running stops and the session is removed WITHOUT merging into main: its branch work, spec and chat history are not kept in the repository. This cannot be undone from the UI.`)) return;
+        startDiscard(session.id);
+      });
+      actions.appendChild(discardBtn);
     }
 
     const archiveBtn = document.createElement("button");
@@ -645,6 +661,24 @@
     fetch(`/sessions/${sessionId}/terminate`, { method: "POST" })
       .then((r) => {
         if (!r.ok) return r.json().then((body) => { throw new Error(body.detail ?? "terminate failed"); });
+        return r.json();
+      })
+      .then((session) => { lastKnown.set(sessionId, session); upsert(session); })
+      .catch((err) => alert(err.message))
+      .finally(() => {
+        pending.delete(sessionId);
+        const current = lastKnown.get(sessionId);
+        if (current) upsert(current);
+      });
+  }
+
+  function startDiscard(sessionId) {
+    pending.set(sessionId, "discard");
+    const session = lastKnown.get(sessionId);
+    if (session) upsert(session);
+    fetch(`/sessions/${sessionId}`, { method: "DELETE" })
+      .then((r) => {
+        if (!r.ok) return r.json().then((body) => { throw new Error(body.detail ?? "discard failed"); });
         return r.json();
       })
       .then((session) => { lastKnown.set(sessionId, session); upsert(session); })
