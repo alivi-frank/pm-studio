@@ -292,6 +292,8 @@ class PmPromptTest(unittest.TestCase):
         agent = self._agent(self.worktree, {"web": SystemSpec(label="Web", path="src/web")})
         self.assertIn(f"{agent.checkout_url}/<system_id>", agent.system_prompt)
         self.assertIn("EMPTY folders", agent.system_prompt)
+        # Research reads the primary checkout; a worktree checkout is only for its own branch.
+        self.assertIn(f"PRIMARY checkout, {agent_module.CONFIG.repo_root.resolve()}, READ-ONLY", agent.system_prompt)
         self.assertIn(f"Bash(curl -s -X POST {agent.checkout_url}/*)", agent.allowed_tools)
         self.assertTrue(agent.checkout_url.endswith("/sessions/s1/checkout"))
 

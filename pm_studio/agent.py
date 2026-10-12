@@ -642,7 +642,8 @@ DEV_CAPABILITIES_TEMPLATE = """
 # For a session whose worktree is not the primary checkout: there, every system kept in a git
 # submodule starts as an EMPTY folder - which a PM reading the tree will otherwise mistake for
 # missing code or a blocked repository.
-CODE_CHECKOUT_CURL_TEMPLATE = """- Check a system's code out into this session's worktree, so you can Read it. This session is its own git worktree, and code kept in git submodules starts there as EMPTY folders, checked out on demand - an empty folder under a system's path never means the code is missing or that the repository is inaccessible. Run this before reading a system's code (idempotent; returns when the code is there, which can take a few seconds the first time; system ids: {system_ids}):
+CODE_CHECKOUT_CURL_TEMPLATE = """- Reading code: research in the PRIMARY checkout, {primary_root}, READ-ONLY. Every system's repositories are there, already cloned, at the commits main pins - read and search them there (Read, Grep, read-only git) without checking anything out. Never write, edit, install or run anything that changes files or git state under it - other sessions and the stakeholder work from it - except inside this session's own worktree, {worktree}, which happens to live inside it and is where your spec and docs go. This session is its own git worktree, where systems kept in git submodules start as EMPTY folders - an empty folder here never means the code is missing.
+- Only when you need THIS session's version of a system's code (its branch, e.g. to review what a dev task left there), check that system out into this worktree first (idempotent; a few seconds the first time; system ids: {system_ids}):
   curl -s -X POST {checkout_url}/<system_id>{auth_header}
   Dev tasks and local environments check their system's code out by themselves - you never need this just to dispatch.
 """
@@ -1371,6 +1372,8 @@ class PMAgent:
         code_systems = [sid for sid, spec in SYSTEMS.items() if spec.path]
         code_checkout_curl = (
             CODE_CHECKOUT_CURL_TEMPLATE.format(
+                primary_root=CONFIG.repo_root.resolve(),
+                worktree=self.repo_root.resolve(),
                 checkout_url=self.checkout_url,
                 auth_header=agent_auth_header(),
                 system_ids=", ".join(f"`{sid}`" for sid in code_systems),
