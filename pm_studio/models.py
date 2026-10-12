@@ -22,6 +22,10 @@ DEFAULT_MODEL = CONFIG.default_model or (
 )
 
 
+# What quick dev tasks run on ([models] quick); None means the session's own model.
+QUICK_MODEL = CONFIG.quick_model
+
+
 def validate_model(model: str) -> str:
     if model not in MODELS:
         raise ValueError(f"Unknown model: {model!r}. Must be one of: {', '.join(MODELS)}")
