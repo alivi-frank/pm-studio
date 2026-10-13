@@ -201,6 +201,12 @@ class SessionCheckoutTest(unittest.TestCase):
         self.assertEqual(sc._expand(self.root, "src/*/app/node_modules"), [f"{self.SUB}/node_modules"])
         self.assertEqual(sc._expand(self.root, "src/sys/missing"), [])
 
+    def test_link_to_unignored_dir_stays_visible(self) -> None:
+        write(self.root / self.SUB / "vendor" / "lib.js")
+        ensure_system_checkout(self.root, self.wt, "src/sys", link_paths=(f"{self.SUB}/vendor",))
+        self.assertTrue(is_dir_link(self.wt / self.SUB / "vendor"))
+        self.assertIn("vendor", git(self.wt / self.SUB, "status", "--porcelain"))
+
     def test_link_paths_link_to_primary(self) -> None:
         ensure_system_checkout(
             self.root, self.wt, "src/sys", link_paths=(f"{self.SUB}/**/node_modules",),

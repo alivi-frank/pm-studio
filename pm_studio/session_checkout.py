@@ -380,8 +380,46 @@ def _ensure_links(repo_root: Path, worktree: Path, link_paths: tuple[str, ...]) 
                 continue
             created.append(rel)
             notes.append(f"link {rel} -> primary checkout")
+            _exclude_link(repo_root, worktree, rel)
     _write_manifest(manifest, created)
     return notes
+
+
+def _exclude_link(repo_root: Path, worktree: Path, rel: str) -> None:
+    """Keeps a POSIX symlink exactly as ignored as the directory it stands in for. A
+    directory-only ignore pattern (`node_modules/`) never matches a symlink - git sees
+    a file - so the link would show as untracked and `git add -A` would commit it.
+    When the primary's directory is ignored, the link's repo-relative path is added to
+    the owning repository's info/exclude (shared by all its worktrees; in the primary
+    it matches only what is already ignored). Windows junctions are directories to git."""
+    if _IS_WINDOWS:
+        return
+    top = _git_out((worktree / rel).parent, "rev-parse", "--show-toplevel")
+    if not top:
+        return
+    try:
+        owner = Path(top).resolve().relative_to(Path(worktree).resolve()).as_posix()
+        in_repo = (Path(worktree).resolve() / rel).relative_to(Path(top).resolve()).as_posix()
+    except ValueError:
+        return
+    primary = repo_root / owner if owner != "." else repo_root
+    if _git(primary, "check-ignore", "-q", "--no-index", in_repo).returncode != 0:
+        return  # not ignored in the primary either - leave the link visible
+    exclude = _git_out(Path(top), "rev-parse", "--path-format=absolute", "--git-path", "info/exclude")
+    if not exclude:
+        return
+    line = "/" + in_repo
+    path = Path(exclude)
+    try:
+        existing = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+        if line in existing:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        prefix = "" if not existing or path.read_text(encoding="utf-8").endswith("\n") else "\n"
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(f"{prefix}{line}\n")
+    except OSError:
+        pass
 
 
 def release_system_checkouts(repo_root: Path, worktree: Path, force: bool = False) -> list[str]:
