@@ -743,7 +743,7 @@ def _report_agent_auth() -> None:
     else:
         reason = status.get("error") or "not signed in"
         print(f"[pm_studio] WARNING: agents cannot use Claude ({reason}) - sign them in from "
-              "/systems (Agent tools) or with `python -m pm_studio.agent_env --ensure-login`.")
+              "any chat or /systems (Sign in), or with `python -m pm_studio.agent_env --ensure-login`.")
 
 
 def _quiet_connection_resets(loop: asyncio.AbstractEventLoop, context: dict) -> None:

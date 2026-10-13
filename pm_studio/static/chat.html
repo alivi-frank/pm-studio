@@ -1449,31 +1449,69 @@
     return SIGN_IN_ERROR.test(String(text || ""));
   }
 
+  // One hint at a time: the check on page load and a failed turn can both ask for it.
+  let signInRow = null;
+
+  async function fetchAgentAuth(refresh) {
+    const response = await fetch(`/agents/auth${refresh ? "?refresh=true" : ""}`, { headers: { Accept: "application/json" } });
+    if (!response.ok) throw new Error(String(response.status));
+    return response.json();
+  }
+
+  // The sign-in hint: a button that starts `claude auth login` (a browser window on this
+  // machine), then follows it until the agents are signed in or it gives up.
   function signInHint() {
+    if (signInRow && signInRow.isConnected) return signInRow;
     const row = document.createElement("div");
     row.className = "row status";
     const bubble = document.createElement("div");
     bubble.className = "bubble";
     const text = document.createElement("span");
-    text.textContent = "The agents are not signed in to Claude. ";
     const action = document.createElement("button");
     action.type = "button";
     action.textContent = "Sign in";
+    const ask = (message) => {
+      text.textContent = message;
+      action.disabled = false;
+      bubble.append(action);
+    };
     action.addEventListener("click", async () => {
       action.disabled = true;
       try {
         const response = await fetch("/agents/auth/login", { method: "POST" });
-        text.textContent = response.ok
-          ? "Finish the sign-in in the browser window that opened, then send your message again. "
-          : `Could not start the sign-in (${response.status}). `;
+        if (!response.ok) return ask(`Could not start the sign-in (${response.status}). `);
       } catch (err) {
-        text.textContent = "Could not start the sign-in. ";
+        return ask("Could not start the sign-in. ");
       }
       action.remove();
+      text.textContent = "Finish the sign-in in the browser window that opened…";
+      const deadline = Date.now() + 5 * 60 * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        let status;
+        try { status = await fetchAgentAuth(true); } catch (err) { continue; }
+        if (status.logged_in) {
+          text.textContent = `Agents signed in to Claude${status.email ? ` as ${status.email}` : ""}. You can send your message.`;
+          return;
+        }
+        if (!status.login_running) return ask("The sign-in did not finish. ");
+      }
+      ask("Still not signed in. ");
     });
-    bubble.append(text, action);
+    ask("The agents are not signed in to Claude. ");
     row.appendChild(bubble);
+    signInRow = row;
     return row;
+  }
+
+  // Checked when the chat opens, so nobody loses a first message to a missing sign-in.
+  async function checkAgentSignIn() {
+    try {
+      const status = await fetchAgentAuth(false);
+      if (!status.logged_in) log.appendChild(signInHint());
+    } catch (err) {
+      // Not allowed to see it, or the server is restarting: a failed turn still shows the hint.
+    }
   }
 
   // The running turn's Stop button, on its "PM is thinking..." status row. One at a
@@ -1701,6 +1739,7 @@
     connectChat();
     connectTasks();
     connectSessions();
+    checkAgentSignIn();
     // Arm auto-read only after the initial hydrate + connect burst settles, so the
     // programmatic scroll-to-bottom and "Connected." status row don't clear a divider
     // restored from the stored watermark.

@@ -1355,8 +1355,10 @@ server, "last call: ✓ 2 min ago" or "✗ 5 failed in a row: read ECONNRESET", 
 
 **Signing the agents in.** The agents' Claude config (`PM_AGENT_HOME`, or your own) must be
 signed in, or every PM chat and dev task fails. The server checks at startup and logs
-the result; the Systems page shows it next to these tools with a **Sign in** button, and a
-chat turn that fails for lack of a sign-in offers the same button. From a terminal:
+the result; the Systems page shows it next to these tools with a **Sign in** button, and the
+chat checks it when it opens and offers the same button before the first message (a turn
+that still fails for lack of a sign-in offers it again). The button opens the browser
+sign-in on this machine and reports when it is done. From a terminal:
 `python -m pm_studio.agent_env --ensure-login` (a no-op when signed in).
 
 **Only read-only DEV servers belong here.** Agents run these servers unattended, on
