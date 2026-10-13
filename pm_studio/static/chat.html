@@ -1469,7 +1469,9 @@
     const text = document.createElement("span");
     const action = document.createElement("button");
     action.type = "button";
-    action.textContent = "Sign in";
+    action.textContent = "Sign in to Claude";
+    action.title = "Opens the Claude sign-in for the agents (PM, dev tasks) in your browser";
+    bubble.append(text);
     const ask = (message) => {
       text.textContent = message;
       action.disabled = false;
@@ -1484,7 +1486,7 @@
         return ask("Could not start the sign-in. ");
       }
       action.remove();
-      text.textContent = "Finish the sign-in in the browser window that opened…";
+      text.textContent = "Finish the Claude sign-in in the browser window that opened…";
       const deadline = Date.now() + 5 * 60 * 1000;
       while (Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 3000));
@@ -1498,7 +1500,7 @@
       }
       ask("Still not signed in. ");
     });
-    ask("The agents are not signed in to Claude. ");
+    ask("The agents (PM chat and dev tasks) are not signed in to Claude, so they cannot answer. ");
     row.appendChild(bubble);
     signInRow = row;
     return row;
