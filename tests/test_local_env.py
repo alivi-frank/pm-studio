@@ -1822,3 +1822,15 @@ class DevPromptTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExpandEnvTest(unittest.TestCase):
+    def test_reads_the_environment_with_a_default(self) -> None:
+        from pm_studio.local_env import expand_env
+
+        with mock.patch.dict(os.environ, {"PROFILE_SET": "dev-admin", "PROFILE_EMPTY": ""}):
+            self.assertEqual(expand_env("${PROFILE_SET:-fallback}"), "dev-admin")
+            self.assertEqual(expand_env("${PROFILE_EMPTY:-fallback}"), "fallback")
+            self.assertEqual(expand_env("${PROFILE_MISSING:-fallback}"), "fallback")
+            self.assertEqual(expand_env("${PROFILE_MISSING}"), "")
+            self.assertEqual(expand_env("epicride-dev"), "epicride-dev")

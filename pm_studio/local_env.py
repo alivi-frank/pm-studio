@@ -34,7 +34,8 @@ services and destroys the resources it provisioned.
 Sessions rarely END, though; they are abandoned. So a slot is also given back when
 nobody is using it: every call made on behalf of a session (start, stop, wait, logs,
 status...) is that session's "activity", and a session counts as in use while it has a
-dev task running (the injected `session_busy`). With `[local_env] idle_stop_minutes`
+dev task running (the injected `session_busy`) - and while its services keep writing
+output, which is how a person clicking through the app they serve shows up. With `[local_env] idle_stop_minutes`
 set, reap_idle() - called periodically by the reaper thread start_idle_reaper() runs -
 stops the session-scoped services of every session idle that long; and whatever the
 setting, a start that would hit the limit first stops the least recently active OTHER
@@ -348,6 +349,17 @@ def next_expiry_boundary(now: float, expires_at: str, timezone: str = "") -> dat
     return boundary
 
 
+_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+
+def expand_env(value: str) -> str:
+    """Expands `${NAME}` and `${NAME:-default}` from the environment (which holds the
+    deployment's .env, merged in at startup) in a descriptive setting such as
+    `aws_profile`, so the UI shows what the system's own tooling will use when that is
+    a per-developer .env value rather than one name for everybody."""
+    return _ENV_REF.sub(lambda m: os.environ.get(m.group(1), "") or (m.group(2) or ""), value)
+
+
 def _safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", value) or "_"
 
@@ -637,6 +649,9 @@ class LocalEnvManager:
         # time it was seen busy). In memory only: after a restart nothing is running,
         # so there is nothing to be idle.
         self._last_activity: dict[str, float] = {}
+        # (scope, system id, service id) -> its log's size at the last idle check, so
+        # new output counts as activity (_note_output_locked).
+        self._log_sizes: dict[tuple[str, str, str], int] = {}
         # The idle-stop thread (start_idle_reaper) and what tells it to stop.
         self._reaper: threading.Thread | None = None
         self._reaper_stop = threading.Event()
@@ -669,6 +684,30 @@ class LocalEnvManager:
         # activity backwards past a call it made in the meantime.
         now = self._clock() if now is None else now
         self._last_activity[session_id] = max(now, self._last_activity.get(session_id, now))
+
+    def _note_output_locked(self, scope: str, now: float) -> None:
+        """Counts new output from a session's live services as that session's activity.
+        A person using what the environment serves - clicking through the app in a
+        browser - makes no local-env call, but the services they reach log it (the
+        EpicRide gateway writes a line per proxied request), while services nobody
+        uses stay silent. Goes by log SIZE seen at the previous pass, not mtime, so the
+        injected clock stays the only time source; the first sighting only records a
+        baseline (starting the service was activity already)."""
+        grew = False
+        for (run_scope, system_id, service_id), run in self._runs.items():
+            if run_scope != scope or run.state not in _LIVE:
+                continue
+            key = (run_scope, system_id, service_id)
+            try:
+                size = self.log_path(system_id, service_id, scope).stat().st_size
+            except OSError:
+                continue
+            previous = self._log_sizes.get(key)
+            self._log_sizes[key] = size
+            if previous is not None and size > previous:
+                grew = True
+        if grew:
+            self._touch_locked(scope, now)
 
     def _ctx_for(self, spec: LocalServiceSpec | LocalResourceSpec, ctx: SessionContext) -> SessionContext:
         """The context an entry actually runs in: the shared one for shared entries,
@@ -821,11 +860,10 @@ class LocalEnvManager:
         with self._lock:
             if not self._limit_reached_locked(ctx, system_id):
                 return
-            candidates = sorted(
-                (self._last_activity.get(scope, now), scope)
-                for scope in {scope for scope, _ in self._active_envs_locked()}
-                if scope != ctx.id
-            )
+            others = {scope for scope, _ in self._active_envs_locked()} - {ctx.id}
+            for scope in others:
+                self._note_output_locked(scope, now)
+            candidates = sorted((self._last_activity.get(scope, now), scope) for scope in others)
         for last, scope in candidates:
             if now - last < MAKE_ROOM_IDLE_SECONDS:
                 break  # sorted oldest first: nobody after this one is idle long enough
@@ -2076,6 +2114,8 @@ class LocalEnvManager:
             for prep_key in [k for k in self._preps if k[0] == session_id]:
                 del self._preps[prep_key]
             self._last_activity.pop(session_id, None)
+            for size_key in [k for k in self._log_sizes if k[0] == session_id]:
+                del self._log_sizes[size_key]
             self._save_locked()
             self._changed.notify_all()
         for proc in aborted:
@@ -2370,6 +2410,7 @@ class LocalEnvManager:
                     self._touch_locked(scope, now)
                 continue
             with self._lock:
+                self._note_output_locked(scope, now)
                 # setdefault: a live run with no recorded activity (it cannot normally
                 # happen - starting one is activity) starts its countdown now rather
                 # than being stopped on sight.
@@ -2532,7 +2573,7 @@ class LocalEnvManager:
             "id": system_id,
             "label": self._labels.get(system_id, system_id),
             "session": ctx.id,
-            "aws_profile": local.aws_profile,
+            "aws_profile": expand_env(local.aws_profile),
             "test_users_secret": local.test_users_secret,
             "checkout": self._prep_status_locked(ctx, system_id),
             "services": [self._service_status(system_id, s, ctx) for s in local.services],

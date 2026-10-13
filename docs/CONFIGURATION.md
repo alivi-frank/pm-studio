@@ -576,7 +576,8 @@ max_session_envs = 2       # optional (default 2): see "Limit" below
 idle_stop_minutes = 30     # optional (default 0 = never): see "Idle stop" below
 
 [systems.epicride.local]
-aws_profile = "epicride-dev"                           # descriptive: shown in the UI/API
+aws_profile = "epicride-dev"                           # descriptive: shown in the UI/API;
+                                                       # ${NAME} / ${NAME:-default} read the environment (.env)
 test_users_secret = "alivi-os/epicride/dev/test-users"  # descriptive: shown in the UI/API
 # Optional: repo-root-relative paths/globs a NON-default session's worktree borrows
 # from the primary checkout instead of installing its own (see "Session checkouts").

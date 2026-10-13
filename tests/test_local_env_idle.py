@@ -226,6 +226,25 @@ class IdleStopTest(IdleTestBase):
         with mock.patch("sys.stderr"):
             self.assertEqual([r["session"] for r in manager.reap_idle()], ["s1"])
 
+    def test_service_output_counts_as_activity(self) -> None:
+        # Someone using the app the environment serves makes no local-env call; the
+        # requests it logs are what keep the environment up.
+        manager = self._system()
+        self._up(manager, "s1")
+        log = manager.log_path("sys", "api", "s1")
+        self.assertEqual(manager.reap_idle(), [])  # baseline: starting already counted
+        for _ in range(3):
+            self._advance(4 * 60)
+            with log.open("a", encoding="utf-8") as handle:
+                handle.write("[gateway] GET /auth/claims -> 200\n")
+            self.assertEqual(manager.reap_idle(), [])
+        # Silence afterwards: stopped five minutes after the last line.
+        self._advance(4 * 60)
+        self.assertEqual(manager.reap_idle(), [])
+        self._advance(61)
+        with mock.patch("sys.stderr"):
+            self.assertEqual([r["session"] for r in manager.reap_idle()], ["s1"])
+
     def test_busy_session_is_never_stopped_and_busy_counts_as_activity(self) -> None:
         manager = self._system()
         self._up(manager, "s1")
