@@ -25,19 +25,39 @@ from . import __version__
 from . import config
 
 
-def _open_browser() -> None:
-    time.sleep(1.0)
+def _open_browser_when_ready(server) -> None:
+    """Opens the browser once uvicorn reports the app started (lifespan done, socket
+    bound) - not after a fixed delay. Loading the server takes several seconds, and a
+    browser opened before that just sits on a blank page. Watching uvicorn's own flag,
+    rather than probing the port, also never opens an older server still holding it."""
+    while not server.started:
+        if server.should_exit:
+            return  # it failed to start (port taken, bad config): nothing to open
+        time.sleep(0.2)
     # Read the live module attribute so a `--port`/`--host` override is reflected.
-    webbrowser.open(config.CONFIG.base_url)
+    url = config.CONFIG.base_url
+    print(f"[pm_studio] ready at {url}")
+    webbrowser.open(url)
 
 
 def _serve() -> None:
     import uvicorn
 
     cfg = config.CONFIG
-    print(f"PM Studio v{__version__} - project '{cfg.project_name}' at {cfg.repo_root}")
-    threading.Thread(target=_open_browser, daemon=True).start()
-    uvicorn.run("pm_studio.server:app", host=cfg.host, port=cfg.port, reload=False)
+    print(f"PM Studio v{__version__} - project '{cfg.project_name}' at {cfg.repo_root} (starting...)")
+    # timeout_graceful_shutdown: without it, Ctrl+C waits on every open browser tab's
+    # websockets and every in-flight request indefinitely ("Shutting down" forever).
+    server = uvicorn.Server(uvicorn.Config(
+        "pm_studio.server:app", host=cfg.host, port=cfg.port, reload=False,
+        timeout_graceful_shutdown=5,
+    ))
+    threading.Thread(target=_open_browser_when_ready, args=(server,), daemon=True).start()
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        # Ctrl+C after shutdown already completed: uvicorn.run() swallows this too, and a
+        # traceback here would read as a crash when the server stopped cleanly.
+        pass
 
 
 def _apply_overrides(host: str | None, port: int | None) -> None:

@@ -6,6 +6,10 @@
 <title>PM Studio — Chat</title>
 <link rel="stylesheet" href="/static/nav.css" />
 <script src="/static/nav.js"></script>
+<!-- Claude writes markdown: marked turns it into HTML, DOMPurify strips anything that
+     could run. Both are vendored (pm_studio/static) so the chat works offline. -->
+<script src="/static/marked.min.js"></script>
+<script src="/static/purify.min.js"></script>
 <style>
   :root {
     color-scheme: light dark;
@@ -159,6 +163,26 @@
     font-style: italic;
     border: 1px dashed var(--border);
   }
+  /* Live progress of a PM turn: one row per turn, a line per step (what it wrote on the
+     way, which tools it used), folded into a one-line summary once the reply lands. */
+  .row.activity .bubble {
+    background: transparent;
+    color: var(--muted);
+    font-size: 0.85em;
+    border: 1px dashed var(--border);
+    max-width: 85%;
+  }
+  .row.activity summary { cursor: pointer; font-style: italic; }
+  .row.activity ol { margin: 6px 0 0; padding-left: 18px; }
+  .row.activity li { margin: 2px 0; white-space: pre-wrap; }
+  .row.activity li.tool { font-style: italic; }
+  .row.activity li.text { color: var(--fg); }
+  /* A tool step's outcome (✓/✗, what came back, how long), filled in when its result
+     arrives - in the live PM progress and on task cards alike. */
+  .step-outcome { font-style: normal; margin-left: 6px; color: var(--muted); }
+  li.step-ok .step-outcome { color: #2e7d32; }
+  li.step-failed { color: #c62828; }
+  li.step-failed .step-outcome { color: #c62828; font-weight: 600; }
   form {
     display: flex;
     gap: 8px;
@@ -311,6 +335,7 @@
   }
   .task-card.done { border-left-color: var(--status-done); }
   .task-card.error { border-left-color: var(--status-error); }
+  .task-card.stopped { border-left-color: var(--muted); }
   .task-card.running { animation: card-pulse 2s ease-in-out infinite; }
   @keyframes card-pulse {
     0%, 100% { box-shadow: 0 0 0 0 rgba(42, 120, 214, 0); }
@@ -326,6 +351,29 @@
   .judge-verdict.violation { color: var(--status-error); }
   .judge-verdict.inconclusive { color: var(--status-running); }
   .task-card .judge-body { margin-top: 6px; white-space: pre-wrap; }
+  /* Files the dev task left for the stakeholder: images as thumbnails (click for full
+     size), anything else as a plain link. */
+  .task-card .artifacts { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 8px; }
+  .task-card .artifacts a.thumb img {
+    display: block; max-width: 220px; max-height: 160px;
+    border: 1px solid var(--border); border-radius: 8px; object-fit: cover;
+  }
+  .task-card .artifacts a.file { font-size: 0.9em; }
+  .task-card .other-files { margin-top: 8px; font-size: 0.9em; }
+  /* The dev agent's live steps: the current one always visible while it runs, the rest
+     in a disclosure whose open/closed state survives the card's re-renders. */
+  .task-card .now { margin-top: 8px; font-size: 0.9em; color: var(--muted); font-style: italic; }
+  .task-card .steps { margin-top: 6px; font-size: 0.85em; }
+  .task-card .steps summary { cursor: pointer; color: var(--muted); }
+  .task-card .steps ol { margin: 6px 0 0; padding-left: 18px; }
+  .task-card .steps li { margin: 2px 0; white-space: pre-wrap; }
+  .task-card .steps li.tool { font-style: italic; color: var(--muted); }
+  .task-card .steps li.tool.step-failed { color: #c62828; }
+  .task-card .other-files summary { cursor: pointer; color: var(--muted); }
+  .task-card .quick-tag {
+    margin-left: 6px; font-size: 0.8em; padding: 1px 6px;
+    border: 1px solid var(--border); border-radius: 999px; color: var(--muted);
+  }
   .card {
     background: var(--bg);
     border: 1px solid var(--border);
@@ -349,6 +397,7 @@
   .badge.running { color: var(--status-running); }
   .badge.done, .badge.clean, .badge.active { color: var(--status-done); }
   .badge.error, .badge.failed, .badge.conflict { color: var(--status-error); }
+  .badge.stopped { color: var(--muted); }
   .badge.auto_resolved, .badge.merging { color: var(--status-auto); }
   .badge.running .dot { animation: pulse 1.4s ease-in-out infinite; }
   @keyframes pulse {
@@ -394,6 +443,48 @@
     max-height: 300px;
     overflow-y: auto;
   }
+  /* Rendered markdown (PM replies, task results, the agents' own notes). Spacing is kept
+     tight so a reply reads like the plain-text bubble it replaced. */
+  .md { white-space: normal; }
+  .md > :first-child { margin-top: 0; }
+  .md > :last-child { margin-bottom: 0; }
+  .md p { margin: 0 0 8px; }
+  .md ul, .md ol { margin: 4px 0 8px; padding-left: 22px; }
+  .md li { margin: 2px 0; }
+  .md li > p { margin: 0; }
+  .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 10px 0 6px; line-height: 1.25; }
+  .md h1 { font-size: 1.25em; }
+  .md h2 { font-size: 1.15em; }
+  .md h3, .md h4, .md h5, .md h6 { font-size: 1em; }
+  .md code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.88em;
+    padding: 1px 4px;
+    border-radius: 4px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+  }
+  .md pre { margin: 6px 0 8px; color: var(--fg); max-height: 400px; }
+  .md pre code { padding: 0; border: none; background: none; font-size: 1em; }
+  .md blockquote { margin: 6px 0; padding-left: 10px; border-left: 3px solid var(--border); color: var(--muted); }
+  .md table { border-collapse: collapse; margin: 6px 0 8px; display: block; overflow-x: auto; }
+  .md th, .md td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; vertical-align: top; }
+  .md th { background: var(--surface); }
+  .md hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+  .md a { color: var(--status-running); }
+  .md img { max-width: 100%; }
+  .row.activity li.md, .task-card .steps li.md { white-space: normal; }
+  .task-card .result-body {
+    margin-top: 8px;
+    padding: 10px 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 0.9em;
+    word-wrap: break-word;
+    max-height: 400px;
+    overflow-y: auto;
+  }
   button.merge-btn {
     padding: 8px 16px;
     border: none;
@@ -406,6 +497,22 @@
     cursor: pointer;
   }
   button.merge-btn:disabled { opacity: 0.5; cursor: default; }
+  /* Stop what is running: the PM's turn (on its status row), a dev task (on its card),
+     everything in the session (in the strip). Quiet until needed - outlined, not filled. */
+  button.stop-btn, button.merge-btn.stop-all {
+    padding: 2px 10px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: none;
+    color: var(--status-error);
+    font: inherit;
+    font-size: 0.8em;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button.merge-btn.stop-all { padding: 8px 16px; border-radius: 8px; font-size: 0.85em; }
+  button.stop-btn:disabled { opacity: 0.5; cursor: default; }
+  .row.status .bubble.has-stop > div { display: inline; margin-right: 8px; }
 
   /* ---- jump-to-latest pill + unread "New" divider ---- */
   #log-wrap {
@@ -515,6 +622,28 @@
   // URL is /chat/{session_id}
   const sessionId = location.pathname.split("/").filter(Boolean).pop();
 
+  // Markdown from the agents into `el`, sanitized; plain text if the libraries failed to
+  // load. `breaks` keeps a single newline a line break, as the plain-text bubble did.
+  const markdownReady = Boolean(window.marked && window.DOMPurify);
+  if (markdownReady) {
+    DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+      if (node.tagName === "A" && node.hasAttribute("href")) {
+        node.setAttribute("target", "_blank");
+        node.setAttribute("rel", "noopener noreferrer");
+      }
+    });
+  }
+  function renderMarkdown(el, text) {
+    el.dataset.raw = text ?? "";
+    if (!markdownReady) {
+      el.textContent = text ?? "";
+      return el;
+    }
+    el.classList.add("md");
+    el.innerHTML = DOMPurify.sanitize(marked.parse(text ?? "", { gfm: true, breaks: true }));
+    return el;
+  }
+
   const sessionGoalEl = document.getElementById("session-goal");
   const productBadgeEl = document.getElementById("product-badge");
   const modelSelectEl = document.getElementById("model-select");
@@ -605,6 +734,7 @@
     running: { dot: "●", label: "Running" },
     done: { dot: "✓", label: "Done" },
     error: { dot: "✗", label: "Error" },
+    stopped: { dot: "■", label: "Stopped" },
   };
 
   const SESSION_BADGE = {
@@ -798,13 +928,17 @@
     card.innerHTML = `
       <div class="card-top">
         <span class="badge ${task.status}"><span class="dot">${badge.dot}</span>${badge.label}</span>
+        ${task.quick ? `<span class="quick-tag" title="Look, don't build: no code changes">Quick check</span>` : ""}
         <span class="meta">${metaText}</span>
+        ${task.status === "running" && task.kind !== "merge_resolution"
+          ? `<button type="button" class="stop-btn" title="Stop this dev task"${stoppingTasks.has(task.id) ? " disabled>Stopping…" : ">Stop"}</button>`
+          : ""}
       </div>
       <details class="desc-disclosure">
         <summary><span class="desc-label">Task</span>&nbsp;<span class="desc-preview"></span></summary>
         <div class="description"></div>
       </details>
-      ${task.result ? `<details><summary>Result</summary><pre></pre></details>` : ""}
+      ${task.result ? `<details><summary>Result</summary><div class="result-body"></div></details>` : ""}
       ${task.judge ? `<details class="judge-line"><summary><span class="judge-verdict ${task.judge.verdict}"></span></summary><div class="judge-body"></div></details>` : ""}
     `;
     const desc = (task.description ?? "").trim();
@@ -813,8 +947,10 @@
     const preview = firstLine.length > 90 ? firstLine.slice(0, 90) + "…" : firstLine;
     card.querySelector(".desc-preview").textContent = preview;
     card.querySelector(".description").textContent = task.description;
+    const stopBtn = card.querySelector(".stop-btn");
+    if (stopBtn) stopBtn.addEventListener("click", () => stopTask(task.id, stopBtn));
     if (task.result) {
-      card.querySelector("pre").textContent = task.result;
+      renderMarkdown(card.querySelector(".result-body"), task.result);
     }
     if (task.judge) {
       const judge = task.judge;
@@ -830,7 +966,103 @@
       if (judge.summary) lines.push(judge.summary);
       card.querySelector(".judge-body").textContent = lines.join("\n") || "No detail recorded.";
     }
+    const steps = task.progress || [];
+    if (steps.length) {
+      if (task.status === "running") {
+        const now = document.createElement("div");
+        now.className = "now";
+        now.textContent = `▸ ${steps[steps.length - 1].text}`;
+        card.appendChild(now);
+      }
+      const details = document.createElement("details");
+      details.className = "steps";
+      const summary = document.createElement("summary");
+      summary.textContent = task.status === "running"
+        ? `Steps so far (${steps.length})`
+        : `Worked through ${steps.length} step${steps.length === 1 ? "" : "s"}`;
+      const list = document.createElement("ol");
+      for (const step of steps) {
+        const item = document.createElement("li");
+        item.className = step.kind === "text" ? "text" : "tool";
+        if (step.kind === "text") renderMarkdown(item, step.text);
+        else item.textContent = step.text;
+        showStepOutcome(item, step);
+        list.appendChild(item);
+      }
+      details.append(summary, list);
+      card.appendChild(details);
+    }
+    if (task.artifacts && task.artifacts.length) {
+      // Images up front - they are what the stakeholder asked to see. Everything else
+      // (a browser tool's console logs and page snapshots, reports) is folded away.
+      const isImage = (artifact) => /\.(png|jpe?g|gif|webp)$/i.test(artifact.name);
+      const link = (artifact) => {
+        const a = document.createElement("a");
+        a.href = `/tasks/${encodeURIComponent(sessionId)}/${encodeURIComponent(task.id)}/artifacts/`
+          + artifact.name.split("/").map(encodeURIComponent).join("/");
+        a.target = "_blank";
+        a.rel = "noopener";
+        a.title = artifact.name;
+        return a;
+      };
+      const images = task.artifacts.filter(isImage);
+      const others = task.artifacts.filter((artifact) => !isImage(artifact));
+      if (images.length) {
+        const wrap = document.createElement("div");
+        wrap.className = "artifacts";
+        for (const artifact of images) {
+          const a = link(artifact);
+          a.className = "thumb";
+          const img = document.createElement("img");
+          img.src = a.href;
+          img.alt = artifact.name;
+          img.loading = "lazy";
+          a.appendChild(img);
+          wrap.appendChild(a);
+        }
+        card.appendChild(wrap);
+      }
+      if (others.length) {
+        const details = document.createElement("details");
+        details.className = "other-files";
+        const summary = document.createElement("summary");
+        summary.textContent = `Other files (${others.length})`;
+        const list = document.createElement("div");
+        list.className = "artifacts";
+        for (const artifact of others) {
+          const a = link(artifact);
+          a.className = "file";
+          a.textContent = artifact.name;
+          list.appendChild(a);
+        }
+        details.append(summary, list);
+        card.appendChild(details);
+      }
+    }
     return card;
+  }
+
+  // Tasks this page asked to stop and has not heard back about: a running card
+  // re-renders on every step, and keeps its Stop button disabled meanwhile.
+  const stoppingTasks = new Set();
+
+  function stopTask(taskId, button) {
+    stoppingTasks.add(taskId);
+    button.disabled = true;
+    button.textContent = "Stopping…";
+    fetch(`/tasks/${encodeURIComponent(sessionId)}/${encodeURIComponent(taskId)}/stop`, { method: "POST" })
+      .then((r) => {
+        if (!r.ok) return r.json().then((body) => { throw new Error(body.detail ?? `stop failed (${r.status})`); });
+        return r.json();
+      })
+      .then((body) => { stoppingTasks.delete(taskId); if (body.task) upsertTaskCard(body.task); })
+      .catch((err) => {
+        stoppingTasks.delete(taskId);
+        addRow("status", `Could not stop the task: ${err.message}`);
+        const card = taskCards.get(taskId);
+        const current = card && card.querySelector(".stop-btn");
+        if (current) { current.disabled = false; current.textContent = "Stop"; }
+      });
   }
 
   // Upsert a task's inline card. A task seen for the first time appends its card at the
@@ -841,7 +1073,15 @@
     const rendered = renderTaskCard(task);
     tagItemTs(rendered, taskTs(task));
     const existing = taskCards.get(task.id);
-    if (existing) existing.replaceWith(rendered);
+    // A running task re-renders on every step: keep whatever the reader had expanded.
+    if (existing) {
+      for (const cls of ["steps", "desc-disclosure"]) {
+        const was = existing.querySelector(`details.${cls}`);
+        const now = rendered.querySelector(`details.${cls}`);
+        if (was && now) now.open = was.open;
+      }
+      existing.replaceWith(rendered);
+    }
     else log.appendChild(rendered);
     taskCards.set(task.id, rendered);
     if (near) scrollToBottom();
@@ -856,6 +1096,9 @@
     const statusBadge = SESSION_BADGE[session.status] ?? SESSION_BADGE.active;
     const canMerge = !session.is_default && (session.status === "active" || session.status === "conflict");
     const canCleanup = !session.is_default && session.status === "merged";
+    // Anything with a worktree can have something running (a PM turn, dev tasks, its
+    // local environment).
+    const canStop = Boolean(session.worktree_path);
 
     stripSummaryContent.innerHTML = `
       <span class="strip-branch"></span>
@@ -880,6 +1123,7 @@
       <div class="strip-actions">
         ${canMerge ? `<button class="merge-btn" id="merge-btn">Merge to main</button>` : ""}
         ${canCleanup ? `<button class="merge-btn" id="cleanup-btn">Clean up worktree</button>` : ""}
+        ${canStop ? `<button class="merge-btn stop-all" id="stop-all-btn" title="Stop the PM's turn, every running dev task and this session's local environment">Stop everything</button>` : ""}
       </div>
       ${resultHtml}
     `;
@@ -908,6 +1152,34 @@
           .then(renderSessionStrip);
       });
     }
+    const stopAllBtn = document.getElementById("stop-all-btn");
+    if (stopAllBtn) stopAllBtn.addEventListener("click", () => stopEverything(stopAllBtn));
+  }
+
+  // "Stop everything" in the strip: the PM's turn and the messages queued behind it,
+  // every running dev task, and the session's local services (its resources are kept).
+  function stopEverything(button) {
+    if (!confirm("Stop everything this session is running? The PM's current turn, every running dev task and this session's local environment are stopped, and messages still waiting for the PM are discarded.")) {
+      return;
+    }
+    button.disabled = true;
+    button.textContent = "Stopping…";
+    fetch(`/sessions/${sessionId}/stop`, { method: "POST" })
+      .then((r) => {
+        if (!r.ok) return r.json().then((body) => { throw new Error(body.detail ?? `stop failed (${r.status})`); });
+        return r.json();
+      })
+      .then((report) => {
+        const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+        const parts = [];
+        if (report.pm_turn) parts.push("the PM's turn");
+        if (report.tasks.length) parts.push(plural(report.tasks.length, "dev task"));
+        if (report.services.length) parts.push(plural(report.services.length, "local service"));
+        if (report.discarded.length) parts.push(`${plural(report.discarded.length, "queued message")} (discarded)`);
+        addRow("status", parts.length ? `Stopped ${parts.join(", ")}.` : "Nothing was running.");
+      })
+      .catch((err) => addRow("status", `Could not stop the session: ${err.message}`))
+      .finally(() => { button.disabled = false; button.textContent = "Stop everything"; });
   }
 
   function connectSessions() {
@@ -994,7 +1266,9 @@
     }
     if (text) {
       const textEl = document.createElement("div");
-      textEl.textContent = text;
+      // The PM writes markdown; what the stakeholder typed stays exactly as typed.
+      if (kind === "pm") renderMarkdown(textEl, text);
+      else textEl.textContent = text;
       bubble.appendChild(textEl);
     }
     row.appendChild(bubble);
@@ -1091,6 +1365,195 @@
   // order it receives.
   let awaitingAck = [];
 
+  // The running turn's progress row (see .row.activity): created on its first step,
+  // folded by finishProgress when the turn's reply or error arrives. Live only - a reload
+  // shows the transcript, which keeps just the final reply.
+  let activity = null;
+
+  // A tool step's outcome once its result is in: "✓ 3 rows · 1.2 s" / "✗ read ECONNRESET
+  // · 30 s". `step` is a task record's progress item or a pm_progress "result" event.
+  function showStepOutcome(item, step) {
+    if (!step || typeof step.ok !== "boolean") return;
+    const seconds = typeof step.duration_ms === "number" ? step.duration_ms / 1000 : null;
+    const took = seconds === null ? "" : seconds < 1 ? `${Math.round(step.duration_ms)} ms` : `${seconds.toFixed(seconds < 10 ? 1 : 0)} s`;
+    const parts = [step.ok ? "✓" : "✗", step.outcome ? String(step.outcome) : "", took].filter(Boolean);
+    let span = item.querySelector(".step-outcome");
+    if (!span) {
+      span = document.createElement("span");
+      span.className = "step-outcome";
+      item.appendChild(span);
+    }
+    span.textContent = parts.length > 1 ? `${parts[0]} ${parts.slice(1).join(" · ")}` : parts[0];
+    item.classList.toggle("step-ok", step.ok);
+    item.classList.toggle("step-failed", !step.ok);
+  }
+
+  function addProgress(event) {
+    if (event.kind === "result") {
+      // Updates the step with that id; never a new line.
+      if (!activity || !event.id) return;
+      const step = Array.from(activity.list.children).find((li) => li.dataset.stepId === String(event.id));
+      if (step) showStepOutcome(step, event);
+      return;
+    }
+    const near = isNearBottom();
+    if (!activity) {
+      const row = document.createElement("div");
+      row.className = "row activity";
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+      const details = document.createElement("details");
+      details.open = true;
+      const summary = document.createElement("summary");
+      summary.textContent = "PM is working…";
+      const list = document.createElement("ol");
+      details.append(summary, list);
+      bubble.appendChild(details);
+      row.appendChild(bubble);
+      log.appendChild(row);
+      activity = { details, summary, list, steps: 0 };
+    }
+    const item = document.createElement("li");
+    item.className = event.kind === "text" ? "text" : "tool";
+    if (event.kind === "text") renderMarkdown(item, event.text);
+    else item.textContent = event.text;
+    if (event.id) item.dataset.stepId = String(event.id);
+    activity.list.appendChild(item);
+    activity.steps += 1;
+    activity.summary.textContent = `PM is working… (${activity.steps} step${activity.steps === 1 ? "" : "s"})`;
+    if (near) scrollToBottom();
+  }
+
+  function finishProgress(replyText) {
+    if (!activity) return;
+    // The reply is the last thing the PM wrote: don't show it twice.
+    const last = activity.list.lastElementChild;
+    if (replyText && last && last.classList.contains("text") && (last.dataset.raw ?? last.textContent).trim() === replyText.trim()) {
+      last.remove();
+      activity.steps -= 1;
+    }
+    if (activity.steps <= 0) {
+      activity.details.closest(".row").remove();
+    } else {
+      activity.details.open = false;
+      activity.summary.textContent = `Worked through ${activity.steps} step${activity.steps === 1 ? "" : "s"}`;
+    }
+    activity = null;
+  }
+
+  // A turn that failed because the agents' Claude config is not signed in (first run,
+  // expired session) gets a way to fix it right here instead of a bare CLI error.
+  const SIGN_IN_ERROR = /please run \/login|not logged in|invalid api key|oauth token (has )?expired|authentication_error|not signed in/i;
+
+  function isSignInError(text) {
+    return SIGN_IN_ERROR.test(String(text || ""));
+  }
+
+  // One hint at a time: the check on page load and a failed turn can both ask for it.
+  let signInRow = null;
+
+  async function fetchAgentAuth(refresh) {
+    const response = await fetch(`/agents/auth${refresh ? "?refresh=true" : ""}`, { headers: { Accept: "application/json" } });
+    if (!response.ok) throw new Error(String(response.status));
+    return response.json();
+  }
+
+  // The sign-in hint: a button that starts `claude auth login` (a browser window on this
+  // machine), then follows it until the agents are signed in or it gives up.
+  function signInHint() {
+    if (signInRow && signInRow.isConnected) return signInRow;
+    const row = document.createElement("div");
+    row.className = "row status";
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    const text = document.createElement("span");
+    const action = document.createElement("button");
+    action.type = "button";
+    action.textContent = "Sign in to Claude";
+    action.title = "Opens the Claude sign-in for the agents (PM, dev tasks) in your browser";
+    bubble.append(text);
+    const ask = (message) => {
+      text.textContent = message;
+      action.disabled = false;
+      bubble.append(action);
+    };
+    action.addEventListener("click", async () => {
+      action.disabled = true;
+      try {
+        const response = await fetch("/agents/auth/login", { method: "POST" });
+        if (!response.ok) return ask(`Could not start the sign-in (${response.status}). `);
+      } catch (err) {
+        return ask("Could not start the sign-in. ");
+      }
+      action.remove();
+      text.textContent = "Finish the Claude sign-in in the browser window that opened…";
+      const deadline = Date.now() + 5 * 60 * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        let status;
+        try { status = await fetchAgentAuth(true); } catch (err) { continue; }
+        if (status.logged_in) {
+          text.textContent = `Agents signed in to Claude${status.email ? ` as ${status.email}` : ""}. You can send your message.`;
+          return;
+        }
+        if (!status.login_running) return ask("The sign-in did not finish. ");
+      }
+      ask("Still not signed in. ");
+    });
+    ask("The agents (PM chat and dev tasks) are not signed in to Claude, so they cannot answer. ");
+    row.appendChild(bubble);
+    signInRow = row;
+    return row;
+  }
+
+  // Checked when the chat opens, so nobody loses a first message to a missing sign-in.
+  async function checkAgentSignIn() {
+    try {
+      const status = await fetchAgentAuth(false);
+      if (!status.logged_in) log.appendChild(signInHint());
+    } catch (err) {
+      // Not allowed to see it, or the server is restarting: a failed turn still shows the hint.
+    }
+  }
+
+  // The running turn's Stop button, on its "PM is thinking..." status row. One at a
+  // time: the turn's reply or error (or a newer turn starting) takes it away.
+  let pmStopBtn = null;
+
+  function showPmStop(bubble) {
+    hidePmStop();
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "stop-btn";
+    button.textContent = "Stop";
+    button.title = "Stop the PM's turn - messages still waiting for it are discarded";
+    button.addEventListener("click", () => {
+      button.disabled = true;
+      button.textContent = "Stopping…";
+      fetch(`/chat/${sessionId}/stop`, { method: "POST" })
+        .then((r) => {
+          if (!r.ok) return r.json().then((body) => { throw new Error(body.detail ?? `stop failed (${r.status})`); });
+          return r.json();
+        })
+        // The turn's own pm_error ("Stopped by ...") arrives over the socket; a turn that
+        // had already ended leaves nothing to wait for.
+        .then((report) => { if (!report.pm_turn) hidePmStop(); })
+        .catch((err) => {
+          addRow("status", `Could not stop the PM: ${err.message}`);
+          button.disabled = false;
+          button.textContent = "Stop";
+        });
+    });
+    bubble.classList.add("has-stop");
+    bubble.appendChild(button);
+    pmStopBtn = button;
+  }
+
+  function hidePmStop() {
+    if (pmStopBtn) pmStopBtn.remove();
+    pmStopBtn = null;
+  }
+
   function connectChat() {
     chatSocket = new WebSocket(`ws://${location.host}/ws/chat/${sessionId}`);
     chatSocket.onopen = () => addRow("status", "Connected.");
@@ -1123,14 +1586,33 @@
             const queued = log.querySelector(`.row.queued[data-queued-id="${event.queued_id}"]`);
             if (queued) queued.classList.remove("queued");
           }
-          addRow("status", event.auto ? "PM is checking a finished task..." : "PM is thinking...");
+          showPmStop(addRow("status", event.auto ? "PM is checking a finished task..." : "PM is thinking..."));
+          break;
+        case "pm_progress":
+          addProgress(event);
           break;
         case "pm_reply":
+          hidePmStop();
+          finishProgress(event.text);
           addRow("pm", event.text);
           break;
         case "pm_error":
+          hidePmStop();
+          finishProgress(null);
           addRow("status", `Error: ${event.message}`);
+          if (isSignInError(event.message)) log.appendChild(signInHint());
           break;
+        case "pm_queue_discarded": {
+          // A stop threw away the messages still waiting for the PM (see POST
+          // /chat/{id}/stop): their queued bubbles go, and one line says so.
+          const ids = event.ids || [];
+          for (const id of ids) {
+            const row = log.querySelector(`.row[data-queued-id="${id}"]`);
+            if (row) row.remove();
+          }
+          addRow("status", `Discarded ${ids.length} queued message${ids.length === 1 ? "" : "s"} - send again if still needed.`);
+          break;
+        }
         case "error":
           sessionGone = true;
           addRow("status", `${event.message} - this session may have been merged and cleaned up.`);
@@ -1250,7 +1732,7 @@
       // the unread pass and as a non-unread status row, so it never disturbs the divider.
       const activity = session && session.activity;
       if (activity && activity.state === "working" && activity.reason === "thinking") {
-        addRow("status", "PM is thinking...");
+        showPmStop(addRow("status", "PM is thinking..."));
       }
     });
   }
@@ -1259,6 +1741,7 @@
     connectChat();
     connectTasks();
     connectSessions();
+    checkAgentSignIn();
     // Arm auto-read only after the initial hydrate + connect burst settles, so the
     // programmatic scroll-to-bottom and "Connected." status row don't clear a divider
     // restored from the stored watermark.

@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Literal
 
-from . import gitsnapshot
+from . import gitsnapshot, session_checkout
 from .agent import PMAgent
 from .config import CONFIG
 from .models import DEFAULT_MODEL, validate_model
@@ -215,6 +215,15 @@ class SessionManager:
                 is_default=True,
             )
             self._save()
+        else:
+            # The default session IS the primary checkout, wherever it lives now. Its
+            # recorded path goes stale when the repo is moved or re-cloned elsewhere, and
+            # a stale path silently points the PM agent and gitsnapshot at a directory
+            # that is not this repo.
+            default = self._sessions[DEFAULT_SESSION_ID]
+            if default.worktree_path != str(REPO_ROOT):
+                default.worktree_path = str(REPO_ROOT)
+                dirty = True
 
         for session in self._sessions.values():
             # A "merging" status only means something while its background thread
@@ -432,6 +441,22 @@ class SessionManager:
     def _remove_worktree(self, session: Session, force: bool) -> None:
         if not session.worktree_path:
             return
+        # Product-code checkouts (linked worktrees of the primary's submodules, see
+        # session_checkout) must go first: git refuses to remove a worktree that contains
+        # populated submodules. Without `force` (cleanup/terminate), a checkout holding
+        # uncommitted or branchless work is kept and the removal refused - never lost
+        # silently; delete() is the explicit discard and passes force through.
+        notes = session_checkout.release_system_checkouts(
+            REPO_ROOT, Path(session.worktree_path), force=force,
+        )
+        kept = [n[len(session_checkout.KEPT_PREFIX):] for n in notes
+                if n.startswith(session_checkout.KEPT_PREFIX)]
+        if kept:
+            raise ValueError(
+                f"Session {session.id} still has unsaved work in product checkouts: "
+                + "; ".join(kept)
+                + ". Commit it on a branch (or push it) first, or delete the session to discard it."
+            )
         args = ["git", "worktree", "remove"]
         if force:
             args.append("--force")

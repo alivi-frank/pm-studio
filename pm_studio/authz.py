@@ -41,6 +41,7 @@ Capability = Literal[
     "manage_roadmap",
     "manage_users",
     "view_cost",
+    "manage_local_env",
 ]
 
 # role -> the capabilities it holds. Admin deliberately holds everything: the owner is
@@ -63,6 +64,13 @@ CAPABILITIES: dict[Capability, tuple[Role, ...]] = {
     # and it stays the narrowest grant in the matrix even though the roadmap it hangs
     # off is visible to everyone.
     "view_cost": ("admin",),
+    # Starting and stopping the services a system declares in [systems.<id>.local] on
+    # this machine (see local_env.py). Same holders as dispatch_dev_task and for the same
+    # reason: every service is a shell command run on the host, so this is a
+    # code-execution grant even though the commands themselves are operator-declared.
+    # The pm role also covers the agent principal, which is what lets PM and dev agents
+    # bring their system's local environment up over HTTP.
+    "manage_local_env": ("admin", "pm"),
 }
 
 # A human explanation per capability, used in 403 bodies so a viewer who pokes at an
@@ -75,6 +83,7 @@ CAPABILITY_LABELS: dict[Capability, str] = {
     "manage_roadmap": "change the roadmap",
     "manage_users": "manage people",
     "view_cost": "see cost data",
+    "manage_local_env": "start or stop local environments",
 }
 
 

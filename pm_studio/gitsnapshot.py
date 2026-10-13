@@ -40,6 +40,15 @@ SENSITIVE_WORKSPACE_FILES = (
     # assignees on another organisation's tickets. Same category as trackers.json and a
     # sharper case of it - a ticket title is their work, this is their identity.
     "people.json",
+    # A directory: the local-env supervisor's state (local_env.py) - which per-session
+    # databases and other resources it provisioned, by name. Not a credential, but
+    # machine-local bookkeeping about resources on THIS developer's machine; committed,
+    # it would make every other checkout believe it owns databases it never created.
+    "local-env",
+    # The MCP activity log (mcp_activity.py): which database queries and browser steps
+    # agents ran on THIS machine, with their errors. Operational data, machine-local; an
+    # error line or a SQL WHERE clause can carry more than anyone meant to commit.
+    "mcp-activity.jsonl",
 )
 
 

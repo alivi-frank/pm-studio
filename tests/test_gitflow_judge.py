@@ -30,6 +30,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests._claude_stub import patch_claude
+
 from pm_studio import agent as agent_module
 from pm_studio import judge as judge_module
 from pm_studio import roadmap as roadmap_module
@@ -153,7 +155,7 @@ class _FakeClaude:
 
     def __call__(self, cmd, **kwargs):
         if isinstance(cmd, (list, tuple)) and cmd and cmd[0] == "claude":
-            self.prompts.append(cmd[list(cmd).index("-p") + 1])
+            self.prompts.append(kwargs["input"])
             if self.touch:
                 (self.repo / self.touch).write_text("changed\n")
             if self.effect:
@@ -200,7 +202,7 @@ class GitflowInjectionTest(unittest.TestCase):
 
     def test_rules_are_appended_last_and_verbatim(self) -> None:
         fake = _FakeClaude(self.repo)
-        with mock.patch("subprocess.run", fake):
+        with patch_claude(fake):
             is_error, _, _ = self.registry._execute("Build the thing", "claims")
         self.assertFalse(is_error)
         prompt = fake.prompts[0]
@@ -213,7 +215,7 @@ class GitflowInjectionTest(unittest.TestCase):
 
     def test_no_system_means_no_injection(self) -> None:
         fake = _FakeClaude(self.repo)
-        with mock.patch("subprocess.run", fake):
+        with patch_claude(fake):
             self.registry._execute("Build the thing")
         self.assertNotIn("NON-NEGOTIABLE", fake.prompts[0])
 
@@ -222,7 +224,7 @@ class GitflowInjectionTest(unittest.TestCase):
             "claims": SystemSpec(label="Claims Processor", gitflow="MISSING.md")
         }
         fake = _FakeClaude(self.repo)
-        with mock.patch("subprocess.run", fake):
+        with patch_claude(fake):
             is_error, result, _ = self.registry._execute("Build the thing", "claims")
         self.assertTrue(is_error)
         self.assertIn("MISSING.md", result)
@@ -231,7 +233,7 @@ class GitflowInjectionTest(unittest.TestCase):
     def test_rules_are_read_fresh_from_the_worktree_at_dispatch(self) -> None:
         (self.repo / "GITFLOW.md").write_text("EDITED RULES")
         fake = _FakeClaude(self.repo)
-        with mock.patch("subprocess.run", fake):
+        with patch_claude(fake):
             self.registry._execute("Build the thing", "claims")
         self.assertIn("EDITED RULES", fake.prompts[0])
         self.assertNotIn(self.RULES, fake.prompts[0])
@@ -290,7 +292,7 @@ class JudgeWiringTest(unittest.TestCase):
         with self.registry.git_lock:
             head_before = self.registry._git_head()
         fake = _FakeClaude(self.repo, touch=touch)
-        with mock.patch("subprocess.run", fake):
+        with patch_claude(fake):
             self.registry._run_and_record("t1", "Do the work", 1.0, system, head_before)
         return self.registry.get_task("t1")
 
@@ -328,7 +330,7 @@ class JudgeWiringTest(unittest.TestCase):
         quiet pass."""
         with mock.patch.object(self.registry, "_git_head", return_value=""):
             fake = _FakeClaude(self.repo, touch="new_file.txt")
-            with mock.patch("subprocess.run", fake):
+            with patch_claude(fake):
                 self.registry._run_and_record("t2", "Do the work", 1.0, "claims", "")
         task = self.registry.get_task("t2")
         self.assertEqual(task["judge"]["verdict"], "inconclusive")
@@ -336,7 +338,7 @@ class JudgeWiringTest(unittest.TestCase):
 
     def test_merge_resolution_is_never_judged(self) -> None:
         fake = _FakeClaude(self.repo, touch="conflict.txt")
-        with mock.patch("subprocess.run", fake):
+        with patch_claude(fake):
             task = self.registry.run_conflict_resolution("fix the merge")
         self.assertNotIn("judge", task)
         self.assertNotIn("NON-NEGOTIABLE", fake.prompts[0])
@@ -406,7 +408,7 @@ class NestedRepoJudgeTest(unittest.TestCase):
             head_before = self.registry._git_head()
             nested_before = self.registry._repo_states(rels)
         fake = _FakeClaude(self.repo, effect=effect)
-        with mock.patch("subprocess.run", fake):
+        with patch_claude(fake):
             self.registry._run_and_record(
                 "t1", "Do the work", 1.0, "epic", head_before, nested_before
             )
@@ -545,8 +547,8 @@ class EvidenceBlockTest(unittest.TestCase):
     def _prompt_for(self, **kwargs) -> str:
         captured = {}
 
-        def fake_run(cmd, **_):
-            captured["prompt"] = cmd[list(cmd).index("-p") + 1]
+        def fake_run(cmd, **kwargs):
+            captured["prompt"] = kwargs["input"]
             result = json.dumps({"verdict": "pass", "violations": [], "summary": "ok"})
             return types.SimpleNamespace(
                 returncode=0,

@@ -102,10 +102,13 @@ label = "Billing"
 parent = "web"
 
 # Optional model allow-list override (id = "Label"). The reserved key `default`
-# names the model new sessions start on. Omit the table entirely to use the
-# package defaults. Useful when a deployment is restricted to specific model ids.
+# names the model new sessions start on; the reserved key `quick` (optional, one of
+# the ids listed) the model QUICK dev tasks run on instead of their session's. Omit
+# the table entirely to use the package defaults. Useful when a deployment is
+# restricted to specific model ids.
 [models]
 default = "claude-opus-4-8"
+quick = "sonnet"
 "claude-opus-4-8" = "Opus"
 sonnet = "Sonnet"
 haiku = "Haiku"
@@ -551,6 +554,332 @@ board files are loaded only for **declared product ids**, so its items would sil
 stop loading — the same behavior described for any deleted product above, which is
 harmless for an empty board and data loss for a full one.
 
+### Local environments (`[systems.<id>.local]`)
+
+A system may declare the services PM Studio can **start and stop on the developer's
+machine** — a secrets emulator, an API, a web app — and the **resources** they need
+provisioned, such as a temporary database. Any technology works: a service is a shell
+command plus how to tell it is up.
+
+**One environment per chat session.** Each session works on its own branch in its own
+worktree, so each gets its own copy of the system's `session`-scoped services, run from
+that worktree (typically on auto-assigned ports so copies never collide), and its own
+copy of each `session`-scoped resource. A few things have no per-session state — a
+stateless secrets emulator — and are declared `shared`: one copy for the whole PM Studio
+instance, run from the primary checkout, reused by every session. **Everything is on
+demand**: nothing starts, nothing is provisioned and no session checkout is prepared
+until someone asks.
+
+```toml
+[local_env]
+max_session_envs = 2       # optional (default 2): see "Limit" below
+idle_stop_minutes = 30     # optional (default 0 = never): see "Idle stop" below
+
+[systems.epicride.local]
+aws_profile = "epicride-dev"                           # descriptive: shown in the UI/API
+test_users_secret = "alivi-os/epicride/dev/test-users"  # descriptive: shown in the UI/API
+# Optional: repo-root-relative paths/globs a NON-default session's worktree borrows
+# from the primary checkout instead of installing its own (see "Session checkouts").
+link_from_primary = ["src/epicride/frontend/node_modules", "src/epicride/backend/src/**/node_modules"]
+
+[[systems.epicride.local.resources]]
+id = "db"                                     # required; shares one id space with services
+label = "Temporary database (epicmd_it_*)"    # optional
+scope = "session"                             # optional: "session" (default) or "shared"
+create = "make epicride-db-create"            # required; runs from the repo root
+destroy = "make epicride-db-drop NAME={db.name}"  # optional
+timeout = 900                                 # optional seconds for create/destroy (default 900)
+outputs = ["name"]                            # optional: the keys `create` reports
+expires = "daily"                             # optional: something else drops it every day...
+expires_at = "00:00"                          # ...at this "HH:MM" (default "00:00")...
+timezone = "America/New_York"                 # ...in this IANA zone (default: this machine's local time)
+
+[[systems.epicride.local.services]]
+id = "secrets"                      # required, unique in the system, [a-z0-9-]+
+label = "Lambda secrets extension"  # optional
+scope = "shared"                    # optional: "session" (default) or "shared"
+command = "make epicride-secrets"   # required; run through the shell
+port = 2773                         # optional readiness: TCP connect on localhost succeeds
+
+[[systems.epicride.local.services]]
+id = "api"
+command = "npm run start -- --port {port} --apis {apis}"
+cwd = "src/epicride/backend"        # optional, relative to the worktree it runs from (default ".")
+port = "auto"                       # an int, or "auto": a free port picked at start
+ready_url = "http://localhost:{port}/health"  # optional readiness: HTTP GET answers < 500
+url = "http://localhost:{port}"     # optional link the UI shows once running
+depends_on = ["secrets"]            # optional: services AND resources of the SAME system (created on demand)
+uses = ["db"]                       # optional: resources used IF they exist (never created by a start)
+params = { apis = "" }              # optional: caller-fillable {name} placeholders + defaults
+env = { DB_NAME = "{db.name}", SECRETS_PORT = "{secrets.port}" }  # optional extra env vars
+ready_timeout = 180                 # optional seconds before "failed"
+setup = "make -C {repo_root} epicride-backend-install APIS={apis}"  # optional: run before EVERY launch (see "Setup")
+setup_timeout = 900                 # optional seconds the setup may take (default 900)
+```
+
+**Ports.** `port` is a fixed integer (typical for `shared` services), `"auto"` (PM
+Studio picks a free TCP port when the service launches and exposes it as `{port}`), or
+absent. A fixed port on a `session` service is allowed, but then only one session can
+run it at a time: the next one gets `port_in_use` (409) naming the session that holds it.
+
+**Placeholders** work in `command`, `env` values, `url` and `ready_url`:
+
+| Placeholder | Value |
+|---|---|
+| `{name}` | a declared `params` entry (the caller may override it) |
+| `{port}` | this service's own port, fixed or auto (it must declare `port`) |
+| `{<service>.port}` | the port of a service this one `depends_on`, directly or transitively — the shared run, or this session's |
+| `{<resource>.<key>}` | an output of a resource this one depends on (directly or transitively) or `uses` (one of its `outputs`, when declared); `""` for a used resource that is not ready |
+| `{session}` | the session id (`session`-scoped entries only) |
+| `{worktree}` | absolute path of the checkout it runs from, with forward slashes — the session's worktree, or the repo root for the default session and `shared` scope |
+| `{repo_root}` | absolute path of the **primary** checkout, with forward slashes — in every scope |
+
+`{repo_root}` exists because a session worktree only contains what is committed to the
+deployment repo: the deployment's `Makefile`, `scripts/`, virtualenv and git-ignored
+`.env` live only in the primary checkout. So a session service typically runs tools from
+the primary against product code from its worktree:
+
+```toml
+command = "make -C {repo_root} epicride-local ROOT={worktree} PORT={port}"
+```
+
+A resource's `create` may use `{session}` (session scope), `{worktree}` and
+`{repo_root}`; its `destroy` may use `{session}`, `{repo_root}` and its own outputs
+(`{db.name}`) — not `{worktree}`, which may be gone by then. `params` may not be named
+`port`, `session`, `worktree` or `repo_root`.
+
+**Setup.** A service may declare `setup`: a shell command PM Studio runs **before every
+launch** of that service, so whatever the command needs installed (its npm
+dependencies, say) is installed without anyone running anything by hand. Make it
+idempotent and quick when there is nothing to do — it runs on every start and restart.
+Shared services run theirs too. The order of a start is:
+
+1. **`setup`** — from the **primary checkout** (the repo root, whatever the scope),
+   through the shell, in its own process group, with the environment the service gets
+   (its `env` entries included, except those that need `{port}` or a dependency's value).
+2. **Session checkout** — prepared the first time (see "Session checkouts"), and after a
+   setup **refreshed** every time, so what the setup just installed in the primary
+   checkout (`node_modules`) is linked into the session's worktree.
+3. **Dependencies** — services and resources it `depends_on`, waited for.
+4. **`command`** — the service itself.
+
+`setup` may use the service's `params`, `{session}` (session scope), `{worktree}` and
+`{repo_root}` — **not** `{port}`, `{<service>.port}` or `{<resource>.<key>}`, which do
+not exist yet when it runs (fatal at startup). While it runs the service is `starting`
+with the message "Running setup..."; its output goes to the service's logs, after a
+`[pm-studio] ... setup in <repo root>: <command>` header, each line prefixed with
+`[setup]` and a space. A non-zero exit fails the start (`failed`, "Setup failed (exit
+N): *its last output line*") and running longer than `setup_timeout` seconds kills it and fails the start
+("Setup did not finish within Ns; stopped it."); either way the command is never
+launched, and the next start runs the setup again. Stopping, restarting or idle-stopping
+the service, ending its session or shutting the server down while its setup runs kills
+the setup's process tree, and nothing is launched. Two launches whose setups render to
+the same command (two sessions starting the same service) never run it at once: the
+second waits for the first ("waiting for the same setup, already running, to finish").
+
+Every mistake here is fatal at startup — an unknown key, a missing `id`/`command`/
+`create`, a duplicate or malformed id (services and resources share one id space), a
+dependency on an unknown id or a cycle, a port that is neither 1-65535 nor `"auto"`, an
+unknown `scope`, a `shared` service depending on (or using) anything session-scoped, a
+`uses` entry that is not a resource of the system or is also in `depends_on`, an
+`expires` other than `"daily"`, an `expires_at` that is not `"HH:MM"`, an unknown
+`timezone`, `expires_at`/`timezone` without `expires`, non-string `params`/`env`/`setup`,
+a `ready_timeout`/`setup_timeout`/`timeout` that is not a positive number of seconds, and
+**any placeholder nothing would fill** (an undeclared param,
+`{port}` on a service with no port, `{api.port}` when `api` is not a dependency or has no
+port, `{session}` in a shared entry, an undeclared output, `{port}` or a dependency's
+value in `setup`...). `${VAR}` is left to the
+shell. With neither `port` nor `ready_url`, a process still alive one second after
+launch counts as running.
+
+The **server owns the processes**: they outlive dev tasks and PM turns and are all
+stopped when the server stops. Each runs in its own process group, and stopping one kills
+its whole tree (`taskkill /T` on Windows, the process group on POSIX); stopping a service
+leaves its dependencies running. Output is kept in memory (last 1000 lines) and appended
+to `<temp>/pm-studio-local-env/<session|shared>-<system>-<service>.log` — never inside
+the repo.
+
+Callers only fill declared `{name}` holes, and every value must match
+`^[A-Za-z0-9 ,._:/@=-]*$` (max 256 characters) — the command runs through the shell, so
+anything else is a 400. **Generated values pass the same allowlist** before they are
+substituted: ports, session ids, `{worktree}`/`{repo_root}` paths (max 1024) and resource outputs. A
+fixed port that something else already listens on is refused with state `port_in_use`
+(409) rather than started twice.
+
+#### Resources
+
+A resource comes to exist in one of two ways, and is then **reused** by every later
+start in its scope (the session's, or the shared one) and across server restarts:
+
+- **On demand**, through `depends_on`: the first time a service that depends on it
+  starts in that scope, it is created, and the service waits for it.
+- **Only when asked**, through `uses`: starting the service never creates it. Its
+  `{db.<key>}` placeholders are the outputs when the resource is `ready` in the
+  service's scope at launch, and `""` otherwise — the service's cue to fall back (for
+  EpicRide: to the shared DEV database, which is the default). It is created by an
+  explicit `POST /local-env/{system}/resources/{resource}/create?session=`; a service
+  already running keeps what it launched with, and its status says `restart_needed`
+  until it is restarted.
+
+`create` runs from the repo root with a `timeout`;
+its stdout and stderr go to the same logs as services (`GET .../{resource}/logs`), and
+its **last non-empty stdout line must be a JSON object of string values**, e.g.
+`{"name":"epicmd_it_2873"}`. Each value must pass the allowlist above (a value with shell
+metacharacters fails the resource). A non-zero exit, a timeout, a last line that is not
+such an object, or a missing declared output marks it `failed` — and the dependent
+services `failed` with "dependency db is failed"; the next start retries.
+
+States: `absent`, `creating`, `ready`, `failed`, `destroying`, `expired`. Outputs are persisted in
+`<workspace_root>/workspace/local-env/resources.json` (primary checkout). That
+directory is on the snapshot's never-commit list and in `init`'s `.gitignore` block:
+the names are not secrets, but they describe databases on *this* machine.
+
+`destroy` runs **only** on explicit request (`POST .../resources/{resource}/destroy`,
+refused with 409 while a running service uses it) or when the session ends. **Shutdown
+never destroys resources** — re-creating a database on every restart is what reuse
+exists to avoid. A resource without `destroy` is forgotten rather than torn down, and
+the release report names it with its outputs so you can clean up by hand. A failed
+destroy keeps the outputs (state `failed`) so it can be retried.
+
+**Daily expiry.** A resource declared `expires = "daily"` is one something else removes
+on a schedule — a team job drops every temporary database at midnight. Once a ready
+resource's `created_at` is before the most recent `expires_at` boundary (computed on the
+calendar in `timezone`, so DST moves the instant, not the wall-clock time), it reads as
+`expired`, with the message "dropped at <boundary> by the nightly job; create it again":
+
+- its outputs are no longer substituted — a service that `uses` it gets `""` on its
+  next launch (and shows `restart_needed` meanwhile), a service that `depends_on` it
+  creates a new one on its next start;
+- an explicit create is allowed again (no 409);
+- **no `destroy` is ever run for it** — it is already gone; destroying or releasing it
+  just forgets it (the release report lists it under `expired`);
+- the old outputs stay in `resources.json` until the next create overwrites them.
+
+While ready, the status carries `expires_at_iso`: the next expiry instant.
+
+#### Session checkouts
+
+A new session's worktree is a plain `git worktree` of the main repo: empty submodule
+folders, no `node_modules`. So before the **first** session-scoped service or resource
+of a system starts in a **non-default** session, PM Studio prepares that worktree once
+(`session_checkout.ensure_system_checkout`): git worktrees for the submodules under the
+system's `path`, and links from the primary checkout for each `link_from_primary` entry.
+A system with no submodules under its `path` (or no `path`) is not an error: its code is
+already in the worktree, so only the links are made and the notes say so. Preparation
+fails only when submodules exist and none of them could be prepared.
+Its notes, or the error, show in the status's `checkout` member (`not_needed`,
+`pending`, `preparing`, `ready`, `failed`); a failure fails the start and the next start
+retries. The default session and `shared` entries run from the primary checkout and
+never need it.
+
+#### Limit
+
+`[local_env] max_session_envs` (default 2, minimum 1) caps how many **distinct
+(session, system)** environments may have a service starting or running at once — each
+is a full copy of a stack on your machine. Shared services do not count.
+
+Before refusing, a start (`start`, `start_all`, `restart`) that would exceed the limit
+**makes room**: among the OTHER sessions holding a session environment, those with no
+dev task running and no local-env call for at least 60 seconds qualify, and the least
+recently active one has its session-scoped services stopped (exactly as an idle stop,
+below; its services' `message` reads "Stopped to make room for session *name* (limit of
+*N* session environments reached) after *M* min without use; start it again when needed.").
+When no session qualifies — every other one is busy or was active within the last
+minute — the start is a **409** whose message names the running ones, as before; stop
+one (or wait for its session to end) first. A request refused for another reason (bad
+params, unknown service) evicts nobody.
+
+#### Idle stop
+
+`[local_env] idle_stop_minutes` (default `0` = never; an integer `>= 0`, anything else
+is fatal at startup) stops a session's environment once that session has been **idle**
+that long. Activity is any local-env call made on behalf of the session — start, stop,
+restart, wait, logs, status (the Systems page polling the session it shows counts too)
+or create — and a session with a **dev task running** is never idle: it counts as
+activity, so the countdown starts when the task ends. What stops is the session's
+`session`-scoped services in every system; **shared services are never idle-stopped**.
+Nothing provisioned is lost: resources (the temporary database) and the prepared
+session checkout are kept, so starting again is only process startup. Each stopped
+service's `message` says why ("Stopped after 30 min without use; start it again when
+needed."), and the server logs one line per stopped session environment. A background
+thread checks every 30 seconds; with `0` there is no thread at all.
+
+#### When a session ends
+
+Terminating, deleting or cleaning up a session **releases its environment first**: its
+services are stopped synchronously (they run from the worktree about to be removed),
+then its resources are destroyed in the background (or forgotten, without `destroy` or
+once expired),
+and its checkout preparation is forgotten. Shared services and resources are untouched.
+The release is audited as `local_env.released`. A terminate that then stops on a merge
+conflict leaves the session active; its environment simply comes back on the next start
+(with a fresh resource).
+
+#### API
+
+Every route takes an optional **`?session=<id>`** (default `default`): which chat
+session's environment it acts on. An unknown session (or one with no worktree left) is
+a 404.
+
+| Route | Capability | |
+|---|---|---|
+| `GET /local-env?session=` | view | `{"session": id, "systems": [...]}`, only systems that declare `local` |
+| `GET /local-env/overview` | view | every active run and held resource across sessions (below) |
+| `POST /local-env/{system}/start?session=` | manage_local_env | all services in dependency order; body `{"params": {"<service>": {...}}}` (optional) |
+| `POST /local-env/{system}/stop?session=` | manage_local_env | the session's services, dependents first; shared ones only if no other session has this system up |
+| `POST /local-env/{system}/{service}/start?session=` | manage_local_env | dependencies (services and resources) first; body `{"params": {...}}` (optional) |
+| `POST /local-env/{system}/{service}/stop?session=` | manage_local_env | stopping a shared service stops it for everyone |
+| `POST /local-env/{system}/{service}/restart?session=` | manage_local_env | reuses the last params unless given |
+| `GET /local-env/{system}/{service}/logs?lines=200&session=` | view | `{"lines": [...]}`; a resource id gives its create/destroy output |
+| `GET /local-env/{system}/{service}/wait?timeout=180&session=` | view | blocks until the service is no longer `starting` (or `timeout` seconds pass, capped at 600); answers its status plus `waited_seconds` and `timed_out` |
+| `POST /local-env/{system}/resources/{resource}/create?session=` | manage_local_env | explicit creation (the only way a `uses`-only resource exists); answers at once with `creating`; 409 when already creating, ready (and not expired) or destroying |
+| `POST /local-env/{system}/resources/{resource}/destroy?session=` | manage_local_env | answers at once with `destroying`; 409 while a running service depends on or uses it, or while creating |
+
+Each system in `GET /local-env` carries `session`, `checkout`, `services` and
+`resources`. A service: `id`, `label`, `scope`, `session` (`shared` or the session id),
+`state`, `pid`, `port` (resolved — the auto port once launched), `auto_port`, `url` and
+`ready_url` (resolved; `""` while a placeholder has no value yet), `command`, `setup`
+(as declared; `""` when none),
+`depends_on`, `uses`, `resources_used` (every resource whose outputs it may substitute:
+those it depends on, directly or transitively, then those it uses), `restart_needed`
+(starting/running, and one of those resources changed — created, destroyed, expired or
+re-created with other outputs — since its launch), `params`, `started_at`, `exit_code`,
+`message`, `log_path`. A resource: `id`, `label`, `scope`, `session`, `state`, `outputs`
+(empty while expired), `message`, `created_at`, `expires`, `expires_at_iso` (next expiry
+while ready, else null), `has_destroy`, `log_path`.
+
+`GET /local-env/overview` answers `{"runs": [{session, session_name, system,
+system_label, service, scope, state, port, pid, url}], "resources": [{session,
+session_name, system, resource, scope, state, outputs, message}], "session_envs":
+[{session, session_name, system}], "active_session_envs": n, "max_session_envs": m}`
+— runs only while `starting`/`running`, resources unless `absent`.
+
+Starting never waits for readiness: it answers at once with state `starting`, and you
+poll `GET /local-env` — or block on `GET .../{service}/wait`, which answers as soon as
+the service is `running`, `failed`, `exited`, `port_in_use` or `stopped`, with
+`"timed_out": true` (state still `starting`) when the timeout passed first; a service
+not starting answers at once. A service's state is one of `stopped`, `starting` (including
+while its setup runs and while it waits for its checkout, dependencies or resources — see
+`message`), `running`,
+`failed` (exited, or not ready in time, before becoming ready; or a dependency failed),
+`exited` (died after becoming ready, with `exit_code`) or `port_in_use`, with a
+`message` explaining it. 404 is an unknown system, service, resource or session; 409 is
+a taken port, the session limit, or a resource that is busy.
+
+**Agents can drive it too.** Every `claude` subprocess (PM turns, dev tasks, judges)
+gets `PM_STUDIO_URL` and `PM_STUDIO_AGENT_HEADER` (`"<header>: <per-process agent
+token>"`) in its environment, PM turns and dev tasks also get `PM_STUDIO_SESSION` (their
+chat session's id), and the agent principal holds `manage_local_env`:
+
+```sh
+curl -s -X POST "$PM_STUDIO_URL/local-env/epicride/api/start?session=$PM_STUDIO_SESSION" -H "$PM_STUDIO_AGENT_HEADER"
+curl -s "$PM_STUDIO_URL/local-env/epicride/api/wait?timeout=180&session=$PM_STUDIO_SESSION" -H "$PM_STUDIO_AGENT_HEADER"
+curl -s "$PM_STUDIO_URL/local-env?session=$PM_STUDIO_SESSION" -H "$PM_STUDIO_AGENT_HEADER"
+```
+
+A dev task dispatched for a system that declares `local` is told this in its prompt,
+including to read ports and URLs from the status rather than assume them.
+
 ## Operating modes
 
 `personal` (the default) is the tool as it has always been: one trusted user, no
@@ -581,6 +910,7 @@ Turning it on:
 | Create / merge / sync / end sessions | ✅ | ✅ | — | — |
 | **Dispatch dev agents** | ✅ | ✅ | — | — |
 | Change the roadmap | ✅ | ✅ | — | — |
+| Start / stop local environments | ✅ | ✅ | — | — |
 | Manage people (invites, roles, disable) | ✅ | — | — | — |
 
 Reads are open to every role on purpose: transparency is the deployment default, so
@@ -903,6 +1233,190 @@ result - large, rebuildable, ignore it in git), `feedback.json`, `tuning.json`,
 the `inbox/` drop folder for calendar / email / chat exports. Thresholds edited on the
 page and suggestions accepted from the judge land in `tuning.json`, layered over this
 table - so the file is the calibration history, and this table the starting point.
+
+## Agent MCP servers (`[agents.mcp.<name>]`)
+
+The MCP servers PM Studio's agents may use are declared **here, and only here**. PM
+Studio writes them into a Claude Code `--mcp-config` file for every agent launch and
+adds `--strict-mcp-config`, so whatever else an agent's own Claude Code configuration
+holds (its isolated `~/.claude.json` under `PM_AGENT_HOME`, a project `.mcp.json`) is
+ignored.
+
+```toml
+[agents.mcp.playwright]                 # name: letters, digits, _ and -
+command = "npx"                         # a stdio server: command + args
+args = ["-y", "@playwright/mcp@latest", "--isolated"]
+
+[agents.mcp.dev-db]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-postgres", "${AGENT_MCP_DEV_DB_URL}"]
+env = { PGAPPNAME = "${AGENT_APP_NAME:-pm-studio}" }   # optional extra env for the server
+pm = true                               # also give it to the PM agent (default false)
+
+[agents.mcp.docs]
+type = "http"                           # or "sse": a remote server, url (+ headers)
+url = "https://docs.example.com/mcp"
+headers = { Authorization = "Bearer ${DOCS_MCP_TOKEN}" }
+```
+
+A server is either `command` (+ `args`, stdio) or `url` (+ `headers`, `type = "http"`
+— the default — or `"sse"`); both or neither, an unknown key, a wrong type or any other
+key in `[agents]` is fatal at startup.
+
+**Who gets what.**
+
+| Agent | MCP servers |
+|---|---|
+| dev tasks | every server |
+| PM turns | only `pm = true` servers — each also added to that turn's `--allowedTools` as `mcp__<name>` (the PM's own allowlist is otherwise fixed), and named in its prompt as look-up-only |
+| judges | none (`--strict-mcp-config` with no config) |
+
+**Variables.** `${VAR}` and `${VAR:-default}` in `command`, `args`, `env` values, `url`
+and header values are resolved from the environment when an agent is launched — which
+includes the repo's git-ignored `.env`, merged in at startup. Keep credentials there,
+never in `config.toml`. A server with a variable that is unset and has no default is
+**skipped** (one warning per server, naming the variable, never a value). Resolved values
+exist only in the per-launch config file, created readable by your user only in the
+system temp directory (never the repo) and deleted when the agent exits.
+
+One variable exists per launch rather than in the environment: `PM_STUDIO_ARTIFACTS_DIR`,
+the dev task's artifacts folder (see [Dev task artifacts and quick tasks](#dev-task-artifacts-and-quick-tasks)).
+Give it a default so the server still starts for PM turns, which have none:
+
+```toml
+[agents.mcp.playwright]
+command = "npx"
+args = ["-y", "@playwright/mcp@latest", "--isolated", "--output-dir", "${PM_STUDIO_ARTIFACTS_DIR:-.playwright-mcp}"]
+```
+
+**Zero install, OS-adapted.** There is no install step: `npx -y <package>` downloads the
+package on first use. On Windows, `npx`, `npm`, `pnpm`, `yarn` and `bunx` (bare names)
+are run as `cmd /c npx ...`, because they are `.cmd` shims. A stdio server whose command
+is not on PATH — no Node.js, so no `npx` — is **unavailable** and left out until it is.
+
+**Changes apply without a restart.** This part of `config.toml` is re-read whenever the
+file changed — at every agent launch and on `POST /agents/mcp/reload` — so a running PM
+chat gets a newly added `pm = true` server on its next turn (its resumed conversation
+just continues). An edit that does not parse keeps the last good list in force and
+shows the error in the status. At startup the server logs one line, e.g.
+`agent MCP: 2 servers (playwright, dev-db), skipped: docs (DOCS_MCP_TOKEN)`.
+
+| Route | Capability | |
+|---|---|---|
+| `GET /agents/mcp` | view | `{source, loaded_at, error, servers: [{name, transport, command, url_host, pm, status, missing_env, message}], node: {npx, path}}` — `status` is `ready`, `skipped` (see `missing_env`) or `unavailable`; never values, args or headers |
+| `POST /agents/mcp/reload` | manage_local_env | forces a re-read; same payload |
+| `GET /agents/auth` | view | the agents' Claude sign-in: `{isolated, config_dir, logged_in, email, auth_method, subscription, error, login_running, login_output}` (`?refresh=true` skips the 60 s cache) |
+| `POST /agents/auth/login` | manage_local_env | starts `claude auth login` for the agents' config - a browser sign-in on this machine that finishes by itself; poll `GET /agents/auth` |
+| `POST /agents/mcp/{name}/check` | manage_local_env | starts a stdio server once (OS-adapted, stdin held open) and reports whether it is still running after 3 s; does not speak MCP |
+| `POST /agents/mcp/{name}/test` | manage_local_env | a real connection test (below): `{name, transport, ok, stage, tools, probe, probe_outcome, error, duration_ms}` |
+| `GET /agents/mcp/activity?server=&limit=50` | view | the newest MCP calls agents made, newest first (`limit` up to 500), plus per-server counters: `{entries: [...], servers: {<name>: {calls, errors, consecutive_errors, last_error: {ts, tool, outcome}, last_ok_at, last_call_at, last_ok}}, max_entries}` |
+
+**Probe.** An optional `probe` names one harmless tool call the connection test makes
+after the handshake. It is parsed as strictly as the rest of the table (only `tool` and
+`args`; `tool` a tool name, `args` a table of JSON-compatible values - no dates) and is
+part of the hot-reloaded `[agents]` table. String values in `args` may use `${VAR}`.
+
+```toml
+[agents.mcp.dev-db]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-postgres", "${AGENT_MCP_DEV_DB_URL}"]
+probe = { tool = "query", args = { sql = "select 1" } }
+```
+
+**Connection test.** `POST /agents/mcp/{name}/test` (the **Test** button on the Systems
+page) starts the server exactly as agents get it - the same resolved entry, OS-adapted
+command and the agents' environment, from the repo root - and speaks MCP over stdio:
+`initialize`, `notifications/initialized`, `tools/list` (following `nextCursor`), then
+`tools/call` for the `probe` if there is one. Everything must finish within 30 s; the
+server's whole process tree is killed afterwards. `stage` says where it stopped (`start`,
+`initialize`, `tools`, `probe`; on success the last one run), `tools` lists the tool
+names, `probe_outcome` is the probe result's shape only (`"1 row"`, `"ok"`) and `error`
+one line (the server's last stderr line when it exits, credentials in URLs and
+`password=` pairs blanked). An `http` server gets the same handshake over streamable HTTP
+(JSON or SSE answers, `Mcp-Session-Id` carried); `sse` servers are not supported yet
+(`ok: null`). A probe call is also recorded in the activity log (source `test`).
+
+**What agents did: step outcomes and the activity log.** Every tool step on a chat's
+live progress and on a dev task's card shows its outcome when the result arrives - ✓/✗,
+how long it took, and for an MCP call the arguments that are safe to show and what came
+back: `Using dev-db: query (select id from rides limit 5)` → `✓ 5 rows · 0.4 s`, or
+`✗ read ECONNRESET`. Only a whitelist of arguments is ever shown - SQL (`sql`/`query`/
+`statement`, one line, ~140 chars), URLs (`url`/`href`, without credentials or query
+values), the `element` a browser acts on, a screenshot's `filename` (base name), a key
+press, a table name; typed text, values, passwords, tokens, bodies and scripts never are
+(a browser_type step reads "typing into Password field"). Results are never shown or stored,
+only their shape. Each MCP call is also appended to `<workspace>/mcp-activity.jsonl`
+(ts, session, source `pm`/`task` + task id, server, tool, argument summary, ok, outcome,
+duration_ms). The log keeps the newest 2,000 calls (it is trimmed once it passes 2,400,
+so an append stays one write), is machine-local and is never committed (it is on the
+snapshot's never-commit list and in the `init` .gitignore). The Systems page shows, per
+server, "last call: ✓ 2 min ago" or "✗ 5 failed in a row: read ECONNRESET", and a
+**Recent calls** list.
+
+**Signing the agents in.** The agents' Claude config (`PM_AGENT_HOME`, or your own) must be
+signed in, or every PM chat and dev task fails. The server checks at startup and logs
+the result; the Systems page shows it next to these tools with a **Sign in** button, and the
+chat checks it when it opens and offers the same button before the first message (a turn
+that still fails for lack of a sign-in offers it again). The button opens the browser
+sign-in on this machine and reports when it is done. From a terminal:
+`python -m pm_studio.agent_env --ensure-login` (a no-op when signed in).
+
+**Only read-only DEV servers belong here.** Agents run these servers unattended, on
+every launch, with no human approving each call — dev agents even with bypassed
+permissions. A server that can write (a database user with write grants, a tracker that
+can transition issues, anything pointed at production) lets an agent change data nobody
+asked it to.
+
+## Dev task artifacts and quick tasks
+
+The PM agent plans and dispatches; it never runs anything itself. Two things make that
+enough when a stakeholder wants to *see* something.
+
+**Quick tasks.** A dispatch with `"quick": true` is a look-don't-build task: the dev agent
+gets a preamble telling it to bring up what it needs (a local environment, a browser),
+check, capture evidence and report — no code changes, commits, pushes or PRs — and a
+900 s timeout instead of 1800 s. It is the same dev agent with the same powers, gated by
+`dispatch_dev_task` and audited (`[quick]` prefix) like any dispatch, and judged like any
+task — the judge only runs when something changed. Research sessions cannot dispatch
+quick tasks either. The PM's prompt tells it to use one whenever it would otherwise say
+"I can't run or screenshot that".
+
+**Artifacts.** Every dev task gets a folder, `<workspace>/current/tasks/<task id>/` (PM
+bookkeeping, never committed), named in its prompt and exported as
+`PM_STUDIO_ARTIFACTS_DIR`. Files left there are listed on the task record as
+`artifacts: [{name, size}]` (at most 50), shown on the task's card in the chat — images
+(`.png .jpg .jpeg .gif .webp`) as thumbnails — and named by absolute path in the PM's
+completion message, so it can Read an image before reporting. Merge resolutions get no
+folder.
+
+| Route | Capability | |
+|---|---|---|
+| `GET /tasks/{session}/{task}/artifacts/{name}` | view | one artifact; resolved strictly inside that task's folder (no `..`, absolute paths or links out) |
+| `POST /sessions/{session}/checkout/{system}` | run_session | checks the system's submodules out into the session's worktree (see below); `{system, status, notes}`, 409 when none could be |
+
+**Code in session worktrees.** A non-default session's worktree holds submodules as empty
+folders until they are checked out. A dev task now checks its system's code out *before*
+it runs (and before its nested repos' starting state is recorded, so the checkout is never
+mistaken for the task's work; a failed checkout is told to the agent and recorded as
+`checkout_error`). The PM of such a session gets the checkout curl above in its prompt and
+allowlist — scoped to its own session — so it can read code it plans against instead of
+reporting empty folders as missing code.
+
+**Stopping.** Anything running can be stopped from the chat page — the PM's turn (Stop on
+its "PM is thinking..." row), a dev task (Stop on its card), or the whole session (Stop
+everything, in the session strip). A stop kills the agent's whole process tree (its MCP
+servers and commands included). A stopped PM turn ends as an error, `Stopped by {who}.`,
+recorded in the transcript; a stopped dev task is recorded with status `stopped` (result
+`Stopped by {who} after {duration}.`, not judged, and the PM is not woken up to react to
+it). Messages still waiting for the PM are discarded with the turn. A session's local
+services are stopped but its resources kept. Archiving, terminating, cleaning up or
+deleting a session stops it first.
+
+| Route | Capability | |
+|---|---|---|
+| `POST /chat/{session}/stop` | run_session | stops the PM turn in flight and discards the queued messages; `{session, pm_turn, discarded}` |
+| `POST /tasks/{session}/{task}/stop` | dispatch_dev_task | stops one running dev task; `{session, task}` with the task as recorded. 404 unknown task, 409 when not running (or a merge resolution) |
+| `POST /sessions/{session}/stop` | run_session | all of the above plus the session's local services; `{session, pm_turn, tasks, services, discarded}`, empty when nothing was running. 404 unknown session |
 
 ## `PM_INSTRUCTIONS.md`
 

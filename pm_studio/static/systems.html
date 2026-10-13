@@ -22,6 +22,9 @@
     --warn-bg: rgba(199, 119, 0, 0.09);
     --note-bg: rgba(42, 120, 214, 0.07);
     --closed: #898781;
+    --ok: #2f8a4b;
+    --ok-bg: rgba(47, 138, 75, 0.10);
+    --bad-bg: rgba(208, 59, 59, 0.09);
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -36,6 +39,9 @@
       --warn: #e0a33c;
       --warn-bg: rgba(224, 163, 60, 0.13);
       --note-bg: rgba(57, 135, 229, 0.12);
+      --ok: #4cb36a;
+      --ok-bg: rgba(76, 179, 106, 0.14);
+      --bad-bg: rgba(230, 103, 103, 0.13);
     }
   }
   * { box-sizing: border-box; }
@@ -167,6 +173,159 @@
   button { background: var(--accent); color: var(--accent-fg); border-color: transparent; cursor: pointer; }
   button:disabled { opacity: 0.5; cursor: default; }
   .empty { color: var(--ink-muted); font-size: 0.85em; margin: 0; }
+  button.ghost { background: var(--surface); color: var(--ink-primary); border-color: var(--border); }
+
+  /* Local environment: a system's services run on this machine. */
+  .card.has-env { grid-column: 1 / -1; }
+  #local-env-orphans:not(:empty) { margin-top: 12px; }
+  .env { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
+  .env-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .env-head h4 { margin: 0; font-size: 0.88em; }
+  .env-info { font-size: 0.78em; color: var(--ink-muted); }
+  .env-info code { font-family: ui-monospace, monospace; word-break: break-all; }
+  .env-actions { display: inline-flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+  .env-services { display: grid; gap: 6px; margin-top: 8px; }
+  .env-svc {
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--page);
+    font-size: 0.85em;
+  }
+  .env-line { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .agent-auth { margin: 6px 0 10px; }
+  .env-name { font-weight: 500; }
+  .env-detail { color: var(--ink-muted); font-size: 0.92em; }
+  .env-detail a { color: var(--accent); }
+  .env-badge {
+    display: inline-block;
+    min-width: 72px;
+    text-align: center;
+    padding: 1px 7px;
+    border: 1px solid var(--closed);
+    border-radius: 999px;
+    font-size: 0.78em;
+    color: var(--closed);
+    flex: none;
+  }
+  .env-badge.busy { color: var(--warn); border-color: var(--warn); background: var(--warn-bg); }
+  .env-badge.ok { color: var(--ok); border-color: var(--ok); background: var(--ok-bg); }
+  .env-badge.bad { color: var(--error); border-color: var(--error); background: var(--bad-bg); }
+  .env-params { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+  .env-param { display: inline-flex; gap: 4px; align-items: center; color: var(--ink-muted); font-size: 0.92em; }
+  .env-param input {
+    font: inherit;
+    font-family: ui-monospace, monospace;
+    font-size: 0.95em;
+    padding: 3px 6px;
+    width: 16em;
+    max-width: 100%;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--ink-primary);
+  }
+  .env-msg { margin-top: 4px; color: var(--ink-secondary); font-size: 0.92em; word-break: break-word; }
+  .env-msg.bad { color: var(--error); }
+  .env-err {
+    margin-top: 4px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    background: var(--warn-bg);
+    color: var(--error);
+    font-size: 0.85em;
+  }
+  .env-msg:empty, .env-err:empty { display: none; }
+  .env-logs {
+    margin: 6px 0 0;
+    max-height: 300px;
+    overflow: auto;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--ink-secondary);
+    font-family: ui-monospace, monospace;
+    font-size: 0.78em;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+  /* Per-session environments: the selector + overview strip above the catalogue. */
+  .env-bar .env-head h2 { margin: 0; }
+  .env-session { display: inline-flex; gap: 6px; align-items: center; font-size: 0.85em; color: var(--ink-muted); }
+  .env-session select { max-width: 22em; }
+  .env-count { font-size: 0.85em; color: var(--ink-secondary); margin-left: auto; }
+  .env-count strong { color: var(--ink-primary); font-weight: 600; }
+  .env-count.full strong { color: var(--warn); }
+  .env-runs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .env-runs:empty { display: none; }
+  button.env-run { font-size: 0.8em; text-align: left; }
+  button.env-run.current { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .env-run .who { font-weight: 600; }
+  .env-run .what { color: var(--ink-secondary); }
+  .env-scope {
+    display: inline-block;
+    padding: 0 6px;
+    border: 1px dashed var(--accent);
+    border-radius: 999px;
+    font-size: 0.72em;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    flex: none;
+  }
+  .env-limit {
+    margin-top: 6px;
+    padding: 6px 10px;
+    border: 1px solid var(--warn);
+    border-radius: 6px;
+    background: var(--warn-bg);
+    color: var(--warn);
+    font-size: 0.85em;
+    font-weight: 600;
+    word-break: break-word;
+  }
+  .env-limit:empty { display: none; }
+  .env-restart {
+    display: inline-block;
+    padding: 1px 7px;
+    border: 1px solid var(--warn);
+    border-radius: 999px;
+    font-size: 0.78em;
+    color: var(--warn);
+    background: var(--warn-bg);
+    flex: none;
+  }
+  button.env-prominent { box-shadow: 0 0 0 2px var(--warn-bg), 0 0 0 3px var(--warn); }
+  .env-uses { margin-top: 2px; color: var(--ink-muted); font-size: 0.92em; }
+  .env-uses:empty { display: none; }
+  /* Agent tools (MCP): the servers agents get, from config.toml, hot-reloaded. */
+  .mcp-source { font-size: 0.78em; color: var(--ink-muted); }
+  .mcp-source code { font-family: ui-monospace, monospace; word-break: break-all; }
+  .mcp-target { font-family: ui-monospace, monospace; font-size: 0.92em; color: var(--ink-muted); word-break: break-all; }
+  .mcp-note { margin: 6px 0 0; font-size: 0.78em; color: var(--ink-muted); }
+  /* What agents did with each server (GET /agents/mcp/activity) and the Test result. */
+  .mcp-last { margin-top: 4px; font-size: 0.88em; color: var(--ink-secondary); word-break: break-word; }
+  .mcp-last.ok { color: var(--ok); }
+  .mcp-last.bad { color: var(--error); font-weight: 600; }
+  .mcp-test { margin-top: 4px; font-size: 0.88em; color: var(--ink-secondary); word-break: break-word; }
+  .mcp-test.ok { color: var(--ok); }
+  .mcp-test.bad { color: var(--error); }
+  .mcp-test:empty { display: none; }
+  .mcp-calls { margin-top: 4px; font-size: 0.85em; }
+  .mcp-calls summary { cursor: pointer; color: var(--ink-muted); }
+  .mcp-calls table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+  .mcp-calls td { padding: 2px 6px 2px 0; vertical-align: top; color: var(--ink-secondary); }
+  .mcp-calls td.args { font-family: ui-monospace, monospace; word-break: break-all; }
+  .mcp-calls tr.bad td { color: var(--error); }
+  .mcp-calls .mcp-calls-wrap { overflow-x: auto; }
+  .env-sub { margin: 10px 0 0; font-size: 0.8em; color: var(--ink-muted); font-weight: 600; }
+  .env-outputs { display: grid; gap: 2px; margin-top: 4px; font-size: 0.92em; color: var(--ink-secondary); }
+  .env-outputs:empty { display: none; }
+  .env-outputs div { display: flex; gap: 6px; }
+  .env-outputs .key { color: var(--ink-muted); flex: none; }
+  .env-outputs code { font-family: ui-monospace, monospace; word-break: break-all; }
 </style>
 </head>
 <body>
@@ -184,10 +343,16 @@
   </div>
 
   <p class="error" id="error"></p>
+  <!-- Agent tools (MCP): which MCP servers agents get; empty on a server without it. -->
+  <div id="agent-mcp"></div>
   <div id="undeclared"></div>
   <div id="restructure"></div>
   <div id="config-gap"></div>
+  <!-- Local environment: which session's environment the panels below show. -->
+  <div id="local-env-bar"></div>
   <div class="cards" id="systems"></div>
+  <!-- Local environments of systems the catalogue above does not render. -->
+  <div class="cards" id="local-env-orphans"></div>
 </main>
 
 <script>
@@ -421,6 +586,7 @@
   function renderSystems() {
     const host = document.getElementById("systems");
     host.textContent = "";
+    systemCards = {};
     if (!data.declared) return;
     if (!data.systems.length) {
       host.appendChild(el("p", "empty", "No systems declared."));
@@ -429,6 +595,7 @@
 
     data.systems.forEach((system) => {
       const card = el("div", "card");
+      systemCards[system.id] = card;
       const heading = el("h3");
       heading.appendChild(el("span", null, system.label));
       heading.appendChild(el("span", "id", system.id));
@@ -521,12 +688,1310 @@
     });
   }
 
+  // ---- local environment: run a system's services on this machine ----
+
+  // Systems that declare a local env (GET /local-env) get a panel to start, stop and
+  // watch their services. Each panel is built once and updated in place on every poll,
+  // so an edited param, an open log and its scroll position survive the refresh - and it
+  // is re-attached, not rebuilt, when the catalogue above re-renders. A system the
+  // catalogue does not render still gets its panel, in a card of its own below it.
+  const ENV_FAST_MS = 3000; // while any service is starting
+  const ENV_SLOW_MS = 10000; // otherwise
+  const ENV_LOGS_MS = 2000; // an open log panel
+  const ENV_LOG_LINES = 200;
+  const ENV_STATES = {
+    stopped: { label: "stopped", tone: "idle" },
+    starting: { label: "starting", tone: "busy" },
+    running: { label: "running", tone: "ok" },
+    failed: { label: "failed", tone: "bad" },
+    exited: { label: "exited", tone: "bad" },
+    port_in_use: { label: "port in use", tone: "bad" },
+  };
+
+  const RES_STATES = {
+    absent: { label: "absent", tone: "idle" },
+    creating: { label: "creating", tone: "busy" },
+    ready: { label: "ready", tone: "ok" },
+    failed: { label: "failed", tone: "bad" },
+    destroying: { label: "destroying", tone: "busy" },
+    expired: { label: "expired", tone: "idle" }, // dropped by the nightly job
+  };
+  // Client-side first sighting of a resource in "creating", for an elapsed timer when the
+  // status carries no start time of its own. Keyed by session|system|resource.
+  const resCreatingSince = {};
+  const DEFAULT_SESSION = "default";
+  const SESSION_KEY = "pmstudio.systems.localEnvSession";
+
+  let envSystems = [];
+  let envCanManage = false; // hiding controls is orientation; the server enforces it
+  let envGone = false; // GET /local-env 404s: a server that predates it, stop asking
+  let envTimer = null;
+  let envSeq = 0;
+  let systemCards = {}; // system id -> its catalogue card, refilled by renderSystems
+  const envPanels = {}; // system id -> panel entry (see buildEnvPanel)
+
+  // Every panel shows - and acts on - one session's environment, picked in the bar
+  // above the catalogue and remembered per tab. Shared services/resources are the same
+  // whichever session is picked.
+  let envSession = DEFAULT_SESSION;
+  try {
+    envSession = sessionStorage.getItem(SESSION_KEY) || DEFAULT_SESSION;
+  } catch (err) { /* storage blocked: start on the default session */ }
+  let envSessions = []; // [{id, label}] from GET /sessions, default first
+  const envSessionNames = {}; // session id -> display name (from /sessions and the overview)
+  let envOverview = null; // last GET /local-env/overview payload
+  let envOverviewGone = false; // a server without the overview route
+  let envBar = null; // the selector + overview strip (see buildEnvBar)
+
+  function sessionLabel(id) {
+    return envSessionNames[id] || id;
+  }
+
+  // Appends ?session=… (or &session=…) for the selected session to a /local-env path.
+  function withSession(path, session) {
+    const sep = path.indexOf("?") === -1 ? "?" : "&";
+    return `${path}${sep}session=${encodeURIComponent(session || envSession)}`;
+  }
+
+  function detailText(detail) {
+    if (!detail) return "";
+    if (typeof detail === "string") return detail;
+    // FastAPI's own validation errors arrive as a list of {loc, msg, type}.
+    if (Array.isArray(detail)) return detail.map((d) => (d && d.msg) || JSON.stringify(d)).join("; ");
+    return JSON.stringify(detail);
+  }
+
+  // Like api(), but tolerant of an empty response body - these only need the status.
+  // The path is sent for the selected session; the error carries the HTTP status so a
+  // 409 (session environment limit) can be shown where it matters.
+  async function envPost(path, body) {
+    const response = await fetch(withSession(path), body ? json("POST", body) : { method: "POST" });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      const error = new Error(detailText(payload.detail) || `Request failed (${response.status})`);
+      error.status = response.status;
+      throw error;
+    }
+  }
+
+  function isActive(state) {
+    return state === "running" || state === "starting";
+  }
+
+  function uptime(startedAt) {
+    let s = Math.max(0, Math.floor(Date.now() / 1000 - startedAt));
+    const d = Math.floor(s / 86400);
+    s -= d * 86400;
+    const h = Math.floor(s / 3600);
+    s -= h * 3600;
+    const m = Math.floor(s / 60);
+    s -= m * 60;
+    if (d) return `${d}d ${h}h`;
+    if (h) return `${h}h ${m}m`;
+    if (m) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
+  // Only ever link to a web address, whatever the config says.
+  function safeUrl(url) {
+    return typeof url === "string" && /^https?:\/\//i.test(url) ? url : null;
+  }
+
+  // A panel is rebuilt, rather than updated, only when its shape changes.
+  function envSignature(system) {
+    const services = (system.services || [])
+      .map((svc) => `${svc.id}(${Object.keys(svc.params || {}).join(",")})`)
+      .join("|");
+    const resources = (system.resources || []).map((res) => res.id).join("|");
+    return `${services}#${resources}`;
+  }
+
+  function scopeTag(scope) {
+    if (scope !== "shared") return null;
+    const tag = el("span", "env-scope", "shared");
+    tag.title = "Shared by every session: the same state whichever session is selected.";
+    return tag;
+  }
+
+  function button(text, className) {
+    const b = el("button", className, text);
+    b.type = "button";
+    return b;
+  }
+
+  function rowParams(row) {
+    const names = Object.keys(row.inputs);
+    if (!names.length) return null;
+    const params = {};
+    names.forEach((name) => { params[name] = row.inputs[name].value.trim(); });
+    return params;
+  }
+
+  function buildEnvPanel(system, sig) {
+    const entry = { id: system.id, label: system.label || system.id, sig, busy: false, rows: {}, resources: {}, orphan: null };
+    const node = el("section", "env");
+    node.setAttribute("aria-label", `Local environment — ${entry.label}`);
+
+    const head = el("div", "env-head");
+    entry.heading = el("h4", null, "Local environment");
+    head.appendChild(entry.heading);
+    entry.info = el("span", "env-info");
+    head.appendChild(entry.info);
+    if (envCanManage) {
+      const actions = el("span", "env-actions");
+      entry.startAll = button("Start all");
+      entry.stopAll = button("Stop all", "ghost");
+      actions.appendChild(entry.startAll);
+      actions.appendChild(entry.stopAll);
+      head.appendChild(actions);
+      const base = `/local-env/${encodeURIComponent(system.id)}`;
+      entry.startAll.addEventListener("click", () => {
+        const params = {};
+        Object.keys(entry.rows).forEach((id) => {
+          const p = rowParams(entry.rows[id]);
+          if (p) params[id] = p;
+        });
+        envAct(entry, null, `${base}/start`, Object.keys(params).length ? { params } : null);
+      });
+      entry.stopAll.addEventListener("click", () => envAct(entry, null, `${base}/stop`, null));
+    }
+    node.appendChild(head);
+    // The session environment limit (409) - kept apart from ordinary errors and right
+    // under the Start buttons, because the fix is elsewhere (stop another session's env).
+    entry.limit = el("div", "env-limit");
+    entry.limit.setAttribute("role", "alert");
+    node.appendChild(entry.limit);
+    entry.err = el("div", "env-err");
+    entry.err.setAttribute("role", "alert");
+    node.appendChild(entry.err);
+
+    const list = el("div", "env-services");
+    const services = system.services || [];
+    services.forEach((svc) => {
+      const row = buildEnvRow(entry, svc);
+      entry.rows[svc.id] = row;
+      list.appendChild(row.node);
+    });
+    if (!services.length) list.appendChild(el("p", "empty", "No services declared."));
+    node.appendChild(list);
+
+    const resources = system.resources || [];
+    if (resources.length) {
+      node.appendChild(el("div", "env-sub", "Resources"));
+      const rlist = el("div", "env-services");
+      resources.forEach((res) => {
+        const r = buildEnvResource(entry, res);
+        entry.resources[res.id] = r;
+        rlist.appendChild(r.node);
+      });
+      node.appendChild(rlist);
+    }
+    entry.node = node;
+    return entry;
+  }
+
+  function buildEnvResource(entry, res) {
+    const r = { id: res.id, state: res.state, scope: res.scope, label: res.label || res.id, busy: false };
+    r.node = el("div", "env-svc");
+    const line = el("div", "env-line");
+    r.badge = el("span", "env-badge");
+    line.appendChild(r.badge);
+    r.name = el("span", "env-name", r.label);
+    line.appendChild(r.name);
+    r.scopeHost = el("span");
+    line.appendChild(r.scopeHost);
+    // "expires <local time>" while ready, "creating for 1m 20s" while creating.
+    r.when = el("span", "env-detail");
+    line.appendChild(r.when);
+    if (envCanManage) {
+      const actions = el("span", "env-actions");
+      r.create = button("Create");
+      r.create.hidden = true;
+      r.create.addEventListener("click", () => resourceAct(entry, r, "create"));
+      actions.appendChild(r.create);
+      r.destroy = button("Destroy", "ghost");
+      r.destroy.hidden = true;
+      r.destroy.addEventListener("click", () => resourceAct(entry, r, "destroy"));
+      actions.appendChild(r.destroy);
+      line.appendChild(actions);
+    }
+    r.node.appendChild(line);
+    r.outputs = el("div", "env-outputs");
+    r.node.appendChild(r.outputs);
+    r.msg = el("div", "env-msg");
+    r.node.appendChild(r.msg);
+    r.err = el("div", "env-err");
+    r.err.setAttribute("role", "alert");
+    r.node.appendChild(r.err);
+    return r;
+  }
+
+  function localTime(iso) {
+    if (typeof iso !== "string" || !iso) return null;
+    const date = new Date(iso);
+    if (isNaN(date.getTime())) return null;
+    try {
+      return date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+    } catch (err) {
+      return date.toLocaleString();
+    }
+  }
+
+  function updateEnvResource(entry, r, res) {
+    r.state = res.state;
+    r.scope = res.scope;
+    r.label = res.label || res.id;
+    const st = RES_STATES[res.state] || { label: String(res.state || "unknown"), tone: "idle" };
+    r.badge.className = `env-badge ${st.tone}`;
+    r.badge.textContent = st.label;
+    r.name.textContent = r.label;
+    r.scopeHost.textContent = "";
+    const tag = scopeTag(res.scope);
+    if (tag) r.scopeHost.appendChild(tag);
+
+    // Creation takes minutes (a database ~2), so say how long it has been going. The
+    // status's own start time wins; otherwise this tab's first sighting of "creating".
+    const key = `${envSession}|${entry.id}|${res.id}`;
+    let when = "";
+    if (res.state === "creating") {
+      const since = typeof res.started_at === "number" ? res.started_at : (resCreatingSince[key] = resCreatingSince[key] || Date.now() / 1000);
+      when = `creating for ${uptime(since)}`;
+    } else {
+      delete resCreatingSince[key];
+      const expires = res.state === "ready" ? localTime(res.expires_at_iso) : null;
+      if (expires) when = `expires ${expires}`;
+    }
+    r.when.textContent = when;
+    r.when.title = res.state === "ready" && res.expires_at_iso ? String(res.expires_at_iso) : "";
+
+    const outputs = res.outputs && typeof res.outputs === "object" ? res.outputs : {};
+    const keys = Object.keys(outputs);
+    const text = keys.map((k) => `${k}=${JSON.stringify(outputs[k])}`).join("\n");
+    if (r.outputsText !== text) { // leave the DOM alone when nothing changed (selection)
+      r.outputsText = text;
+      r.outputs.textContent = "";
+      keys.forEach((k) => {
+        const v = outputs[k];
+        const row = el("div");
+        row.appendChild(el("span", "key", `${k}:`));
+        row.appendChild(el("code", null, v != null && typeof v === "object" ? JSON.stringify(v) : String(v)));
+        r.outputs.appendChild(row);
+      });
+    }
+    r.msg.textContent = res.message ? String(res.message) : "";
+    r.msg.className = st.tone === "bad" ? "env-msg bad" : "env-msg";
+    if (r.create) {
+      r.create.hidden = !(res.state === "absent" || res.state === "expired" || res.state === "failed");
+      r.create.disabled = r.busy;
+    }
+    if (r.destroy) {
+      // An older status without has_destroy keeps the button; false hides it.
+      const destroyable = res.has_destroy !== false;
+      r.destroy.hidden = !(destroyable && (res.state === "ready" || res.state === "failed"));
+      r.destroy.disabled = r.busy;
+    }
+  }
+
+  async function resourceAct(entry, r, action) {
+    if (action === "destroy") {
+      const whose = r.scope === "shared"
+        ? "It is shared by every session."
+        : `Session: ${sessionLabel(envSession)}.`;
+      if (!confirm(`Destroy ${r.label} (${entry.label})? ${whose}`)) return;
+    }
+    r.busy = true;
+    r.create.disabled = true;
+    r.destroy.disabled = true;
+    r.err.textContent = "";
+    try {
+      await envPost(
+        `/local-env/${encodeURIComponent(entry.id)}/resources/${encodeURIComponent(r.id)}/${action}`,
+        null
+      );
+    } catch (err) {
+      r.err.textContent = err.message;
+    }
+    await refreshEnv();
+    r.busy = false;
+    r.create.disabled = false;
+    r.destroy.disabled = false;
+  }
+
+  function buildEnvRow(entry, svc) {
+    const base = `/local-env/${encodeURIComponent(entry.id)}/${encodeURIComponent(svc.id)}`;
+    const row = {
+      id: svc.id, state: svc.state, busy: false, inputs: {},
+      // The session is added per fetch, so an open log follows the selector.
+      logsPath: `${base}/logs?lines=${ENV_LOG_LINES}`, logsOpen: false, logsTimer: null, logsSeq: 0, stick: true,
+    };
+    row.node = el("div", "env-svc");
+    const line = el("div", "env-line");
+    row.badge = el("span", "env-badge");
+    line.appendChild(row.badge);
+    row.restartChip = el("span", "env-restart", "restart to apply");
+    row.restartChip.title = "A resource it uses changed since it started; restart it to pick that up.";
+    row.restartChip.hidden = true;
+    line.appendChild(row.restartChip);
+    row.name = el("span", "env-name", svc.label || svc.id);
+    line.appendChild(row.name);
+    row.scopeHost = el("span");
+    line.appendChild(row.scopeHost);
+    row.detail = el("span", "env-detail");
+    line.appendChild(row.detail);
+
+    const names = Object.keys(svc.params || {});
+    if (names.length && envCanManage) {
+      const box = el("span", "env-params");
+      names.forEach((name) => {
+        const label = el("label", "env-param");
+        label.appendChild(el("span", null, name));
+        const input = el("input");
+        input.type = "text";
+        input.name = name;
+        input.spellcheck = false;
+        input.autocomplete = "off";
+        // Once edited, a poll no longer overwrites it - until a start/restart sends it.
+        input.addEventListener("input", () => { input.dataset.dirty = "1"; });
+        label.appendChild(input);
+        row.inputs[name] = input;
+        box.appendChild(label);
+      });
+      line.appendChild(box);
+    } else if (names.length) {
+      row.paramText = el("span", "env-detail");
+      line.appendChild(row.paramText);
+    }
+
+    const actions = el("span", "env-actions");
+    if (envCanManage) {
+      row.start = button("Start");
+      row.stop = button("Stop", "ghost");
+      row.restart = button("Restart", "ghost");
+      row.start.addEventListener("click", () => {
+        const p = rowParams(row);
+        envAct(entry, row, `${base}/start`, p ? { params: p } : null);
+      });
+      row.stop.addEventListener("click", () => envAct(entry, row, `${base}/stop`, null));
+      row.restart.addEventListener("click", () => {
+        const p = rowParams(row);
+        envAct(entry, row, `${base}/restart`, p ? { params: p } : null);
+      });
+      actions.appendChild(row.start);
+      actions.appendChild(row.stop);
+      actions.appendChild(row.restart);
+    }
+    row.logsBtn = button("Logs", "ghost");
+    row.logsBtn.setAttribute("aria-expanded", "false");
+    row.logsBtn.addEventListener("click", () => toggleLogs(row));
+    actions.appendChild(row.logsBtn);
+    line.appendChild(actions);
+    row.node.appendChild(line);
+
+    // Resources this service uses that are not ready yet (it falls back to something else).
+    row.uses = el("div", "env-uses");
+    row.node.appendChild(row.uses);
+    row.msg = el("div", "env-msg");
+    row.node.appendChild(row.msg);
+    row.err = el("div", "env-err");
+    row.err.setAttribute("role", "alert");
+    row.node.appendChild(row.err);
+
+    // Log text is process output - untrusted - so it only ever goes in via textContent.
+    row.logs = el("pre", "env-logs");
+    row.logs.hidden = true;
+    row.logs.tabIndex = 0;
+    row.logs.setAttribute("aria-label", `Logs — ${svc.label || svc.id}`);
+    row.logs.addEventListener("scroll", () => {
+      const pre = row.logs;
+      row.stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 8;
+    });
+    row.node.appendChild(row.logs);
+    return row;
+  }
+
+  function updateEnvPanel(entry, system) {
+    entry.info.textContent = "";
+    const bits = [];
+    if (system.aws_profile) bits.push(["AWS profile", system.aws_profile]);
+    if (system.test_users_secret) bits.push(["test users secret", system.test_users_secret]);
+    bits.forEach(([key, value], i) => {
+      if (i) entry.info.appendChild(document.createTextNode(" · "));
+      entry.info.appendChild(document.createTextNode(`${key} `));
+      entry.info.appendChild(el("code", null, String(value)));
+    });
+    entry.heading.textContent = `Local environment — ${sessionLabel(envSession)}`;
+    const services = system.services || [];
+    const byId = {};
+    services.forEach((svc) => { byId[svc.id] = svc; });
+    const resById = {};
+    (system.resources || []).forEach((res) => { resById[res.id] = res; });
+    services.forEach((svc) => updateEnvRow(entry.rows[svc.id], svc, byId, resById));
+    (system.resources || []).forEach((res) => updateEnvResource(entry, entry.resources[res.id], res));
+    refreshEnvControls(entry);
+  }
+
+  function updateEnvRow(row, svc, byId, resById) {
+    row.state = svc.state;
+    row.scope = svc.scope;
+    row.restartNeeded = svc.restart_needed === true;
+    const st = ENV_STATES[svc.state] || { label: String(svc.state || "unknown"), tone: "idle" };
+    row.badge.className = `env-badge ${st.tone}`;
+    row.badge.textContent = st.label;
+    row.restartChip.hidden = !row.restartNeeded;
+    row.name.textContent = svc.label || svc.id;
+
+    // "uses db: not created" - generic: the service runs, but against a fallback.
+    const notReady = (Array.isArray(svc.resources_used) ? svc.resources_used : [])
+      .map((rid) => {
+        const res = (resById || {})[rid];
+        const state = res ? res.state : "absent";
+        if (state === "ready") return null;
+        if (state === "creating") return `uses ${rid}: being created`;
+        if (state === "destroying") return `uses ${rid}: being destroyed`;
+        return `uses ${rid}: not created`;
+      })
+      .filter(Boolean);
+    row.uses.textContent = notReady.join(" · ");
+    if (row.scopeHost.dataset.scope !== String(svc.scope)) {
+      row.scopeHost.dataset.scope = String(svc.scope);
+      row.scopeHost.textContent = "";
+      const tag = scopeTag(svc.scope);
+      if (tag) row.scopeHost.appendChild(tag);
+    }
+
+    const parts = [];
+    if (svc.port != null) parts.push(document.createTextNode(`port ${svc.port}`));
+    const url = svc.state === "running" ? safeUrl(svc.url) : null;
+    if (url) {
+      const a = el("a", null, "open ↗");
+      a.href = url;
+      a.title = url;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      parts.push(a);
+    }
+    if (svc.depends_on && svc.depends_on.length) {
+      const names = svc.depends_on.map((id) => (byId[id] && byId[id].label) || id);
+      parts.push(document.createTextNode(`depends on ${names.join(", ")}`));
+    }
+    if (isActive(svc.state) && typeof svc.started_at === "number") {
+      parts.push(document.createTextNode(`up ${uptime(svc.started_at)}`));
+    }
+    if (isActive(svc.state) && svc.pid != null) parts.push(document.createTextNode(`pid ${svc.pid}`));
+    row.detail.textContent = "";
+    parts.forEach((part, i) => {
+      if (i) row.detail.appendChild(document.createTextNode(" · "));
+      row.detail.appendChild(part);
+    });
+
+    const params = svc.params || {};
+    Object.keys(row.inputs).forEach((name) => {
+      const input = row.inputs[name];
+      if (document.activeElement === input || input.dataset.dirty) return;
+      input.value = params[name] == null ? "" : String(params[name]);
+    });
+    if (row.paramText) {
+      row.paramText.textContent = Object.keys(params).map((k) => `${k}=${params[k] == null ? "" : params[k]}`).join("  ");
+    }
+
+    const notes = [];
+    if (svc.exit_code != null && !isActive(svc.state)) notes.push(`exit code ${svc.exit_code}`);
+    if (svc.message) notes.push(String(svc.message));
+    row.msg.textContent = notes.join(" — ");
+    row.msg.className = st.tone === "bad" ? "env-msg bad" : "env-msg";
+  }
+
+  function refreshEnvControls(entry) {
+    const rows = Object.keys(entry.rows).map((id) => entry.rows[id]);
+    const anyBusy = entry.busy || rows.some((row) => row.busy);
+    rows.forEach((row) => {
+      if (!row.start) return;
+      const busy = entry.busy || row.busy;
+      row.start.disabled = busy || isActive(row.state);
+      row.stop.disabled = busy || !isActive(row.state);
+      row.restart.disabled = busy || row.state === "starting" || row.state === "stopped";
+      // Restart is the fix for "restart to apply", so it stops being a ghost button.
+      const prominent = row.restartNeeded && isActive(row.state);
+      row.restart.className = prominent ? "env-prominent" : "ghost";
+      Object.keys(row.inputs).forEach((name) => { row.inputs[name].disabled = busy; });
+    });
+    if (entry.startAll) {
+      entry.startAll.disabled = anyBusy || !rows.some((row) => !isActive(row.state));
+      entry.stopAll.disabled = anyBusy || !rows.some((row) => isActive(row.state));
+    }
+  }
+
+  // One action at a time per service (or per system, for the "all" buttons); errors are
+  // shown next to whatever was clicked rather than in the page-level banner.
+  async function envAct(entry, row, path, body) {
+    const target = row || entry;
+    const rows = row ? [row] : Object.keys(entry.rows).map((id) => entry.rows[id]);
+    target.busy = true;
+    target.err.textContent = "";
+    entry.limit.textContent = "";
+    rows.forEach((r) => { r.err.textContent = ""; });
+    refreshEnvControls(entry);
+    try {
+      await envPost(path, body);
+      // The values just sent are now the server's; let polls show them again.
+      if (body) rows.forEach((r) => Object.keys(r.inputs).forEach((n) => { delete r.inputs[n].dataset.dirty; }));
+    } catch (err) {
+      if (err.status === 409) {
+        entry.limit.textContent =
+          `Session environment limit reached — ${err.message} ` +
+          "Stop another session's environment, then start this one again.";
+      } else {
+        target.err.textContent = err.message;
+      }
+    }
+    // Keep the buttons disabled until the new state is on screen, so a just-started
+    // service does not flash an enabled Start.
+    await refreshEnv();
+    target.busy = false;
+    refreshEnvControls(entry);
+  }
+
+  function toggleLogs(row) {
+    row.logsOpen = !row.logsOpen;
+    row.logsBtn.textContent = row.logsOpen ? "Hide logs" : "Logs";
+    row.logsBtn.setAttribute("aria-expanded", String(row.logsOpen));
+    row.logs.hidden = !row.logsOpen;
+    clearTimeout(row.logsTimer);
+    if (row.logsOpen) {
+      row.stick = true;
+      if (!row.logs.textContent) row.logs.textContent = "Loading…";
+      fetchLogs(row);
+    }
+  }
+
+  async function fetchLogs(row) {
+    clearTimeout(row.logsTimer);
+    if (!row.logsOpen || document.visibilityState === "hidden") return;
+    const seq = ++row.logsSeq;
+    let text;
+    try {
+      const response = await fetch(withSession(row.logsPath), { headers: { Accept: "application/json" } });
+      const payload = await response.json().catch(() => ({}));
+      if (response.ok) {
+        const lines = Array.isArray(payload.lines) ? payload.lines : [];
+        text = lines.length ? lines.map((l) => (l == null ? "" : String(l))).join("\n") : "(no output yet)";
+      } else {
+        text = detailText(payload.detail) || `Could not load logs (${response.status}).`;
+      }
+    } catch (err) {
+      text = "Could not load logs.";
+    }
+    if (seq !== row.logsSeq || !row.logsOpen) return;
+    // Leave the DOM alone when nothing changed, so a text selection survives the refresh.
+    if (row.logs.textContent !== text) {
+      row.logs.textContent = text;
+      if (row.stick) row.logs.scrollTop = row.logs.scrollHeight;
+    }
+    row.logsTimer = setTimeout(() => fetchLogs(row), ENV_LOGS_MS);
+  }
+
+  function dropEnvPanel(id) {
+    const entry = envPanels[id];
+    Object.keys(entry.rows).forEach((rid) => {
+      entry.rows[rid].logsOpen = false;
+      clearTimeout(entry.rows[rid].logsTimer);
+    });
+    entry.node.remove();
+    if (entry.orphan) entry.orphan.remove();
+    delete envPanels[id];
+  }
+
+  function renderEnv() {
+    const seen = {};
+    envSystems.forEach((system) => {
+      if (!system || !system.id) return;
+      seen[system.id] = true;
+      const sig = envSignature(system);
+      if (envPanels[system.id] && envPanels[system.id].sig !== sig) dropEnvPanel(system.id);
+      if (!envPanels[system.id]) envPanels[system.id] = buildEnvPanel(system, sig);
+      updateEnvPanel(envPanels[system.id], system);
+    });
+    Object.keys(envPanels).forEach((id) => { if (!seen[id]) dropEnvPanel(id); });
+    placeEnvPanels();
+  }
+
+  // Into the system's catalogue card when there is one, else a card of its own.
+  function placeEnvPanels() {
+    const orphans = document.getElementById("local-env-orphans");
+    Object.keys(envPanels).forEach((id) => {
+      const entry = envPanels[id];
+      const card = systemCards[id];
+      if (card) {
+        card.classList.add("has-env");
+        if (entry.node.parentNode !== card) card.appendChild(entry.node);
+        if (entry.orphan) entry.orphan.remove();
+        return;
+      }
+      if (!entry.orphan) {
+        entry.orphan = el("div", "card has-env");
+        const heading = el("h3");
+        heading.appendChild(el("span", null, entry.label));
+        heading.appendChild(el("span", "id", id));
+        entry.orphan.appendChild(heading);
+      }
+      if (entry.node.parentNode !== entry.orphan) entry.orphan.appendChild(entry.node);
+      if (entry.orphan.parentNode !== orphans) orphans.appendChild(entry.orphan);
+    });
+  }
+
+  async function fetchOverview() {
+    if (envOverviewGone) return null;
+    try {
+      const response = await fetch("/local-env/overview", { headers: { Accept: "application/json" } });
+      if (response.status === 404) {
+        envOverviewGone = true;
+        envOverview = null;
+        return null;
+      }
+      if (response.ok) return await response.json();
+    } catch (err) { /* transient */ }
+    return null;
+  }
+
+  async function refreshEnv() {
+    clearTimeout(envTimer);
+    envTimer = null;
+    if (envGone) return;
+    const seq = ++envSeq;
+    const session = envSession;
+    let payload = null;
+    let unknownSession = null;
+    const overviewDone = fetchOverview();
+    try {
+      const response = await fetch(withSession("/local-env", session), { headers: { Accept: "application/json" } });
+      if (response.status === 404) {
+        const body = await response.json().catch(() => ({}));
+        if (session !== DEFAULT_SESSION) {
+          // An unknown (deleted, archived) session: fall back to the default one.
+          unknownSession = detailText(body.detail) || `Session ${session} not found.`;
+        } else {
+          envGone = true; // a server that predates /local-env
+          envSystems = [];
+          renderEnv();
+          return;
+        }
+      } else if (response.ok) {
+        payload = await response.json();
+      }
+      // Anything else that fails (auth, a restart of the server) keeps what is on screen.
+    } catch (err) { /* transient - the next poll tries again */ }
+    const overview = await overviewDone;
+    if (seq !== envSeq) return; // a newer refresh owns the screen and the timer
+    if (unknownSession) {
+      showError(`${unknownSession} Showing the default session's environment instead.`);
+      setEnvSession(DEFAULT_SESSION);
+      return;
+    }
+    if (overview) envOverview = overview;
+    if (payload) {
+      envSystems = Array.isArray(payload.systems) ? payload.systems : [];
+      renderEnv();
+    }
+    renderEnvBar();
+    scheduleEnv();
+  }
+
+  function scheduleEnv() {
+    clearTimeout(envTimer);
+    envTimer = null;
+    if (envGone || document.visibilityState === "hidden") return;
+    const busy = envSystems.some(
+      (s) =>
+        (s.services || []).some((svc) => svc.state === "starting") ||
+        (s.resources || []).some((res) => res.state === "creating" || res.state === "destroying")
+    );
+    envTimer = setTimeout(refreshEnv, busy ? ENV_FAST_MS : ENV_SLOW_MS);
+  }
+
+  // ---- the session selector + overview strip ----
+
+  async function loadEnvSessions() {
+    let list = null;
+    try {
+      const response = await fetch("/sessions", { headers: { Accept: "application/json" } });
+      if (response.ok) list = await response.json();
+    } catch (err) { /* keep whatever the selector already has */ }
+    if (!Array.isArray(list)) return;
+    // Same title precedence as the sessions list: PM title, creation name, then id.
+    const sessions = list
+      .filter((s) => s && s.id && (!s.archived || s.id === DEFAULT_SESSION || s.id === envSession))
+      .map((s) => ({ id: String(s.id), label: String(s.title || s.name || s.id), created: s.created_at || 0 }));
+    sessions.forEach((s) => { envSessionNames[s.id] = s.label; });
+    sessions.sort((a, b) =>
+      a.id === DEFAULT_SESSION ? -1 : b.id === DEFAULT_SESSION ? 1 : b.created - a.created
+    );
+    envSessions = sessions;
+    renderEnvBar();
+    // Headings carry the session's name, which may only just have arrived.
+    Object.keys(envPanels).forEach((id) => {
+      envPanels[id].heading.textContent = `Local environment — ${sessionLabel(envSession)}`;
+    });
+  }
+
+  function setEnvSession(id) {
+    id = id || DEFAULT_SESSION;
+    if (id === envSession) return;
+    envSession = id;
+    try {
+      sessionStorage.setItem(SESSION_KEY, id);
+    } catch (err) { /* remembered for this page view only */ }
+    // What is on screen belongs to the previous session: errors, unsent param edits and
+    // open logs are reset, and the next GET (with the new session) refills everything.
+    Object.keys(envPanels).forEach((pid) => {
+      const entry = envPanels[pid];
+      entry.err.textContent = "";
+      entry.limit.textContent = "";
+      entry.heading.textContent = `Local environment — ${sessionLabel(id)}`;
+      Object.keys(entry.rows).forEach((rid) => {
+        const row = entry.rows[rid];
+        row.err.textContent = "";
+        Object.keys(row.inputs).forEach((n) => { delete row.inputs[n].dataset.dirty; });
+        if (row.logsOpen) {
+          row.logsSeq++;
+          row.stick = true;
+          row.logs.textContent = "Loading…";
+          fetchLogs(row);
+        }
+      });
+      Object.keys(entry.resources).forEach((rid) => { entry.resources[rid].err.textContent = ""; });
+    });
+    renderEnvBar();
+    refreshEnv();
+  }
+
+  function buildEnvBar() {
+    const bar = { node: el("div", "panel env-bar") };
+    const head = el("div", "env-head");
+    head.appendChild(el("h2", null, "Local environment"));
+    const label = el("label", "env-session");
+    label.appendChild(el("span", null, "Session"));
+    bar.select = el("select");
+    bar.select.addEventListener("change", () => setEnvSession(bar.select.value));
+    label.appendChild(bar.select);
+    head.appendChild(label);
+    bar.count = el("span", "env-count");
+    head.appendChild(bar.count);
+    bar.node.appendChild(head);
+    bar.node.appendChild(
+      el(
+        "p",
+        "hint",
+        "Each session runs its own environment; the panels below show and act on the " +
+          "selected one. Services and resources marked shared are the same for every session."
+      )
+    );
+    bar.runs = el("div", "env-runs");
+    bar.node.appendChild(bar.runs);
+    return bar;
+  }
+
+  function renderEnvBar() {
+    const host = document.getElementById("local-env-bar");
+    if (envGone || !envSystems.length) {
+      host.textContent = "";
+      return;
+    }
+    if (!envBar) envBar = buildEnvBar();
+    if (envBar.node.parentNode !== host) host.appendChild(envBar.node);
+
+    // The selector: default first, the selected session always present. Rebuilt only
+    // when the list changed and never while it has focus (that would close it).
+    const options = envSessions.slice();
+    if (!options.some((s) => s.id === DEFAULT_SESSION)) {
+      options.unshift({ id: DEFAULT_SESSION, label: sessionLabel(DEFAULT_SESSION) });
+    }
+    if (!options.some((s) => s.id === envSession)) {
+      options.push({ id: envSession, label: sessionLabel(envSession) });
+    }
+    const sig = options.map((s) => `${s.id}=${s.label}`).join("\n");
+    if (envBar.optionsSig !== sig && document.activeElement !== envBar.select) {
+      envBar.optionsSig = sig;
+      envBar.select.textContent = "";
+      options.forEach((s) => {
+        const option = el("option", null, s.label);
+        option.value = s.id;
+        option.title = s.id;
+        envBar.select.appendChild(option);
+      });
+    }
+    if (envBar.select.value !== envSession) envBar.select.value = envSession;
+
+    // The overview: how many session environments are up, and which.
+    const ov = envOverview;
+    envBar.count.textContent = "";
+    envBar.runs.textContent = "";
+    if (!ov) return;
+    const active = Number(ov.active_session_envs) || 0;
+    const max = ov.max_session_envs;
+    envBar.count.className = max != null && active >= max ? "env-count full" : "env-count";
+    envBar.count.appendChild(document.createTextNode("Session environments: "));
+    envBar.count.appendChild(el("strong", null, `${active} / ${max == null ? "∞" : max}`));
+    if (max != null && active >= max) envBar.count.title = "At the limit: starting another session's environment will be refused.";
+    else envBar.count.removeAttribute("title");
+
+    // session -> {name, systems: system -> ["svc :port", ...]}, in first-seen order.
+    const groups = [];
+    const bySession = {};
+    (Array.isArray(ov.runs) ? ov.runs : []).forEach((run) => {
+      if (!run) return;
+      const sid = run.session == null ? "" : String(run.session);
+      if (run.session_name) envSessionNames[sid] = String(run.session_name);
+      if (!bySession[sid]) {
+        bySession[sid] = { id: sid, systems: {}, order: [] };
+        groups.push(bySession[sid]);
+      }
+      const g = bySession[sid];
+      const system = String(run.system || "?");
+      if (!g.systems[system]) {
+        g.systems[system] = [];
+        g.order.push(system);
+      }
+      let text = String(run.service || "?");
+      if (run.port != null) text += ` :${run.port}`;
+      if (run.state && run.state !== "running") text += ` (${(ENV_STATES[run.state] || { label: run.state }).label})`;
+      g.systems[system].push(text);
+    });
+    groups.forEach((g) => {
+      const known = g.id && g.id !== "shared";
+      const node = el(known ? "button" : "span", known ? "ghost env-run" : "chip env-run");
+      if (known) {
+        node.type = "button";
+        if (g.id === envSession) {
+          node.classList.add("current");
+          node.setAttribute("aria-current", "true");
+        }
+        node.title = `Show session ${sessionLabel(g.id)}`;
+        node.addEventListener("click", () => setEnvSession(g.id));
+      }
+      node.appendChild(el("span", "who", known ? sessionLabel(g.id) : "shared"));
+      const what = g.order.map((s) => `${s}: ${g.systems[s].join(", ")}`).join(" · ");
+      node.appendChild(el("span", "what", ` — ${what}`));
+      envBar.runs.appendChild(node);
+    });
+  }
+
+  // A hidden tab polls nothing; coming back refreshes at once.
+  document.addEventListener("visibilitychange", () => {
+    const hidden = document.visibilityState === "hidden";
+    if (hidden) {
+      clearTimeout(envTimer);
+      envTimer = null;
+    } else {
+      refreshEnv();
+    }
+    Object.keys(envPanels).forEach((id) => {
+      const rows = envPanels[id].rows;
+      Object.keys(rows).forEach((rid) => {
+        if (hidden) clearTimeout(rows[rid].logsTimer);
+        else if (rows[rid].logsOpen) fetchLogs(rows[rid]);
+      });
+    });
+  });
+
+  // The controls depend on the role, so the first render waits for the nav's /auth/me.
+  // A personal (non-enterprise) instance has no roles: whoever runs it may manage it.
+  PMNav.auth.then((info) => {
+    const caps = (info && info.capabilities) || [];
+    envCanManage = !(info && info.enterprise) || caps.indexOf("manage_local_env") !== -1;
+    mcpCanManage =
+      !(info && info.enterprise) ||
+      caps.indexOf("manage_session_lifecycle") !== -1 ||
+      caps.indexOf("manage_local_env") !== -1;
+    refreshEnv();
+    loadEnvSessions();
+    refreshMcp();
+  });
+  // A session created in another tab shows up in the selector when it is opened.
+  document.getElementById("local-env-bar").addEventListener("pointerdown", (event) => {
+    if (envBar && event.target === envBar.select) loadEnvSessions();
+  });
+
+  // ---- agent tools: the MCP servers agents are given (config.toml [agents.mcp.*]) ----
+
+  // The server hot-reloads the config, so this panel only reports what agents get now;
+  // "Refresh tools" forces a reload instead of waiting for the next turn to notice.
+  const MCP_POLL_MS = 30000;
+  const MCP_STATES = {
+    ready: { label: "ready", tone: "ok" },
+    skipped: { label: "skipped", tone: "busy" },
+    unavailable: { label: "unavailable", tone: "bad" },
+  };
+  let mcpCanManage = false; // orientation only; the server enforces it (403)
+  let mcpGone = false; // GET /agents/mcp 404s: a server that predates it
+  let mcpTimer = null;
+  let mcpSeq = 0;
+  let mcpData = null;
+  let mcpPanel = null;
+  // GET /agents/mcp/activity (newest calls + per-server counters), fetched with each
+  // poll; the Test results by server name; which "Recent calls" lists are expanded.
+  let mcpActivity = null;
+  const mcpTests = {};
+  const mcpCallsOpen = new Set();
+  const MCP_RECENT_CALLS = 15;
+
+  function durationText(ms) {
+    if (typeof ms !== "number") return "";
+    return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`;
+  }
+
+  function mcpLastCall(name) {
+    const stats = mcpActivity && mcpActivity.servers && mcpActivity.servers[name];
+    if (!stats || !stats.calls) return el("div", "mcp-last", "No calls by agents yet.");
+    if (stats.last_ok) {
+      const node = el("div", "mcp-last ok", `last call: ✓ ${ago(stats.last_call_at) || ""}`);
+      node.title = new Date(stats.last_call_at * 1000).toLocaleString();
+      return node;
+    }
+    const err = stats.last_error || {};
+    const streak = stats.consecutive_errors || 1;
+    const what = streak > 1 ? `✗ ${streak} failed in a row` : `last call: ✗ ${ago(stats.last_call_at) || ""}`;
+    const node = el("div", "mcp-last bad", `${what}: ${String(err.outcome || "failed")}`);
+    node.title = stats.last_ok_at
+      ? `last worked ${ago(stats.last_ok_at)} (${new Date(stats.last_ok_at * 1000).toLocaleString()})`
+      : "has not worked in the retained history";
+    return node;
+  }
+
+  function mcpRecentCalls(name) {
+    const entries = ((mcpActivity && mcpActivity.entries) || []).filter((e) => e && e.server === name);
+    if (!entries.length) return null;
+    const details = el("details", "mcp-calls");
+    details.open = mcpCallsOpen.has(name);
+    details.addEventListener("toggle", () => {
+      if (details.open) mcpCallsOpen.add(name);
+      else mcpCallsOpen.delete(name);
+    });
+    const shown = entries.slice(0, MCP_RECENT_CALLS);
+    details.appendChild(el("summary", null, `Recent calls (${shown.length})`));
+    const wrap = el("div", "mcp-calls-wrap");
+    const table = el("table");
+    shown.forEach((e) => {
+      const tr = el("tr", e.ok ? null : "bad");
+      const when = el("td", null, typeof e.ts === "number" ? new Date(e.ts * 1000).toLocaleTimeString() : "");
+      if (typeof e.ts === "number") when.title = new Date(e.ts * 1000).toLocaleString();
+      tr.appendChild(when);
+      const who = e.source === "task" ? `task ${e.task_id || ""}` : String(e.source || "");
+      tr.appendChild(el("td", null, [e.session, who].filter(Boolean).join(" · ")));
+      tr.appendChild(el("td", null, String(e.tool || "")));
+      tr.appendChild(el("td", "args", String(e.args || "")));
+      tr.appendChild(el("td", null, `${e.ok ? "✓" : "✗"}${e.outcome ? ` ${e.outcome}` : ""}`));
+      tr.appendChild(el("td", null, durationText(e.duration_ms)));
+      table.appendChild(tr);
+    });
+    wrap.appendChild(table);
+    details.appendChild(wrap);
+    return details;
+  }
+
+  function mcpTestLine(name) {
+    const t = mcpTests[name];
+    if (!t) return null;
+    if (t.running) return el("div", "mcp-test", "Testing: starting the server, MCP handshake, probe…");
+    const r = t.result || {};
+    if (t.error) return el("div", "mcp-test bad", t.error);
+    if (r.ok === null) return el("div", "mcp-test", String(r.error || "not supported"));
+    const took = durationText(r.duration_ms);
+    if (r.ok) {
+      const tools = Array.isArray(r.tools) ? r.tools : [];
+      const parts = [`✓ connected`, `${tools.length} tool${tools.length === 1 ? "" : "s"}`];
+      if (r.probe) parts.push(`probe ${r.probe}: ${r.probe_outcome || "ok"}`);
+      if (took) parts.push(took);
+      const node = el("div", "mcp-test ok", parts.join(" · "));
+      if (tools.length) node.title = tools.join(", ");
+      return node;
+    }
+    return el("div", "mcp-test bad", `✗ failed at ${String(r.stage || "?")}: ${String(r.error || "unknown error")}${took ? ` (${took})` : ""}`);
+  }
+
+  async function runMcpTest(name) {
+    mcpTests[name] = { running: true };
+    renderMcp();
+    let entry;
+    try {
+      const response = await fetch(`/agents/mcp/${encodeURIComponent(name)}/test`, {
+        method: "POST", headers: { Accept: "application/json" },
+      });
+      const payload = await response.json().catch(() => null);
+      if (response.ok && payload) entry = { result: payload };
+      else if (response.status === 403) entry = { error: "You don't have permission to test agent tools." };
+      else entry = { error: detailText(payload && payload.detail) || `Could not run the test (${response.status}).` };
+    } catch (err) {
+      entry = { error: "Could not run the test." };
+    }
+    mcpTests[name] = entry;
+    await refreshMcpActivity(); // a probe call is logged: the "last call" line moves too
+    renderMcp();
+  }
+
+  async function refreshMcpActivity() {
+    try {
+      const response = await fetch("/agents/mcp/activity?limit=200", { headers: { Accept: "application/json" } });
+      if (response.ok) mcpActivity = await response.json();
+    } catch (err) { /* transient - keep the last one */ }
+  }
+
+  function ago(epochSeconds) {
+    if (typeof epochSeconds !== "number") return null;
+    const s = Math.max(0, Math.floor(Date.now() / 1000 - epochSeconds));
+    if (s < 10) return "just now";
+    if (s < 60) return `${s}s ago`;
+    if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+    return `${Math.floor(s / 86400)} d ago`;
+  }
+
+  function buildMcpPanel() {
+    const p = { node: el("div", "panel") };
+    p.node.setAttribute("aria-label", "Agent tools (MCP)");
+    const head = el("div", "env-head");
+    head.appendChild(el("h2", null, "Agent tools (MCP)"));
+    p.source = el("span", "mcp-source");
+    head.appendChild(p.source);
+    if (mcpCanManage) {
+      const actions = el("span", "env-actions");
+      p.refresh = button("Refresh tools", "ghost");
+      p.refresh.addEventListener("click", reloadMcp);
+      actions.appendChild(p.refresh);
+      head.appendChild(actions);
+    }
+    p.node.appendChild(head);
+    // The agents' Claude sign-in: without it every PM chat and dev task fails.
+    p.auth = el("div", "env-line agent-auth");
+    p.node.appendChild(p.auth);
+    p.configErr = el("div", "env-err");
+    p.configErr.setAttribute("role", "alert");
+    p.node.appendChild(p.configErr);
+    p.nodeWarn = el("div", "env-limit");
+    p.node.appendChild(p.nodeWarn);
+    p.actionErr = el("div", "env-err");
+    p.actionErr.setAttribute("role", "alert");
+    p.node.appendChild(p.actionErr);
+    p.list = el("div", "env-services");
+    p.node.appendChild(p.list);
+    p.node.appendChild(
+      el("p", "mcp-note", "Changes apply to every session on its next turn or task — no restart needed.")
+    );
+    return p;
+  }
+
+  let authData = null;
+
+  function renderAuth() {
+    if (!mcpPanel) return;
+    const box = mcpPanel.auth;
+    box.textContent = "";
+    if (!authData) return;
+    const a = authData;
+    const signedIn = !!a.logged_in;
+    const badge = a.login_running
+      ? el("span", "env-badge busy", "signing in…")
+      : el("span", `env-badge ${signedIn ? "ok" : "bad"}`, signedIn ? "signed in" : "not signed in");
+    box.appendChild(badge);
+    box.appendChild(el("span", "env-name", "Claude"));
+    const who = signedIn
+      ? [a.email, a.subscription && `${a.subscription} plan`].filter(Boolean).join(" · ")
+      : (a.error ? String(a.error) : "PM chats and dev tasks fail until the agents sign in");
+    box.appendChild(el("span", "env-detail", who));
+    if (a.isolated) {
+      const chip = el("span", "chip", "own config");
+      chip.title = `Agents use their own Claude config: ${a.config_dir || "PM_AGENT_HOME"}`;
+      box.appendChild(chip);
+    }
+    if (mcpCanManage && !a.login_running) {
+      const action = button(signedIn ? "Sign in again" : "Sign in", signedIn ? "ghost" : undefined);
+      action.addEventListener("click", signInAgents);
+      box.appendChild(action);
+    }
+    if (a.login_running) {
+      const hint = (a.login_output || []).filter((line) => /https?:\/\//.test(line)).pop();
+      box.appendChild(el("span", "env-detail",
+        hint ? `A browser window should have opened; if not, open: ${hint}` : "Finish the sign-in in the browser window that opened."));
+    }
+  }
+
+  async function refreshAuth(force) {
+    try {
+      const response = await fetch(`/agents/auth${force ? "?refresh=true" : ""}`, { headers: { Accept: "application/json" } });
+      if (response.ok) authData = await response.json();
+    } catch (err) { /* transient */ }
+    renderAuth();
+    // While a sign-in runs, check every few seconds so the badge flips when it is done.
+    if (authData && authData.login_running) setTimeout(() => refreshAuth(false), 3000);
+  }
+
+  async function signInAgents() {
+    try {
+      const response = await fetch("/agents/auth/login", { method: "POST", headers: { Accept: "application/json" } });
+      if (response.ok) authData = await response.json();
+      else if (response.status === 403) mcpPanel.actionErr.textContent = "You don't have permission to sign the agents in.";
+    } catch (err) {
+      mcpPanel.actionErr.textContent = "Could not start the sign-in.";
+    }
+    renderAuth();
+    if (authData && authData.login_running) setTimeout(() => refreshAuth(false), 3000);
+  }
+
+  function renderMcp() {
+    const host = document.getElementById("agent-mcp");
+    if (mcpGone || !mcpData) {
+      host.textContent = "";
+      mcpPanel = null;
+      return;
+    }
+    if (!mcpPanel) {
+      mcpPanel = buildMcpPanel();
+      refreshAuth(false);
+    }
+    if (mcpPanel.node.parentNode !== host) host.appendChild(mcpPanel.node);
+    const d = mcpData;
+
+    mcpPanel.source.textContent = "";
+    mcpPanel.source.appendChild(document.createTextNode("from "));
+    mcpPanel.source.appendChild(el("code", null, String(d.source || "pm_studio_local/config.toml")));
+    const loaded = ago(d.loaded_at);
+    if (loaded) {
+      mcpPanel.source.appendChild(document.createTextNode(` · loaded ${loaded}`));
+      mcpPanel.source.title = new Date(d.loaded_at * 1000).toLocaleString();
+    }
+
+    mcpPanel.configErr.textContent = d.error
+      ? `config.toml has an error; agents keep the last valid list: ${String(d.error)}`
+      : "";
+    const nodeInfo = d.node || {};
+    mcpPanel.nodeWarn.textContent = nodeInfo.npx === false
+      ? "Node/npx not found — MCP servers launched with npx cannot start on this machine." +
+        (nodeInfo.path ? ` (node: ${String(nodeInfo.path)})` : "")
+      : "";
+
+    const servers = Array.isArray(d.servers) ? d.servers : [];
+    mcpPanel.list.textContent = "";
+    if (!servers.length) {
+      mcpPanel.list.appendChild(el("p", "empty", "No MCP servers declared ([agents.mcp.<name>] in config.toml)."));
+    }
+    servers.forEach((srv) => {
+      if (!srv) return;
+      const row = el("div", "env-svc");
+      const line = el("div", "env-line");
+      const st = MCP_STATES[srv.status] || { label: String(srv.status || "unknown"), tone: "idle" };
+      line.appendChild(el("span", `env-badge ${st.tone}`, st.label));
+      line.appendChild(el("span", "env-name", String(srv.name || "?")));
+      if (srv.pm) {
+        const chip = el("span", "chip", "PM");
+        chip.title = "Also given to the PM agent.";
+        line.appendChild(chip);
+      }
+      if (srv.transport) line.appendChild(el("span", "env-detail", String(srv.transport)));
+      const target = srv.command || srv.url_host;
+      if (target) line.appendChild(el("span", "mcp-target", String(target)));
+      row.appendChild(line);
+
+      const notes = [];
+      const missing = Array.isArray(srv.missing_env) ? srv.missing_env.map(String) : [];
+      if (srv.status === "skipped" && missing.length) notes.push(`set ${missing.join(", ")} in .env`);
+      if (srv.message) notes.push(String(srv.message));
+      const msg = el("div", st.tone === "bad" ? "env-msg bad" : "env-msg", notes.join(" — "));
+      row.appendChild(msg);
+      if (mcpCanManage && srv.name) {
+        // A real connection test: start, MCP handshake, tools/list, the `probe` call.
+        const test = button(mcpTests[srv.name] && mcpTests[srv.name].running ? "Testing…" : "Test", "ghost");
+        test.disabled = !!(mcpTests[srv.name] && mcpTests[srv.name].running);
+        test.title = srv.probe
+          ? `Start it as agents do, do the MCP handshake and call ${srv.probe}`
+          : "Start it as agents do and do the MCP handshake (add a probe in config.toml to also call a tool)";
+        test.addEventListener("click", () => runMcpTest(String(srv.name)));
+        line.appendChild(test);
+      }
+      if (mcpActivity && srv.name) row.appendChild(mcpLastCall(String(srv.name)));
+      const testLine = srv.name ? mcpTestLine(String(srv.name)) : null;
+      if (testLine) row.appendChild(testLine);
+      const calls = srv.name && mcpActivity ? mcpRecentCalls(String(srv.name)) : null;
+      if (calls) row.appendChild(calls);
+      mcpPanel.list.appendChild(row);
+    });
+  }
+
+  async function refreshMcp() {
+    clearTimeout(mcpTimer);
+    mcpTimer = null;
+    if (mcpGone) return;
+    const seq = ++mcpSeq;
+    let payload = null;
+    try {
+      const response = await fetch("/agents/mcp", { headers: { Accept: "application/json" } });
+      if (response.status === 404) {
+        mcpGone = true;
+        mcpData = null;
+        renderMcp();
+        return;
+      }
+      if (response.ok) payload = await response.json();
+    } catch (err) { /* transient - keep what is on screen */ }
+    if (payload) await refreshMcpActivity();
+    if (seq !== mcpSeq) return;
+    if (payload) {
+      mcpData = payload;
+      renderMcp();
+    } else if (mcpData) {
+      renderMcp(); // keeps "loaded … ago" honest even when a poll fails
+    }
+    scheduleMcp();
+  }
+
+  function scheduleMcp() {
+    clearTimeout(mcpTimer);
+    mcpTimer = null;
+    if (mcpGone || document.visibilityState === "hidden") return;
+    mcpTimer = setTimeout(refreshMcp, MCP_POLL_MS);
+  }
+
+  async function reloadMcp() {
+    const p = mcpPanel;
+    p.refresh.disabled = true;
+    p.actionErr.textContent = "";
+    const seq = ++mcpSeq; // a poll that lands meanwhile must not overwrite the reload
+    try {
+      const response = await fetch("/agents/mcp/reload", { method: "POST", headers: { Accept: "application/json" } });
+      const payload = await response.json().catch(() => null);
+      if (response.ok && payload) {
+        if (seq === mcpSeq) {
+          mcpData = payload;
+          renderMcp();
+        }
+      } else if (response.status === 403) {
+        p.actionErr.textContent = "You don't have permission to reload agent tools.";
+      } else {
+        p.actionErr.textContent =
+          detailText(payload && payload.detail) || `Could not reload agent tools (${response.status}).`;
+      }
+    } catch (err) {
+      p.actionErr.textContent = "Could not reload agent tools.";
+    }
+    p.refresh.disabled = false;
+    scheduleMcp();
+  }
+
+  // Same rule as the local environment: a hidden tab polls nothing.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      clearTimeout(mcpTimer);
+      mcpTimer = null;
+    } else {
+      refreshMcp();
+    }
+  });
+
   async function load() {
     data = await api("/systems/data");
     renderUndeclared();
     renderRestructure();
     renderConfigGap();
     renderSystems();
+    placeEnvPanels();
   }
 
   // Attribution changes ride the roadmap socket, so this page stays current when a PM or

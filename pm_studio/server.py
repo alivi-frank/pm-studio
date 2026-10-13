@@ -11,7 +11,9 @@ from typing import AsyncIterator
 from fastapi import Body, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, RedirectResponse, JSONResponse, RedirectResponse
 
-from . import mailer
+from . import agent_env as agent_env_module
+from . import agent_mcp, mailer
+from . import mcp_activity
 from .accounts import (
     AGENT_HEADER_NAME,
     LOGIN_TTL_SECONDS,
@@ -32,6 +34,8 @@ from .authz import (
     role_has,
 )
 from .config import CONFIG, TrackerConfig
+from .agent import stop_running_turns
+from .local_env import LocalEnvError, LocalEnvManager, SessionContext
 from .costing import (
     KIND_DEV_TASK,
     KIND_PM_TURN,
@@ -74,7 +78,7 @@ from .roadmap import (
 from .sessions import DEFAULT_SESSION_ID, SessionManager, SessionRuntime
 from .signals import api as signals_api
 from .signals.service import IntelligenceService
-from .tasks import validate_dispatch_system
+from .tasks import ensure_system_code, validate_dispatch_system
 from .trackers import (
     TYPE_EPIC,
     TYPE_SUBTASK,
@@ -136,6 +140,128 @@ costing_store = CostingStore(
     currency=CONFIG.costing.currency,
 )
 plan_store = PlanStore(CONFIG.workspace_dir / "plans")
+
+
+def _local_env_session(session_id: str) -> SessionContext | None:
+    """How the local-env supervisor sees a chat session: where its worktree is. None
+    for an unknown session and for one whose worktree is gone (terminated, deleted) -
+    there is nothing left to run its environment from."""
+    session = sessions.get(session_id)
+    if session is None or not session.worktree_path:
+        return None
+    return SessionContext(
+        id=session.id,
+        name=session.name or session.id,
+        worktree=Path(session.worktree_path),
+        primary=session.is_default,
+    )
+
+
+def _local_env_session_busy(session_id: str) -> bool:
+    """Whether a session has a dev task running - the one way a session uses its local
+    environment without making local-env calls (the task's agent may be minutes into a
+    test run against it). The supervisor neither idle-stops nor evicts a busy session's
+    environment. Never raises: a session whose runtime is gone, or a task file being
+    rewritten mid-read, is simply not busy."""
+    try:
+        runtime = sessions.get_runtime(session_id)
+        if runtime is None:
+            return False
+        return any(t.get("status") == "running" for t in runtime.task_registry.list_tasks())
+    except Exception:
+        return False
+
+
+# The processes of every system's `[systems.<id>.local]` environment, one environment
+# per chat session (plus the shared services every session reuses). Owned by the server
+# rather than by whichever task or turn asked for them, so they outlive dev tasks and PM
+# turns - and stopped in the lifespan hook below, so they never outlive the server.
+# Constructing it starts nothing and reads nothing; with no `local` declared it holds
+# nothing. Provisioned resources (per-session databases...) are remembered in
+# local-env/resources.json under the workspace so they are reused across restarts; that
+# directory is on gitsnapshot's never-commit list. With `[local_env] idle_stop_minutes`
+# set, the lifespan hook also runs its idle-stop thread.
+local_env = LocalEnvManager(
+    CONFIG.systems,
+    CONFIG.repo_root,
+    session_lookup=_local_env_session,
+    state_path=CONFIG.workspace_dir / "local-env" / "resources.json",
+    max_session_envs=CONFIG.local_env.max_session_envs,
+    idle_stop_minutes=CONFIG.local_env.idle_stop_minutes,
+    session_busy=_local_env_session_busy,
+)
+
+
+def _release_local_env(session_id: str, actor) -> None:
+    """Gives back a session's local environment before its worktree goes away: stops
+    its services now (a running process holds files in the worktree open, which on
+    Windows makes `git worktree remove` fail) and destroys its resources in the
+    background. Never blocks the lifecycle operation it precedes - a failure here is
+    logged and audited, not raised."""
+    try:
+        report = local_env.release_session(session_id, wait=False)
+    except Exception as exc:  # the session must still be able to end
+        print(f"[pm_studio] local-env release for {session_id} failed: {exc}")
+        return
+    if any(report[k] for k in ("stopped", "destroying", "forgotten", "aborted")):
+        _audit(actor, "local_env.released", session_id, json.dumps(report))
+
+
+def _who(actor) -> str:
+    """Who a stop is attributed to on the record ("Stopped by <who>.")."""
+    return (actor.name or actor.email) if actor is not None else "the user"
+
+
+def _discard_pending_messages(session_id: str, runtime) -> list[str]:
+    """Throws away every message the session accepted but has not started - from the
+    in-memory queue and from its queue file, or a reconnecting page would run them
+    after all (see _resume_pending) - and tells open chat pages which ones went.
+    Returns their ids."""
+    ids = [str(record["id"]) for record in runtime.pm_agent.load_pending()]
+    _discard_queued_turns(session_id)
+    for message_id in ids:
+        runtime.pm_agent.drop_pending(message_id)
+    if ids:
+        _broadcast_chat_event_threadsafe(session_id, {"type": "pm_queue_discarded", "ids": ids})
+    return ids
+
+
+def _stop_session(session_id: str, who: str = "the user") -> dict:
+    """Stops everything a session has running: the messages queued behind its PM
+    (discarded), the PM turn in flight, every running dev task, and the services of its
+    local environment - stopped, not released: its resources and checkout stay for the
+    next start (_release_local_env gives those back when the session ends). Each part
+    is attempted even when another fails - a session must always be stoppable, and
+    whatever lifecycle step follows must still run. Returns what it stopped; a session
+    with nothing running gets empty lists."""
+    report: dict = {"session": session_id, "pm_turn": False, "tasks": [], "services": [], "discarded": []}
+    runtime = sessions.get_runtime(session_id)
+    steps = []
+    if runtime is not None:
+        steps += [
+            ("discarded", lambda: _discard_pending_messages(session_id, runtime)),
+            ("pm_turn", lambda: bool(runtime.pm_agent.stop_turn(who))),
+            ("tasks", lambda: [str(task["id"]) for task in runtime.task_registry.stop_all(who)]),
+        ]
+    steps.append(("services", lambda: [str(name) for name in local_env.stop_session(session_id, f"Stopped by {who}.")]))
+    for key, step in steps:
+        try:
+            report[key] = step()
+        except Exception as exc:
+            print(f"[pm_studio] stopping {key} of session {session_id} failed: {exc}")
+    return report
+
+
+def _stopped_anything(report: dict) -> bool:
+    return any(report[key] for key in ("pm_turn", "tasks", "services", "discarded"))
+
+
+def _stop_for_lifecycle(session_id: str, actor, doing: str) -> None:
+    """The stop every path that ends or hides a session runs first (archive, terminate,
+    clean up, delete): nothing of a session keeps running once it is out of sight."""
+    report = _stop_session(session_id, f"{_who(actor)} {doing}")
+    if _stopped_anything(report):
+        _audit(actor, "session.stopped", session_id, json.dumps(report))
 
 
 def _signals_rate_for(person_id: str) -> tuple[float | None, str]:
@@ -497,8 +623,9 @@ def _on_task_update(session_id: str, task: dict) -> None:
             )
     # Only ordinary dev tasks re-engage the PM - a merge-conflict resolution isn't part
     # of its own plan (see tasks.py's "kind" field) and finishing one shouldn't make it
-    # start narrating an unrelated merge to the stakeholder.
-    if task.get("status") in ("done", "error"):
+    # start narrating an unrelated merge to the stakeholder. A stopped task is settled
+    # (its spend is recorded) but never re-engages the PM: someone stopped it on purpose.
+    if task.get("status") in ("done", "error", "stopped"):
         usage = task.get("agent_usage") or {}
         if usage.get("cost_usd") or usage.get("input_tokens"):
             # Measured spend, recorded against the dispatcher but carrying no extra
@@ -577,10 +704,12 @@ def _auto_continue_pm(session_id: str, task: dict) -> None:
         roadmap_ctx = _roadmap_context_for(session_id)
         for event in runtime.pm_agent.handle_task_completion(task, other_ctx, roadmap_ctx):
             # user_id="" - nobody was at the keyboard for an auto-continuation, so its
-            # tokens count and its labour weight must not.
-            _record_signal(
-                None, KIND_PM_TURN, session_id, usage=event.get("agent_usage"), user_id=""
-            )
+            # tokens count and its labour weight must not. One signal per completed turn,
+            # as for a stakeholder's turn: pm_working and pm_progress carry no usage.
+            if event.get("agent_usage") is not None:
+                _record_signal(
+                    None, KIND_PM_TURN, session_id, usage=event["agent_usage"], user_id=""
+                )
             _broadcast_chat_event_threadsafe(session_id, {**event, "auto": True})
     except Exception as exc:
         _broadcast_chat_event_threadsafe(
@@ -607,10 +736,38 @@ async def _broadcast_chat_event(session_id: str, event: dict) -> None:
         clients.pop(ws, None)
 
 
+def _report_agent_auth() -> None:
+    status = agent_env_module.agent_auth()
+    if status["logged_in"]:
+        print(f"[pm_studio] agents signed in to Claude as {status.get('email') or status.get('auth_method')}")
+    else:
+        reason = status.get("error") or "not signed in"
+        print(f"[pm_studio] WARNING: agents cannot use Claude ({reason}) - sign them in from "
+              "any chat or /systems (Sign in), or with `python -m pm_studio.agent_env --ensure-login`.")
+
+
+def _quiet_connection_resets(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+    """Drops one known-harmless error and reports every other one as asyncio would.
+
+    On Windows' Proactor loop, a browser that closes a connection abruptly (a reload, a
+    closed tab, a dropped websocket) makes the loop's own cleanup callback
+    (`_ProactorBasePipeTransport._call_connection_lost`) fail on a socket that is already
+    gone, and asyncio prints a full traceback for it. Nothing is lost - the connection was
+    over anyway - but a console full of them hides the errors that matter."""
+    exc = context.get("exception")
+    if isinstance(exc, ConnectionResetError) and "_call_connection_lost" in str(context.get("handle", "")):
+        return
+    loop.default_exception_handler(context)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     global _main_loop
     _main_loop = asyncio.get_event_loop()
+    _main_loop.set_exception_handler(_quiet_connection_resets)
+    # Say at startup, not at the first failed chat, when the agents cannot sign in to
+    # Claude. In the background: it runs the CLI, and startup must not wait on it.
+    threading.Thread(target=_report_agent_auth, daemon=True, name="agent-auth-check").start()
     for session_id in list(sessions.runtimes):
         _wire_task_broadcast(session_id)
     sessions.subscribe(_on_session_update)
@@ -626,7 +783,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # auto_refresh_minutes); 0 leaves it to the page's Refresh button.
     if CONFIG.signals.auto_refresh_minutes > 0:
         threading.Thread(target=intelligence_service.background_loop, daemon=True).start()
-    yield
+    # One line naming the [agents.mcp] servers agents will get, and any skipped (by
+    # variable NAME only) - the first place to look when an agent lacks a tool.
+    if agent_mcp.AGENT_MCP.servers():
+        agent_mcp.AGENT_MCP.log_summary()
+    # Stops abandoned session environments ([local_env] idle_stop_minutes); no thread
+    # at all when that is 0. Stopped again by local_env.shutdown() below.
+    local_env.start_idle_reaper()
+    try:
+        yield
+    finally:
+        # Local-env services run in their own process groups (so a Ctrl+C aimed at the
+        # server does not reach them), which makes stopping them here the server's job.
+        # The manager's atexit hook is the backstop for exits that skip the lifespan.
+        local_env.shutdown()
+        # Dev tasks first, so each one that gets to record itself in time reads
+        # "stopped" rather than failed (one that does not is reconciled at the next start).
+        tasks_stopped = 0
+        for runtime in list(sessions.runtimes.values()):
+            try:
+                tasks_stopped += len(runtime.task_registry.stop_all("the server shutting down", wait=0))
+            except Exception as exc:
+                print(f"[pm_studio] stopping dev tasks failed: {exc}")
+        # A PM turn mid-flight holds an executor thread on its `claude` process, and the
+        # interpreter joins those threads on exit - so Ctrl+C would wait out the turn.
+        # Every agent runs in its own process group, out of Ctrl+C's reach, so this is
+        # what ends them (whole trees: MCP servers and all).
+        stopped = stop_running_turns()
+        if stopped or tasks_stopped:
+            print(f"[pm_studio] stopped {stopped} agent process(es) still running "
+                  f"({tasks_stopped} dev task(s))")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -774,7 +960,7 @@ async def _ws_reject(websocket: WebSocket, capability: Capability = "view") -> b
 # FileResponse does not implement conditional requests (that lives in StaticFiles, which
 # this deliberately isn't), so revalidation re-sends the body rather than 304-ing. That
 # is the right trade here and nowhere near a general one: this server binds to localhost
-# for one user, and the whole set is well under 100 KB.
+# for one user, and the whole set is a few hundred KB.
 def _app_asset(name: str, media_type: str | None = None) -> FileResponse:
     return FileResponse(
         STATIC_DIR / name,
@@ -791,6 +977,17 @@ def nav_css() -> FileResponse:
 @app.get("/static/nav.js")
 def nav_js() -> FileResponse:
     return _app_asset("nav.js", "application/javascript")
+
+
+# The chat's markdown renderer (marked) and HTML sanitizer (DOMPurify), vendored.
+@app.get("/static/marked.min.js")
+def marked_js() -> FileResponse:
+    return _app_asset("marked.min.js", "application/javascript")
+
+
+@app.get("/static/purify.min.js")
+def purify_js() -> FileResponse:
+    return _app_asset("purify.min.js", "application/javascript")
 
 
 @app.get("/login")
@@ -1495,6 +1692,10 @@ def merge_session(session_id: str, request: Request) -> dict:
 @app.post("/sessions/{session_id}/cleanup")
 def cleanup_session(session_id: str, request: Request) -> dict:
     actor = _require(request, "manage_session_lifecycle")
+    existing = sessions.get(session_id)
+    if existing is not None and existing.status == "merged":
+        _stop_for_lifecycle(session_id, actor, "cleaning up the session")
+        _release_local_env(session_id, actor)
     try:
         session = sessions.cleanup(session_id)
     except (KeyError, ValueError) as exc:
@@ -1506,6 +1707,10 @@ def cleanup_session(session_id: str, request: Request) -> dict:
 @app.delete("/sessions/{session_id}")
 def delete_session(session_id: str, request: Request) -> dict:
     actor = _require(request, "manage_session_lifecycle")
+    existing = sessions.get(session_id)
+    if existing is not None and not existing.is_default:
+        _stop_for_lifecycle(session_id, actor, "deleting the session")
+        _release_local_env(session_id, actor)
     try:
         session = sessions.delete(session_id)
     except (KeyError, ValueError) as exc:
@@ -1516,9 +1721,13 @@ def delete_session(session_id: str, request: Request) -> dict:
 
 @app.post("/sessions/{session_id}/archive")
 def archive_session(session_id: str, request: Request) -> dict:
-    """Hides the session from the default session list. Purely a visibility flag -
-    doesn't touch the session's lifecycle status, worktree, or branch."""
-    _require(request, "manage_session_lifecycle")
+    """Hides the session from the default session list. A visibility flag - doesn't
+    touch the session's lifecycle status, worktree, or branch - but a hidden session
+    keeps nothing running: its PM turn, dev tasks and local services are stopped first
+    (its environment's resources are kept, for when it is unarchived)."""
+    actor = _require(request, "manage_session_lifecycle")
+    if sessions.get(session_id) is not None:
+        _stop_for_lifecycle(session_id, actor, "archiving the session")
     try:
         session = sessions.archive(session_id)
     except KeyError as exc:
@@ -1534,6 +1743,21 @@ def unarchive_session(session_id: str, request: Request) -> dict:
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return session.to_dict()
+
+
+@app.post("/sessions/{session_id}/stop")
+def stop_session(session_id: str, request: Request) -> dict:
+    """Stops everything the session has running - the PM turn, the messages queued
+    behind it, every running dev task and its local environment's services (resources
+    are kept) - and leaves the session itself as it is, ready for the next message.
+    Returns what it stopped: {pm_turn, tasks, services, discarded}, all empty when
+    nothing was running."""
+    actor = _require(request, "run_session")
+    if sessions.get(session_id) is None:
+        raise HTTPException(status_code=404, detail=f"Unknown session: {session_id}")
+    report = _stop_session(session_id, _who(actor))
+    _audit(actor, "session.stopped", session_id, json.dumps(report))
+    return report
 
 
 @app.post("/sessions/{session_id}/sync")
@@ -1553,8 +1777,18 @@ def sync_session(session_id: str, request: Request) -> dict:
 def terminate_session(session_id: str, request: Request) -> dict:
     """Merges the session into main, archives its final spec/chat, then removes the
     worktree - the only way a non-default session ends. Runs in the background;
-    poll /sessions/{id} or watch /ws/sessions for the outcome."""
+    poll /sessions/{id} or watch /ws/sessions for the outcome.
+
+    The session's local environment is released FIRST, synchronously for its services
+    (they run from the worktree the terminate will remove) and in the background for
+    its resources. Released even though the merge could still stop on a conflict: the
+    session then stays active, and its environment simply comes back on its next start
+    (with a fresh resource)."""
     actor = _require(request, "manage_session_lifecycle")
+    existing = sessions.get(session_id)
+    if existing is not None and not existing.is_default and existing.status in ("active", "conflict"):
+        _stop_for_lifecycle(session_id, actor, "terminating the session")
+        _release_local_env(session_id, actor)
     try:
         session = sessions.terminate(session_id)
     except (KeyError, ValueError) as exc:
@@ -4073,6 +4307,22 @@ def reset_chat(session_id: str, request: Request) -> dict:
     return {"status": "reset"}
 
 
+@app.post("/chat/{session_id}/stop")
+def stop_chat(session_id: str, request: Request) -> dict:
+    """Stops the PM turn in flight - it ends as an error, "Stopped by <who>.", written
+    to the transcript like any failed turn - and discards the messages queued behind
+    it, so nothing starts in its place. Dev tasks keep running (POST
+    /tasks/{session_id}/{task_id}/stop, or /sessions/{session_id}/stop for everything).
+    Returns {pm_turn: whether a turn was running, discarded: queued message ids}."""
+    actor = _require(request, "run_session")
+    runtime = _get_runtime(session_id)
+    discarded = _discard_pending_messages(session_id, runtime)
+    stopped = runtime.pm_agent.stop_turn(_who(actor))
+    report = {"session": session_id, "pm_turn": stopped, "discarded": discarded}
+    _audit(actor, "chat.stopped", session_id, json.dumps(report))
+    return report
+
+
 @app.post("/tasks/{session_id}")
 def create_task(session_id: str, request: Request, payload: dict = Body(...)) -> dict:
     """Dispatching a dev agent is the one endpoint that is equivalent to running
@@ -4104,8 +4354,11 @@ def create_task(session_id: str, request: Request, payload: dict = Body(...)) ->
     system_error = validate_dispatch_system(system)
     if system_error is not None:
         raise HTTPException(status_code=400, detail=system_error)
-    task = _get_runtime(session_id).task_registry.start_task(description, system)
-    _audit(actor, "dev_task.dispatched", session_id, description[:300])
+    # A quick task looks rather than builds (see tasks.QUICK_TASK_PREAMBLE). Still a dev
+    # agent with the same powers, so it is gated and audited exactly like any dispatch.
+    quick = payload.get("quick") is True
+    task = _get_runtime(session_id).task_registry.start_task(description, system, quick=quick)
+    _audit(actor, "dev_task.dispatched", session_id, ("[quick] " if quick else "") + description[:300])
     # Dispatching is the strongest signal of human intent in the system - it is a
     # decision to build something - so it carries the most weight in the split.
     _record_signal(actor, KIND_DEV_TASK, session_id)
@@ -4122,6 +4375,57 @@ def list_tasks(session_id: str) -> list[dict]:
 def get_task(session_id: str, task_id: str) -> dict:
     task = _get_runtime(session_id).task_registry.get_task(task_id)
     return task if task is not None else {"error": "not found"}
+
+
+@app.post("/tasks/{session_id}/{task_id}/stop")
+def stop_task(session_id: str, task_id: str, request: Request) -> dict:
+    """Stops a running dev task: kills its agent and everything it started, and records
+    it as "stopped" - not judged, and not something the PM is woken up to react to.
+    409 when the task is not running (or is a merge-conflict resolution, which the
+    merge flow owns). Returns the task as it then stands."""
+    actor = _require(request, "dispatch_dev_task")
+    registry = _get_runtime(session_id).task_registry
+    task = registry.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Unknown task: {task_id}")
+    stopped = registry.stop_task(task_id, _who(actor))
+    if stopped is None:
+        raise HTTPException(
+            status_code=409, detail=f"Task {task_id} is not running (status: {task.get('status')})."
+        )
+    _audit(actor, "dev_task.stopped", session_id, task_id)
+    return {"session": session_id, "task": stopped}
+
+
+@app.get("/tasks/{session_id}/{task_id}/artifacts/{name:path}")
+def get_task_artifact(session_id: str, task_id: str, name: str) -> FileResponse:
+    """One file a dev task left for the stakeholder (a screenshot, a report), as listed
+    in the task's "artifacts". Resolved strictly inside that task's own folder: no
+    `..`, no absolute paths, no links out of it."""
+    path = _get_runtime(session_id).task_registry.artifact_path(task_id, name)
+    if path is None:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    return FileResponse(path)
+
+
+@app.post("/sessions/{session_id}/checkout/{system_id}")
+def checkout_system_code(session_id: str, system_id: str, request: Request) -> dict:
+    """Makes a system's code present in this session's worktree, where submodules start
+    as empty folders - so the session's PM can READ the code it plans against, at the
+    commit its own branch pins. Idempotent and cheap once done; dev tasks and local
+    environments do the same on their own before they run. Blocking: the first call
+    for a system can take a few seconds per repository."""
+    actor = _require(request, "run_session")
+    runtime = _get_runtime(session_id)
+    error = validate_dispatch_system(system_id)
+    if error is not None or not system_id:
+        raise HTTPException(status_code=404, detail=error or "system required")
+    try:
+        notes = ensure_system_code(runtime.pm_agent.repo_root, system_id)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=f"Could not check {system_id} out: {exc}") from exc
+    _audit(actor, "session.checkout", session_id, system_id)
+    return {"system": system_id, "status": "ready", "notes": [str(n) for n in notes]}
 
 
 async def _run_tasks_ws(websocket: WebSocket, session_id: str) -> None:
@@ -4158,8 +4462,9 @@ def _enqueue_pm_turn(session_id: str, item: dict) -> int:
 
 def _discard_queued_turns(session_id: str) -> None:
     """Throws away every message a session has queued but not started. Hops onto the
-    event loop first: the only caller is the reset endpoint, which FastAPI runs on a
-    worker thread, and these registries belong to the loop."""
+    event loop first: its callers are endpoints (reset, and the stops - see
+    _discard_pending_messages), which FastAPI runs on worker threads, and these
+    registries belong to the loop."""
 
     def drop() -> None:
         queue = _chat_queues.get(session_id)
@@ -4395,6 +4700,267 @@ async def chat_ws_alias(websocket: WebSocket) -> None:
 @app.websocket("/ws/tasks")
 async def tasks_ws_alias(websocket: WebSocket) -> None:
     await _run_tasks_ws(websocket, DEFAULT_SESSION_ID)
+
+
+# ---- local environments ([systems.<id>.local]) ----
+#
+# Thin on purpose: every rule (param allowlist, port conflicts, dependency order, what
+# "ready" means, scopes, the session-environment limit, resources) lives in
+# local_env.LocalEnvManager, so the routes only translate its refusals into status
+# codes - 404 unknown system/service/resource/session, 400 invalid params, 409 port in
+# use / session limit reached / resource busy. Starting never waits for readiness; it
+# answers with the "starting" state and the page polls GET /local-env, while an agent
+# blocks in GET .../wait until the outcome is known.
+# Reads are `view` like every other read; starting, stopping and destroying are
+# `manage_local_env`, which the agent principal holds, so a PM or dev agent can bring
+# its system up with the header it is given.
+#
+# Every route takes an optional `?session=<id>` (default: the default session): which
+# chat session's environment it acts on. Agents get theirs as $PM_STUDIO_SESSION.
+
+
+def _local_env_call(fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except LocalEnvError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+def _local_env_params(payload: dict | None):
+    """The optional `params` member of a start/restart body; None when absent."""
+    if payload is None:
+        return None
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="The body must be a JSON object.")
+    params = payload.get("params")
+    if params is not None and not isinstance(params, dict):
+        raise HTTPException(status_code=400, detail='"params" must be an object.')
+    return params
+
+
+def _local_env_target(session: str, target: str) -> str:
+    """The audit target: unchanged for the default session, so existing audit queries
+    keep matching; prefixed with the session otherwise."""
+    return target if session == DEFAULT_SESSION_ID else f"{session}:{target}"
+
+
+@app.get("/local-env")
+def local_env_status(request: Request, session: str = DEFAULT_SESSION_ID) -> dict:
+    _require(request, "view")
+    systems = _local_env_call(local_env.status, session=session)
+    return {"session": session, "systems": systems}
+
+
+@app.get("/local-env/overview")
+def local_env_overview(request: Request) -> dict:
+    """Every active run and held resource across all sessions, with session names - what
+    is using the machine, and how close it is to `[local_env] max_session_envs`."""
+    _require(request, "view")
+    return local_env.overview()
+
+
+@app.post("/local-env/{system_id}/start")
+def local_env_start_all(
+    system_id: str,
+    request: Request,
+    payload: dict | None = Body(default=None),
+    session: str = DEFAULT_SESSION_ID,
+) -> dict:
+    """Starts every service of the system in dependency order. Body (optional):
+    {"params": {"<service id>": {"<name>": "<value>"}}}."""
+    actor = _require(request, "manage_local_env")
+    params = _local_env_params(payload)
+    result = _local_env_call(local_env.start_all, system_id, params, session=session)
+    _audit(actor, "local_env.started", _local_env_target(session, system_id), json.dumps(params or {}))
+    return result
+
+
+@app.post("/local-env/{system_id}/stop")
+def local_env_stop_all(system_id: str, request: Request, session: str = DEFAULT_SESSION_ID) -> dict:
+    actor = _require(request, "manage_local_env")
+    result = _local_env_call(local_env.stop_all, system_id, session=session)
+    _audit(actor, "local_env.stopped", _local_env_target(session, system_id))
+    return result
+
+
+@app.post("/local-env/{system_id}/resources/{resource_id}/create")
+def local_env_create_resource(
+    system_id: str, resource_id: str, request: Request, session: str = DEFAULT_SESSION_ID
+) -> dict:
+    """Explicitly provisions the session's copy of a resource (or the shared one) - the
+    only way a resource a service merely `uses` comes to exist. Answers at once with
+    state "creating"; 409 when it is already creating, ready or being destroyed."""
+    actor = _require(request, "manage_local_env")
+    result = _local_env_call(local_env.create_resource, system_id, resource_id, session=session)
+    _audit(actor, "local_env.resource_created", _local_env_target(session, f"{system_id}/{resource_id}"))
+    return result
+
+
+@app.post("/local-env/{system_id}/resources/{resource_id}/destroy")
+def local_env_destroy_resource(
+    system_id: str, resource_id: str, request: Request, session: str = DEFAULT_SESSION_ID
+) -> dict:
+    """Destroys the session's copy of a resource (or the shared one). Answers at once
+    with state "destroying"; 409 while a running service uses it."""
+    actor = _require(request, "manage_local_env")
+    result = _local_env_call(local_env.destroy_resource, system_id, resource_id, session=session)
+    _audit(actor, "local_env.resource_destroyed", _local_env_target(session, f"{system_id}/{resource_id}"))
+    return result
+
+
+@app.post("/local-env/{system_id}/{service_id}/start")
+def local_env_start(
+    system_id: str,
+    service_id: str,
+    request: Request,
+    payload: dict | None = Body(default=None),
+    session: str = DEFAULT_SESSION_ID,
+) -> dict:
+    """Starts one service, its dependencies first. Body (optional):
+    {"params": {"<name>": "<value>"}}."""
+    actor = _require(request, "manage_local_env")
+    params = _local_env_params(payload)
+    result = _local_env_call(local_env.start, system_id, service_id, params, session=session)
+    _audit(
+        actor, "local_env.started", _local_env_target(session, f"{system_id}/{service_id}"),
+        json.dumps(params or {}),
+    )
+    return result
+
+
+@app.post("/local-env/{system_id}/{service_id}/stop")
+def local_env_stop(
+    system_id: str, service_id: str, request: Request, session: str = DEFAULT_SESSION_ID
+) -> dict:
+    actor = _require(request, "manage_local_env")
+    result = _local_env_call(local_env.stop, system_id, service_id, session=session)
+    _audit(actor, "local_env.stopped", _local_env_target(session, f"{system_id}/{service_id}"))
+    return result
+
+
+@app.post("/local-env/{system_id}/{service_id}/restart")
+def local_env_restart(
+    system_id: str,
+    service_id: str,
+    request: Request,
+    payload: dict | None = Body(default=None),
+    session: str = DEFAULT_SESSION_ID,
+) -> dict:
+    """Stop then start. Without `params` it reuses the ones the service last ran with."""
+    actor = _require(request, "manage_local_env")
+    params = _local_env_params(payload)
+    result = _local_env_call(local_env.restart, system_id, service_id, params, session=session)
+    _audit(
+        actor, "local_env.restarted", _local_env_target(session, f"{system_id}/{service_id}"),
+        json.dumps(params or {}),
+    )
+    return result
+
+
+@app.get("/local-env/{system_id}/{service_id}/logs")
+def local_env_logs(
+    system_id: str,
+    service_id: str,
+    request: Request,
+    lines: int = 200,
+    session: str = DEFAULT_SESSION_ID,
+) -> dict:
+    """A service's output - or a resource's create/destroy output (pass its id)."""
+    _require(request, "view")
+    return {"lines": _local_env_call(local_env.logs, system_id, service_id, lines, session=session)}
+
+
+@app.get("/local-env/{system_id}/{service_id}/wait")
+def local_env_wait(
+    system_id: str,
+    service_id: str,
+    request: Request,
+    timeout: float = 180,
+    session: str = DEFAULT_SESSION_ID,
+) -> dict:
+    """Blocks until the service leaves "starting" (running, failed, exited...) or
+    `timeout` seconds pass (capped at 600), then answers its status plus
+    `waited_seconds` and `timed_out` - what an agent calls after a start instead of
+    sleeping blind. A plain `def`, so the wait parks a worker thread, never the event
+    loop."""
+    _require(request, "view")
+    return _local_env_call(local_env.wait, system_id, service_id, session=session, timeout=timeout)
+
+
+# ---- agent MCP servers ([agents.mcp.<name>]) ----
+#
+# Read-only view of what agents are given (agent_mcp.py) - names, transports, commands as
+# written, URL hosts, missing variable NAMES; never values - plus a forced re-read and a
+# smoke test. Reloading and checking are `manage_local_env`: like starting local services
+# they act on the developer's machine setup, and the agent principal holds it too, so a
+# PM can pick up a server the stakeholder just added without anyone restarting anything.
+
+
+@app.get("/agents/mcp")
+def agents_mcp_status(request: Request) -> dict:
+    _require(request, "view")
+    return agent_mcp.AGENT_MCP.status()
+
+
+@app.get("/agents/auth")
+def agents_auth_status(request: Request, refresh: bool = False) -> dict:
+    """Whether the agents' Claude config (PM_AGENT_HOME, or the operator's own) is
+    signed in, as whom, and whether a sign-in is running. Names and emails only."""
+    _require(request, "view")
+    return agent_env_module.agent_auth(refresh=refresh)
+
+
+@app.post("/agents/auth/login")
+def agents_auth_login(request: Request) -> dict:
+    """Starts `claude auth login` for the agents' config: a browser sign-in on this
+    machine that finishes by itself. Poll GET /agents/auth for the outcome."""
+    actor = _require(request, "manage_local_env")
+    _audit(actor, "agents.sign_in_started", "agents.auth")
+    return agent_env_module.start_login()
+
+
+@app.post("/agents/mcp/reload")
+def agents_mcp_reload(request: Request) -> dict:
+    actor = _require(request, "manage_local_env")
+    agent_mcp.AGENT_MCP.refresh(force=True)
+    _audit(actor, "agents.mcp_reloaded", "agents.mcp")
+    return agent_mcp.AGENT_MCP.status()
+
+
+@app.post("/agents/mcp/{name}/check")
+def agents_mcp_check(name: str, request: Request) -> dict:
+    """Starts a stdio server once (OS-adapted, resolved env, stdin held open) and says
+    whether it is still running after a few seconds. Does not speak MCP."""
+    actor = _require(request, "manage_local_env")
+    try:
+        result = agent_mcp.AGENT_MCP.check(name)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"No [agents.mcp.{name}] server is configured.") from exc
+    _audit(actor, "agents.mcp_checked", name, json.dumps({"ok": result.get("ok")}))
+    return result
+
+
+@app.post("/agents/mcp/{name}/test")
+def agents_mcp_test(name: str, request: Request) -> dict:
+    """A real connection test (agent_mcp.AgentMcp.test): starts the server as agents
+    get it, does the MCP handshake (initialize, tools/list) and calls its configured
+    `probe`, within 30 s. A plain `def`, so the wait parks a worker thread."""
+    actor = _require(request, "manage_local_env")
+    try:
+        result = agent_mcp.AGENT_MCP.test(name, activity=mcp_activity.ACTIVITY_LOG)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"No [agents.mcp.{name}] server is configured.") from exc
+    _audit(actor, "agents.mcp_tested", name, json.dumps({"ok": result.get("ok"), "stage": result.get("stage")}))
+    return result
+
+
+@app.get("/agents/mcp/activity")
+def agents_mcp_activity(request: Request, server: str = "", limit: int = 50) -> dict:
+    """The newest MCP tool calls agents made (mcp_activity.py) - tool, a sanitized
+    argument summary, ok/outcome/duration; never results - plus per-server counters
+    (calls, errors, last_error, last_ok_at, consecutive_errors)."""
+    _require(request, "view")
+    return mcp_activity.ACTIVITY_LOG.report(server=server or None, limit=max(1, min(limit, 500)))
 
 
 def _can(request: Request, capability: Capability) -> bool:

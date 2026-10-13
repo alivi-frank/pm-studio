@@ -27,11 +27,14 @@ _load_env_file). It stays outside because it holds the actual secrets and the ho
 git-ignores it, while `pm_studio_local/` is committed.
 """
 
+import json
 import os
+import re
 import sys
 import tomllib
 from dataclasses import dataclass, field
 from datetime import date
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pathlib import Path
 from typing import NoReturn
 
@@ -290,6 +293,247 @@ class ProductMeta:
         return not (self.description or self.owner or self.team) and self.stage == "ga"
 
 
+# Placeholders in a local service's command, env values, url and ready_url (and in a
+# resource's create/destroy). Two shapes, one token each:
+#
+#   {name}          a declared param, or one PM Studio fills itself (LOCAL_BUILTINS)
+#   {<id>.<key>}    something another entry of the same system provides: a service's
+#                   port ({api.port}) or a resource's output ({db.name})
+#
+# A brace preceded by `$` is left alone, so a shell's own `${VAR}` expansion can sit in a
+# command without being mistaken for a parameter the operator forgot to declare. The
+# group is the whole token ("api.port"); callers split on the dot.
+LOCAL_PLACEHOLDER = re.compile(r"(?<!\$)\{((?:[a-z0-9-]+\.)?[A-Za-z_][A-Za-z0-9_]*)\}")
+LOCAL_SERVICE_ID = re.compile(r"^[a-z0-9-]+$")
+LOCAL_OUTPUT_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+DEFAULT_LOCAL_READY_TIMEOUT = 180.0
+DEFAULT_LOCAL_RESOURCE_TIMEOUT = 900.0
+# A service's `setup` (installing its dependencies, typically) may take this long.
+DEFAULT_LOCAL_SETUP_TIMEOUT = 900.0
+# Where a service or resource lives: "session" (the default) runs once per chat session,
+# from that session's worktree; "shared" runs once per PM Studio instance, from the
+# primary checkout - for things with no per-session state, like a secrets emulator.
+LOCAL_SCOPE_SESSION = "session"
+LOCAL_SCOPE_SHARED = "shared"
+LOCAL_SCOPES = (LOCAL_SCOPE_SESSION, LOCAL_SCOPE_SHARED)
+# `port = "auto"`: PM Studio picks a free TCP port at start and exposes it as {port}.
+LOCAL_AUTO_PORT = "auto"
+# Placeholder names PM Studio fills itself, so no `params` entry may take them:
+#   {port}      this service's own port (fixed or auto)
+#   {session}   the chat session id the run belongs to (session scope only)
+#   {worktree}  the absolute path of that session's worktree (the repo root for the
+#               default session and for shared scope), with forward slashes
+#   {repo_root} the absolute path of the PRIMARY checkout, with forward slashes, in
+#               every scope. A session worktree holds only what is committed; the
+#               deployment's Makefile, scripts, virtualenv and git-ignored .env live
+#               only in the primary - so a session service typically runs tools from
+#               there against code from its worktree:
+#               `make -C {repo_root} api ROOT={worktree} PORT={port}`
+LOCAL_BUILTINS = ("port", "session", "worktree", "repo_root")
+# Resource expiry (see LocalResourceSpec.expires).
+LOCAL_EXPIRES = ("daily",)
+LOCAL_DEFAULT_EXPIRES_AT = "00:00"
+LOCAL_HHMM = re.compile(r"^([01][0-9]|2[0-3]):([0-5][0-9])$")
+DEFAULT_MAX_SESSION_ENVS = 2
+
+
+@dataclass(frozen=True)
+class LocalServiceSpec:
+    """One process PM Studio can start and stop on the developer's machine for a
+    system's local environment - a secrets emulator, an API, a web app, a worker.
+
+    Deliberately technology-agnostic: a service is a shell command plus how to tell it
+    is up. Node, .NET, Python and Flutter all fit the same shape, so the supervisor
+    (local_env.py) never needs to know what it is running. The command goes through the
+    shell exactly as the operator would type it - which is why `params` exist instead of
+    free-form arguments: a caller may only fill declared `{name}` holes, and the
+    supervisor validates every value against a strict allowlist before substituting it.
+
+    Readiness is declared, never guessed: `port` (a TCP connect on localhost succeeds)
+    and/or `ready_url` (an HTTP GET answers below 500). With neither, a process that is
+    still alive a moment after launch counts as running.
+
+    Every chat session gets its own copy of a "session"-scoped service, run from that
+    session's worktree, so two sessions can each have the API up on their own branch at
+    once - which is why `port` may be "auto" (a free port picked at start, read back
+    through `{port}` and, by dependents, `{<id>.port}`). A "shared" service runs once
+    for the whole instance from the primary checkout and every session reuses it.
+    """
+
+    id: str
+    command: str
+    label: str = ""
+    # Repo-root-relative working directory for the command (resolved against the
+    # session's worktree for session scope, the primary checkout for shared).
+    cwd: str = "."
+    # An int 1-65535, LOCAL_AUTO_PORT ("auto"), or None for no port at all. A fixed port
+    # on a session-scoped service is allowed, but then only one session can run it at a
+    # time: the next one finds the port taken and gets `port_in_use`.
+    port: int | str | None = None
+    ready_url: str = ""
+    # A link the UI offers once the service is running (e.g. the web app's address).
+    url: str = ""
+    # Ids of services AND resources in the SAME system that must be up first.
+    depends_on: tuple[str, ...] = ()
+    # Declared placeholders and their defaults, as (name, default) pairs. Pairs rather
+    # than a dict so the spec stays hashable like every other frozen config value.
+    params: tuple[tuple[str, str], ...] = ()
+    # Extra environment variables for the process, as (name, value) pairs. Values may
+    # use the same placeholders as the command.
+    env: tuple[tuple[str, str], ...] = ()
+    ready_timeout: float = DEFAULT_LOCAL_READY_TIMEOUT
+    scope: str = LOCAL_SCOPE_SESSION
+    # Resources of the SAME system this service can use when they exist, without ever
+    # creating them: `{db.name}` is the output while that resource is ready in the
+    # service's scope at launch, and "" otherwise (so the service falls back to, say,
+    # the shared DEV database). Creating one is a separate, explicit request. Contrast
+    # `depends_on`, which creates the resource on demand.
+    uses: tuple[str, ...] = ()
+    # Optional shell command run before EVERY launch of this service, from the primary
+    # checkout (repo root), to install what the command needs (npm dependencies...) so
+    # nobody has to run it by hand. Runs before the session checkout's links are
+    # refreshed and before dependencies are waited for, so it may only use the params,
+    # {session}, {worktree} and {repo_root} - never {port} or a dependency's values,
+    # which do not exist yet. A non-zero exit or exceeding `setup_timeout` seconds fails
+    # the start.
+    setup: str = ""
+    setup_timeout: float = DEFAULT_LOCAL_SETUP_TIMEOUT
+
+    @property
+    def param_defaults(self) -> dict[str, str]:
+        return dict(self.params)
+
+    @property
+    def env_vars(self) -> dict[str, str]:
+        return dict(self.env)
+
+    @property
+    def auto_port(self) -> bool:
+        return self.port == LOCAL_AUTO_PORT
+
+    @property
+    def fixed_port(self) -> int | None:
+        return self.port if isinstance(self.port, int) else None
+
+    @property
+    def shared(self) -> bool:
+        return self.scope == LOCAL_SCOPE_SHARED
+
+
+@dataclass(frozen=True)
+class LocalResourceSpec:
+    """Something a local environment needs PROVISIONED rather than run - the canonical
+    case being a per-session temporary database, so two sessions migrating their own
+    branches never trample each other's schema.
+
+    Created on demand, the first time a service that lists it in `depends_on` starts in
+    its scope, then reused until it is destroyed: by an explicit request, or when the
+    session that owns it ends. `create` runs from the repo root and reports what it made
+    as its LAST non-empty stdout line - a JSON object of string values, e.g.
+    {"name": "epicmd_it_2873"} - which dependents read as `{<id>.<key>}` ({db.name}).
+    `destroy` (optional) gets the same outputs; without it the resource is forgotten
+    rather than torn down, and the release report says so.
+    """
+
+    id: str
+    create: str
+    label: str = ""
+    scope: str = LOCAL_SCOPE_SESSION
+    destroy: str = ""
+    timeout: float = DEFAULT_LOCAL_RESOURCE_TIMEOUT
+    # Optional declaration of the keys `create` reports. When given, a `{<id>.<key>}`
+    # naming any other key is refused at load and a create that omits one fails; when
+    # empty, keys are only checked at runtime.
+    outputs: tuple[str, ...] = ()
+    # Daily expiry, for resources something else removes on a schedule (a team job that
+    # drops every temporary database at midnight). `expires = "daily"` is the only kind;
+    # `expires_at` is "HH:MM" in `timezone` (an IANA name; "" = this machine's local
+    # time). A resource created before the most recent such boundary reads as
+    # "expired": its outputs are no longer substituted and no destroy is ever run for
+    # it - it is already gone.
+    expires: str = ""
+    expires_at: str = LOCAL_DEFAULT_EXPIRES_AT
+    timezone: str = ""
+
+    @property
+    def shared(self) -> bool:
+        return self.scope == LOCAL_SCOPE_SHARED
+
+
+@dataclass(frozen=True)
+class LocalEnvSpec:
+    """A system's `[systems.<id>.local]` table: the services that make up its local
+    environment, the resources they need provisioned, plus two purely descriptive facts
+    a developer needs next to them (which AWS profile the services expect to be logged
+    in with, and where the test users' credentials live). PM Studio shows those two; it
+    never reads or acts on them.
+
+    `link_from_primary` lists repo-root-relative paths/globs (node_modules, mostly)
+    that a NON-default session's worktree borrows from the primary checkout instead of
+    installing its own; see local_env's checkout preparation."""
+
+    aws_profile: str = ""
+    test_users_secret: str = ""
+    services: tuple[LocalServiceSpec, ...] = ()
+    resources: tuple[LocalResourceSpec, ...] = ()
+    link_from_primary: tuple[str, ...] = ()
+
+    def service(self, service_id: str) -> LocalServiceSpec | None:
+        return next((s for s in self.services if s.id == service_id), None)
+
+    def resource(self, resource_id: str) -> LocalResourceSpec | None:
+        return next((r for r in self.resources if r.id == resource_id), None)
+
+    def consumed_resources(self, service_id: str) -> list[str]:
+        """Every resource whose outputs `service_id` may substitute: those it depends
+        on (directly or through another service), then those it `uses`."""
+        ids = [d for d in self.closure(service_id) if self.resource(d) is not None]
+        spec = self.service(service_id)
+        for rid in getattr(spec, "uses", ()):
+            if rid not in ids:
+                ids.append(rid)
+        return ids
+
+    def closure(self, service_id: str) -> list[str]:
+        """Every service and resource id `service_id` depends on, directly or through
+        another service, nearest first and without duplicates (config guarantees no
+        cycles). What `{<id>.<key>}` may name, and what a start brings up."""
+        seen: list[str] = []
+        pending = list(getattr(self.service(service_id), "depends_on", ()))
+        while pending:
+            dep = pending.pop(0)
+            if dep in seen:
+                continue
+            seen.append(dep)
+            spec = self.service(dep)
+            if spec is not None:
+                pending.extend(spec.depends_on)
+        return seen
+
+
+@dataclass(frozen=True)
+class LocalEnvSettings:
+    """The top-level `[local_env]` table: instance-wide limits on local environments.
+
+    `max_session_envs` caps how many DISTINCT (session, system) environments may have a
+    service starting or running at once. Each one is a full copy of a system's stack
+    (an API, a web app, their watchers) on the developer's machine, so an unbounded
+    number of chat sessions each bringing theirs up is how a laptop runs out of memory.
+    Shared services do not count: there is only ever one of each.
+
+    `idle_stop_minutes` (0 = never, the default) stops a session's environment - its
+    session-scoped services, in every system - once that session has made no local-env
+    call (start, stop, wait, logs, status...) for that many minutes and has no dev task
+    running. Shared services are never idle-stopped, and nothing provisioned is lost:
+    resources (a temporary database) and the prepared session checkout are kept, so the
+    next start is only process startup. The stopped services' status says why. The
+    point is the limit above: a chat someone walked away from should not hold one of
+    the few slots until the server restarts."""
+
+    max_session_envs: int = DEFAULT_MAX_SESSION_ENVS
+    idle_stop_minutes: int = 0
+
+
 @dataclass(frozen=True)
 class SystemSpec:
     """One declared system: a bounded piece of technology/code, the unit a change is
@@ -319,6 +563,10 @@ class SystemSpec:
     # inline text so the rules are versioned with the code they govern and each
     # session's worktree reads its own branch's copy.
     gitflow: str = ""
+    # Optional `[systems.<id>.local]`: the services PM Studio may start and stop on the
+    # developer's machine for this system (see LocalEnvSpec and local_env.py). None
+    # means the system declares no local environment and the feature ignores it.
+    local: LocalEnvSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -432,6 +680,8 @@ class Config:
     # Optional [models] override; empty means "use the package defaults" (models.py).
     models: dict[str, str] = field(default_factory=dict)
     default_model: str | None = None
+    # [models] quick: the model quick dev tasks run on (None: the session's model).
+    quick_model: str | None = None
     # Append-only local prompt fragments ("" when the file is absent).
     pm_instructions: str = ""
     dev_instructions: str = ""
@@ -448,6 +698,13 @@ class Config:
     trackers: tuple[TrackerConfig, ...] = ()
     # Optional [signals] table - see SignalsConfig. Always present with defaults.
     signals: SignalsConfig = field(default_factory=SignalsConfig)
+    # Optional [local_env] table - see LocalEnvSettings. Always present with defaults.
+    local_env: LocalEnvSettings = field(default_factory=LocalEnvSettings)
+    # Optional [agents.mcp.<name>] tables: the MCP servers PM Studio hands to its agents
+    # (see AgentMcpServer and agent_mcp.py). The startup snapshot only - agent_mcp
+    # re-reads this part of config.toml when the file changes, so a running server
+    # picks up new servers without a restart.
+    agent_mcp: tuple["AgentMcpServer", ...] = ()
 
     def tracker(self, tracker_id: str) -> TrackerConfig | None:
         return next((t for t in self.trackers if t.id == tracker_id), None)
@@ -609,6 +866,17 @@ def _parse_systems(raw: dict, config_path: Path) -> dict[str, SystemSpec]:
         label = "Rides & Logistics"
         path = "services/rides"
         repo = "github.com/org/rides"
+
+    A table entry may also carry a `local` sub-table - the services PM Studio can start
+    and stop on the developer's machine for that system (see _parse_local_env):
+
+        [systems.rides.local]
+        aws_profile = "rides-dev"
+
+        [[systems.rides.local.services]]
+        id = "api"
+        command = "npm run start:api"
+        port = 3001
     """
     declared = raw.get("systems", {})
     if not isinstance(declared, dict):
@@ -625,7 +893,7 @@ def _parse_systems(raw: dict, config_path: Path) -> dict[str, SystemSpec]:
                 f"{config_path} has [systems] entry {system_id!r} as a "
                 f"{type(value).__name__}; a system is either a label string "
                 '(claims = "Claims Processor") or a table with `label` and optional '
-                "`path`, `repo`, `guidance`, `gitflow` and `pipelines`"
+                "`path`, `repo`, `guidance`, `gitflow`, `pipelines` and `local`"
             )
         # Systems do not nest. `parent` is meaningful in the sibling [products] table, so
         # an operator could reasonably expect it here - refuse loudly rather than accept
@@ -652,8 +920,701 @@ def _parse_systems(raw: dict, config_path: Path) -> dict[str, SystemSpec]:
             guidance=str(value.get("guidance", "")).strip(),
             pipelines=tuple(str(p).strip() for p in pipelines if str(p).strip()),
             gitflow=str(value.get("gitflow", "")).strip(),
+            local=_parse_local_env(value["local"], system_id, config_path)
+            if "local" in value
+            else None,
         )
     return systems
+
+
+_LOCAL_ENV_KEYS = frozenset(
+    {"aws_profile", "test_users_secret", "services", "resources", "link_from_primary"}
+)
+_LOCAL_SERVICE_KEYS = frozenset(
+    {
+        "id", "label", "command", "cwd", "port", "ready_url", "url",
+        "depends_on", "params", "env", "ready_timeout", "scope", "uses",
+        "setup", "setup_timeout",
+    }
+)
+_LOCAL_RESOURCE_KEYS = frozenset(
+    {
+        "id", "label", "scope", "create", "destroy", "timeout", "outputs",
+        "expires", "expires_at", "timezone",
+    }
+)
+_LOCAL_SETTINGS_KEYS = frozenset({"max_session_envs", "idle_stop_minutes"})
+
+
+def _local_scope(entry: dict, where: str, config_path: Path) -> str:
+    scope = entry.get("scope", LOCAL_SCOPE_SESSION)
+    if scope not in LOCAL_SCOPES:
+        _fatal(
+            f"{config_path} has {where} with `scope` = {scope!r}; it must be one of "
+            f"{', '.join(repr(s) for s in LOCAL_SCOPES)}"
+        )
+    return scope
+
+
+def _local_id(
+    entry: dict, where: str, system_where: str, config_path: Path, seen: set[str], kind: str
+) -> str:
+    item_id = entry.get("id")
+    if not isinstance(item_id, str) or not item_id.strip():
+        _fatal(f"{config_path} has {where} with no `id`")
+    item_id = item_id.strip()
+    if not LOCAL_SERVICE_ID.match(item_id):
+        _fatal(
+            f"{config_path} has {where} {kind} {item_id!r}: ids may only use lowercase "
+            "letters, digits and '-' (they appear in URLs, placeholders and log file names)"
+        )
+    if item_id in seen:
+        # One namespace for services and resources: `depends_on` and `{<id>.<key>}`
+        # name either, so the same id on both would make every reference ambiguous.
+        _fatal(
+            f"{config_path} has {system_where} declaring id {item_id!r} twice "
+            "(services and resources share one set of ids)"
+        )
+    seen.add(item_id)
+    return item_id
+
+
+def _parse_local_env(declared, system_id: str, config_path: Path) -> LocalEnvSpec:
+    """Reads one `[systems.<id>.local]` table into a LocalEnvSpec.
+
+    Stricter than the rest of [systems] on purpose, because what it declares is not
+    descriptive: every service here is a shell command PM Studio will actually run, and
+    a mistake in it surfaces as a process that does the wrong thing rather than as a
+    wrong label. So unknown keys are refused (a misspelt `depends_on` would otherwise
+    start a service before the thing it needs), as is every structural error - duplicate
+    or malformed ids, a dependency on a service or resource that does not exist or a
+    cycle of them, a port that is not a port (nor "auto"), a shared service depending on
+    something that only exists per session, and any `{placeholder}` that nothing would
+    fill (which would otherwise reach the shell as literal braces). See
+    _check_local_placeholders for exactly what each placeholder may name.
+
+    Same posture as everything else in this module: refuse to start, loudly, rather than
+    boot a local environment that silently means something the operator did not write.
+    """
+    where = f"system {system_id!r} `local`"
+    if not isinstance(declared, dict):
+        _fatal(
+            f"{config_path} has {where} as a {type(declared).__name__}; it must be a "
+            f"table ([systems.{system_id}.local])"
+        )
+    unknown = sorted(set(declared) - _LOCAL_ENV_KEYS)
+    if unknown:
+        _fatal(
+            f"{config_path} has {where} with unknown key(s) {', '.join(unknown)}; "
+            f"allowed: {', '.join(sorted(_LOCAL_ENV_KEYS))}"
+        )
+    raw_services = declared.get("services", [])
+    if not isinstance(raw_services, list):
+        _fatal(
+            f"{config_path} has {where} `services` as a {type(raw_services).__name__}; "
+            f"declare each one as [[systems.{system_id}.local.services]]"
+        )
+    raw_resources = declared.get("resources", [])
+    if not isinstance(raw_resources, list):
+        _fatal(
+            f"{config_path} has {where} `resources` as a {type(raw_resources).__name__}; "
+            f"declare each one as [[systems.{system_id}.local.resources]]"
+        )
+
+    seen: set[str] = set()
+    resources: list[LocalResourceSpec] = []
+    for index, entry in enumerate(raw_resources):
+        r_where = f"{where} resource #{index + 1}"
+        if not isinstance(entry, dict):
+            _fatal(f"{config_path} has {r_where} as a {type(entry).__name__}; it must be a table")
+        unknown = sorted(set(entry) - _LOCAL_RESOURCE_KEYS)
+        if unknown:
+            _fatal(
+                f"{config_path} has {r_where} with unknown key(s) {', '.join(unknown)}; "
+                f"allowed: {', '.join(sorted(_LOCAL_RESOURCE_KEYS))}"
+            )
+        resource_id = _local_id(entry, r_where, where, config_path, seen, "resource")
+        r_where = f"{where} resource {resource_id!r}"
+        commands: dict[str, str] = {}
+        for key in ("create", "destroy", "label"):
+            item = entry.get(key, "")
+            if not isinstance(item, str):
+                _fatal(f"{config_path} has {r_where} with `{key}` as a {type(item).__name__}; it must be a string")
+            commands[key] = item.strip()
+        if not commands["create"]:
+            _fatal(f"{config_path} has {r_where} with no `create` command")
+        timeout = entry.get("timeout", DEFAULT_LOCAL_RESOURCE_TIMEOUT)
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+            _fatal(f"{config_path} has {r_where} with `timeout` = {timeout!r}; it must be a positive number of seconds")
+        outputs = entry.get("outputs", [])
+        if not isinstance(outputs, list) or not all(
+            isinstance(o, str) and LOCAL_OUTPUT_KEY.match(o) for o in outputs
+        ):
+            _fatal(
+                f"{config_path} has {r_where} with `outputs` = {outputs!r}; it must be an "
+                'array of key names (letters, digits, _), e.g. outputs = ["name"]'
+            )
+        expiry: dict[str, str] = {}
+        for key, default in (("expires", ""), ("expires_at", LOCAL_DEFAULT_EXPIRES_AT), ("timezone", "")):
+            item = entry.get(key, default)
+            if not isinstance(item, str):
+                _fatal(f"{config_path} has {r_where} with `{key}` as a {type(item).__name__}; it must be a string")
+            expiry[key] = item.strip()
+        if expiry["expires"] and expiry["expires"] not in LOCAL_EXPIRES:
+            _fatal(
+                f"{config_path} has {r_where} with `expires` = {expiry['expires']!r}; the "
+                f"only kind is {', '.join(repr(e) for e in LOCAL_EXPIRES)}"
+            )
+        if not expiry["expires"] and ("expires_at" in entry or "timezone" in entry):
+            _fatal(
+                f"{config_path} has {r_where} with `expires_at`/`timezone` but no "
+                '`expires`; add expires = "daily" (or drop them)'
+            )
+        if not LOCAL_HHMM.match(expiry["expires_at"]):
+            _fatal(
+                f"{config_path} has {r_where} with `expires_at` = {expiry['expires_at']!r}; "
+                'it must be "HH:MM" on a 24-hour clock, e.g. "00:00"'
+            )
+        if expiry["timezone"]:
+            try:
+                ZoneInfo(expiry["timezone"])
+            except (ZoneInfoNotFoundError, ValueError):
+                _fatal(
+                    f"{config_path} has {r_where} with `timezone` = {expiry['timezone']!r}, "
+                    'which is not a known IANA time zone (e.g. "America/New_York")'
+                )
+        resources.append(
+            LocalResourceSpec(
+                id=resource_id,
+                create=commands["create"],
+                label=commands["label"],
+                scope=_local_scope(entry, r_where, config_path),
+                destroy=commands["destroy"],
+                timeout=float(timeout),
+                outputs=tuple(outputs),
+                expires=expiry["expires"],
+                expires_at=expiry["expires_at"],
+                timezone=expiry["timezone"],
+            )
+        )
+
+    services: list[LocalServiceSpec] = []
+    for index, entry in enumerate(raw_services):
+        s_where = f"{where} service #{index + 1}"
+        if not isinstance(entry, dict):
+            _fatal(f"{config_path} has {s_where} as a {type(entry).__name__}; it must be a table")
+        unknown = sorted(set(entry) - _LOCAL_SERVICE_KEYS)
+        if unknown:
+            _fatal(
+                f"{config_path} has {s_where} with unknown key(s) {', '.join(unknown)}; "
+                f"allowed: {', '.join(sorted(_LOCAL_SERVICE_KEYS))}"
+            )
+        service_id = _local_id(entry, s_where, where, config_path, seen, "service")
+        s_where = f"{where} service {service_id!r}"
+
+        command = entry.get("command")
+        if not isinstance(command, str) or not command.strip():
+            _fatal(f"{config_path} has {s_where} with no `command`")
+        command = command.strip()
+
+        cwd = entry.get("cwd", ".")
+        if not isinstance(cwd, str):
+            _fatal(f"{config_path} has {s_where} with `cwd` as a {type(cwd).__name__}; it must be a string")
+        cwd = cwd.strip() or "."
+        if Path(cwd).is_absolute() or cwd.startswith(("/", "\\")):
+            _fatal(f"{config_path} has {s_where} with an absolute `cwd` ({cwd!r}); it is repo-root-relative")
+
+        port = entry.get("port")
+        if port is not None and port != LOCAL_AUTO_PORT and (
+            isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535
+        ):
+            _fatal(
+                f"{config_path} has {s_where} with `port` = {port!r}; it must be an "
+                f'integer 1-65535 or "{LOCAL_AUTO_PORT}"'
+            )
+
+        strings: dict[str, str] = {}
+        for key in ("label", "ready_url", "url"):
+            item = entry.get(key, "")
+            if not isinstance(item, str):
+                _fatal(f"{config_path} has {s_where} with `{key}` as a {type(item).__name__}; it must be a string")
+            strings[key] = item.strip()
+        if strings["ready_url"] and not strings["ready_url"].startswith(("http://", "https://")):
+            _fatal(f"{config_path} has {s_where} with `ready_url` = {strings['ready_url']!r}; it must be an http(s) URL")
+
+        depends_on = entry.get("depends_on", [])
+        if not isinstance(depends_on, list) or not all(isinstance(d, str) for d in depends_on):
+            _fatal(
+                f"{config_path} has {s_where} with `depends_on` = {depends_on!r}; it must be "
+                'an array of service or resource ids, e.g. depends_on = ["secrets"]'
+            )
+        uses = entry.get("uses", [])
+        if not isinstance(uses, list) or not all(isinstance(u, str) for u in uses):
+            _fatal(
+                f"{config_path} has {s_where} with `uses` = {uses!r}; it must be an array "
+                'of resource ids, e.g. uses = ["db"]'
+            )
+
+        tables: dict[str, tuple[tuple[str, str], ...]] = {}
+        for key in ("params", "env"):
+            table = entry.get(key, {})
+            if not isinstance(table, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in table.items()
+            ):
+                _fatal(
+                    f"{config_path} has {s_where} with `{key}` = {table!r}; it must be a "
+                    f'table of strings, e.g. {key} = {{ NAME = "value" }}'
+                )
+            tables[key] = tuple((str(k), v) for k, v in table.items())
+        for name, _ in tables["params"]:
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                _fatal(f"{config_path} has {s_where} with param name {name!r}; use letters, digits and '_'")
+            if name in LOCAL_BUILTINS:
+                _fatal(
+                    f"{config_path} has {s_where} declaring param {name!r}, a name PM Studio "
+                    f"fills itself ({', '.join('{' + b + '}' for b in LOCAL_BUILTINS)}); "
+                    "pick another name"
+                )
+
+        timeout = entry.get("ready_timeout", DEFAULT_LOCAL_READY_TIMEOUT)
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+            _fatal(f"{config_path} has {s_where} with `ready_timeout` = {timeout!r}; it must be a positive number of seconds")
+
+        scope = _local_scope(entry, s_where, config_path)
+        setup = entry.get("setup", "")
+        if not isinstance(setup, str):
+            _fatal(f"{config_path} has {s_where} with `setup` as a {type(setup).__name__}; it must be a string")
+        setup = setup.strip()
+        setup_timeout = entry.get("setup_timeout", DEFAULT_LOCAL_SETUP_TIMEOUT)
+        if isinstance(setup_timeout, bool) or not isinstance(setup_timeout, (int, float)) or setup_timeout <= 0:
+            _fatal(
+                f"{config_path} has {s_where} with `setup_timeout` = {setup_timeout!r}; it must "
+                "be a positive number of seconds"
+            )
+        # `setup` runs before the service has a port and before its dependencies are
+        # used, so only what exists at that point may be substituted into it.
+        setup_allowed = {name for name, _ in tables["params"]} | {"worktree", "repo_root"}
+        if scope != LOCAL_SCOPE_SHARED:
+            setup_allowed.add("session")
+        setup_problems: list[str] = []
+        for token in LOCAL_PLACEHOLDER.findall(setup):
+            if "." in token or token == "port":
+                setup_problems.append(
+                    f"{{{token}}} does not exist yet when `setup` runs (it runs before the "
+                    "service is given a port and before its dependencies are used); only "
+                    "params, {session}, {worktree} and {repo_root} are available to `setup`"
+                )
+            elif token == "session" and scope == LOCAL_SCOPE_SHARED:
+                setup_problems.append("{session} is not available: the service is shared, so it belongs to no session")
+            elif token not in setup_allowed:
+                setup_problems.append(
+                    f"{{{token}}} is not declared in `params` (give each a default, even an empty one)"
+                )
+        if setup_problems:
+            _fatal(
+                f"{config_path} has {s_where} `setup` with unresolvable placeholder(s): "
+                + "; ".join(setup_problems)
+            )
+
+        services.append(
+            LocalServiceSpec(
+                id=service_id,
+                command=command,
+                label=strings["label"],
+                cwd=cwd,
+                port=port,
+                ready_url=strings["ready_url"],
+                url=strings["url"],
+                depends_on=tuple(d.strip() for d in depends_on),
+                params=tables["params"],
+                env=tables["env"],
+                ready_timeout=float(timeout),
+                scope=scope,
+                uses=tuple(u.strip() for u in uses),
+                setup=setup,
+                setup_timeout=float(setup_timeout),
+            )
+        )
+
+    # Dependencies are checked once every id is known, so declaration order is free.
+    by_id = {s.id: s for s in services}
+    resource_by_id = {r.id: r for r in resources}
+    for service in services:
+        for dep in service.depends_on:
+            if dep not in by_id and dep not in resource_by_id:
+                declared_ids = ", ".join([*by_id, *resource_by_id]) or "none"
+                _fatal(
+                    f"{config_path} has {where} service {service.id!r} depending on "
+                    f"{dep!r}, which is not a service or resource of this system "
+                    f"(declared: {declared_ids})"
+                )
+            if dep == service.id:
+                _fatal(f"{config_path} has {where} service {service.id!r} depending on itself")
+            target = by_id.get(dep) or resource_by_id[dep]
+            # A shared service runs once for every session, so it cannot depend on
+            # something there is one of PER session - which session's would it get?
+            if service.shared and not target.shared:
+                _fatal(
+                    f"{config_path} has {where} shared service {service.id!r} depending "
+                    f"on {dep!r}, which is session-scoped; a shared service may only depend "
+                    'on other shared entries (set scope = "shared" on it too, or make '
+                    f"{service.id!r} session-scoped)"
+                )
+        for used in service.uses:
+            if used not in resource_by_id:
+                _fatal(
+                    f"{config_path} has {where} service {service.id!r} with `uses` = "
+                    f"{used!r}, which is not a resource of this system (declared: "
+                    f"{', '.join(resource_by_id) or 'none'})"
+                )
+            if used in service.depends_on:
+                _fatal(
+                    f"{config_path} has {where} service {service.id!r} listing {used!r} in "
+                    "both `depends_on` (create it on start) and `uses` (never create it); "
+                    "pick one"
+                )
+            if service.shared and not resource_by_id[used].shared:
+                _fatal(
+                    f"{config_path} has {where} shared service {service.id!r} using "
+                    f"{used!r}, which is session-scoped; a shared service may only use "
+                    "shared resources"
+                )
+    # Cycle check: a depth-first walk that remembers the path it is on. Resources have
+    # no dependencies of their own, so only services can form one.
+    done: set[str] = set()
+
+    def visit(service_id: str, path: list[str]) -> None:
+        if service_id in path:
+            cycle = " -> ".join(path[path.index(service_id):] + [service_id])
+            _fatal(f"{config_path} has {where} with a dependency cycle: {cycle}")
+        if service_id in done or service_id not in by_id:
+            return
+        for dep in by_id[service_id].depends_on:
+            visit(dep, path + [service_id])
+        done.add(service_id)
+
+    for service in services:
+        visit(service.id, [])
+
+    link_from_primary = declared.get("link_from_primary", [])
+    if not isinstance(link_from_primary, list) or not all(
+        isinstance(p, str) and p.strip() for p in link_from_primary
+    ):
+        _fatal(
+            f"{config_path} has {where} `link_from_primary` = {link_from_primary!r}; it "
+            'must be an array of repo-root-relative paths or globs, e.g. '
+            'link_from_primary = ["src/app/node_modules"]'
+        )
+    for item in link_from_primary:
+        if Path(item.strip()).is_absolute() or item.strip().startswith(("/", "\\")):
+            _fatal(f"{config_path} has {where} `link_from_primary` entry {item!r}; it must be repo-root-relative")
+
+    def text(key: str) -> str:
+        item = declared.get(key, "")
+        if not isinstance(item, str):
+            _fatal(f"{config_path} has {where} `{key}` as a {type(item).__name__}; it must be a string")
+        return item.strip()
+
+    local = LocalEnvSpec(
+        aws_profile=text("aws_profile"),
+        test_users_secret=text("test_users_secret"),
+        services=tuple(services),
+        resources=tuple(resources),
+        link_from_primary=tuple(p.strip() for p in link_from_primary),
+    )
+    _check_local_placeholders(local, where, config_path)
+    return local
+
+
+def _check_local_placeholders(local: LocalEnvSpec, where: str, config_path: Path) -> None:
+    """Every `{placeholder}` must be one something will fill, decided here rather than
+    at launch so a typo is a startup error instead of a service that fails (or worse,
+    runs with literal braces in its arguments) the first time someone starts it.
+
+    What each one may name:
+
+      service command / env values / url / ready_url:
+        {name}         a declared `params` entry
+        {port}         this service's own port (it must declare one, fixed or "auto")
+        {session}      the session id - session-scoped services only; a shared service
+                       belongs to no session
+        {worktree}     the checkout it runs from
+        {repo_root}    the primary checkout (everywhere, every scope)
+        {<id>.port}    a service this one depends on, directly or transitively, that
+                       declares a port
+        {<id>.<key>}   a resource this one depends on, directly or transitively, or
+                       `uses` (and, when the resource declares `outputs`, one of those
+                       keys); for a used resource that is not ready it is ""
+      resource create:  {session} (session scope only), {worktree}, {repo_root}
+      resource destroy: {session} (session scope only), {repo_root}, {<own id>.<key>}
+    """
+    services = {s.id: s for s in local.services}
+    resources = {r.id: r for r in local.resources}
+
+    def dotted(token: str, reachable: list[str], what: str) -> str | None:
+        """None when `token` (an `<id>.<key>`) resolves, else why not."""
+        target_id, key = token.split(".", 1)
+        if target_id not in reachable:
+            return (
+                f"{{{token}}} names {target_id!r}, which {what} neither depends on "
+                "(directly or through another service) nor `uses`"
+            )
+        if target_id in services:
+            if key != "port":
+                return f"{{{token}}}: a service only provides {{{target_id}.port}}"
+            if services[target_id].port is None:
+                return f"{{{token}}}: service {target_id!r} declares no `port`"
+            return None
+        declared_outputs = resources[target_id].outputs
+        if declared_outputs and key not in declared_outputs:
+            return (
+                f"{{{token}}}: resource {target_id!r} declares outputs "
+                f"{', '.join(declared_outputs)}, not {key!r}"
+            )
+        return None
+
+    def check(texts: dict[str, str], allowed_plain: set[str], reachable: list[str], what: str) -> None:
+        problems: list[str] = []
+        for field_name, value in texts.items():
+            for token in LOCAL_PLACEHOLDER.findall(value):
+                if "." in token:
+                    reason = dotted(token, reachable, what)
+                elif token in allowed_plain:
+                    reason = None
+                elif token in LOCAL_BUILTINS:
+                    reason = {
+                        "port": f"{{port}} needs {what} to declare a `port`",
+                        "session": f"{{session}} is not available to {what}: it is shared, so it belongs to no session",
+                    }.get(token, f"{{{token}}} is not available to {what}")
+                else:
+                    reason = (
+                        f"{{{token}}} is not declared in `params` (give each a default, "
+                        "even an empty one)"
+                    )
+                if reason:
+                    problems.append(f"{field_name}: {reason}")
+        if problems:
+            _fatal(f"{config_path} has {where} {what} with unresolvable placeholder(s): " + "; ".join(problems))
+
+    for service in local.services:
+        plain = {name for name, _ in service.params} | {"worktree", "repo_root"}
+        if service.port is not None:
+            plain.add("port")
+        if not service.shared:
+            plain.add("session")
+        texts = {"command": service.command, "url": service.url, "ready_url": service.ready_url}
+        texts.update({f"env.{name}": value for name, value in service.env})
+        check(texts, plain, [*local.closure(service.id), *service.uses], f"service {service.id!r}")
+
+    for resource in local.resources:
+        plain = {"worktree", "repo_root"} if resource.shared else {"worktree", "repo_root", "session"}
+        check({"create": resource.create}, plain, [], f"resource {resource.id!r}")
+        # destroy may run after the worktree is gone (session release), so no {worktree}.
+        plain = {"repo_root"} if resource.shared else {"repo_root", "session"}
+        check({"destroy": resource.destroy}, plain, [resource.id], f"resource {resource.id!r}")
+
+
+AGENT_MCP_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+AGENT_MCP_TRANSPORTS = ("stdio", "http", "sse")
+_AGENTS_KEYS = frozenset({"mcp"})
+_AGENT_MCP_KEYS = frozenset({"command", "args", "type", "url", "headers", "env", "pm", "probe"})
+_AGENT_MCP_PROBE_KEYS = frozenset({"tool", "args"})
+AGENT_MCP_TOOL_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+class AgentConfigError(ValueError):
+    """An invalid [agents] table. Fatal at startup (_parse_agents); at a hot reload
+    (agent_mcp.py) it is recorded and the last good server list is kept."""
+
+
+@dataclass(frozen=True)
+class AgentMcpServer:
+    """One `[agents.mcp.<name>]` table: an MCP server PM Studio gives its agents.
+
+    The single place a deployment declares agent MCP servers: every launch passes
+    `--strict-mcp-config`, so whatever else an agent's Claude Code config holds (its
+    isolated ~/.claude.json, a project .mcp.json) is ignored. Values are kept exactly
+    as written - `${VAR}` / `${VAR:-default}` references included - and resolved from
+    the environment only when an agent is launched (agent_mcp.py), so a credential in
+    the git-ignored .env never sits in a frozen config value or a log.
+
+    Who gets it: dev agents get every server, the PM agent only those with `pm = true`,
+    judges none.
+    """
+
+    name: str
+    # "stdio" (command + args) or "http"/"sse" (url + headers).
+    transport: str
+    command: str = ""
+    args: tuple[str, ...] = ()
+    url: str = ""
+    headers: tuple[tuple[str, str], ...] = ()
+    env: tuple[tuple[str, str], ...] = ()
+    pm: bool = False
+    # Optional `probe = { tool = "query", args = { sql = "select 1" } }`: a harmless call
+    # the connection test (POST /agents/mcp/{name}/test) makes after the handshake.
+    probe: "AgentMcpProbe | None" = None
+
+
+@dataclass(frozen=True)
+class AgentMcpProbe:
+    """`probe` of an [agents.mcp.<name>] table. `args_json` is the args table as JSON
+    (kept as text so the server spec stays hashable); string values may use ${VAR}."""
+
+    tool: str
+    args_json: str = "{}"
+
+    @property
+    def args(self) -> dict:
+        return json.loads(self.args_json)
+
+
+def _parse_probe(value, where: str) -> AgentMcpProbe:
+    example = 'probe = { tool = "query", args = { sql = "select 1" } }'
+    if not isinstance(value, dict):
+        raise AgentConfigError(f"{where} `probe` = {value!r}; it must be a table, e.g. {example}")
+    unknown = sorted(set(value) - _AGENT_MCP_PROBE_KEYS)
+    if unknown:
+        raise AgentConfigError(
+            f"{where} `probe` has unknown key(s) {', '.join(unknown)}; allowed: tool, args"
+        )
+    tool = value.get("tool")
+    if not isinstance(tool, str) or not AGENT_MCP_TOOL_NAME.match(tool):
+        raise AgentConfigError(
+            f"{where} `probe.tool` = {tool!r}; it must be the name of one of the server's "
+            f"tools (letters, digits, '_', '.', '-'), e.g. {example}"
+        )
+    args = value.get("args", {})
+    if not isinstance(args, dict):
+        raise AgentConfigError(f"{where} `probe.args` = {args!r}; it must be a table, e.g. {example}")
+    try:
+        args_json = json.dumps(args, sort_keys=True)
+    except (TypeError, ValueError) as exc:
+        raise AgentConfigError(
+            f"{where} `probe.args` holds a value JSON cannot carry (dates/times are not allowed): {exc}"
+        ) from exc
+    return AgentMcpProbe(tool=tool, args_json=args_json)
+
+
+def _string_table(value, where: str, key: str) -> tuple[tuple[str, str], ...]:
+    if not isinstance(value, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in value.items()
+    ):
+        raise AgentConfigError(
+            f"{where} `{key}` = {value!r}; it must be a table of strings, e.g. "
+            f'{key} = {{ NAME = "value" }}'
+        )
+    return tuple((k, v) for k, v in value.items())
+
+
+def parse_agent_mcp(raw: dict) -> tuple[AgentMcpServer, ...]:
+    """The `[agents]` table of an already-parsed config.toml -> its MCP servers, in
+    declaration order. Raises AgentConfigError on any mistake: unknown keys anywhere,
+    a bad name, wrong types, both `command` and `url`, or neither. Strict because what
+    it declares is launched for agents that run unattended."""
+    agents = raw.get("agents", {})
+    if not isinstance(agents, dict):
+        raise AgentConfigError(f"[agents] is a {type(agents).__name__}; it must be a table")
+    unknown = sorted(set(agents) - _AGENTS_KEYS)
+    if unknown:
+        raise AgentConfigError(
+            f"[agents] has unknown key(s) {', '.join(unknown)}; allowed: "
+            f"{', '.join(sorted(_AGENTS_KEYS))} (declare servers as [agents.mcp.<name>])"
+        )
+    declared = agents.get("mcp", {})
+    if not isinstance(declared, dict):
+        raise AgentConfigError(
+            f"[agents] `mcp` is a {type(declared).__name__}; declare each server as a "
+            "table, [agents.mcp.<name>]"
+        )
+    servers: list[AgentMcpServer] = []
+    for name, entry in declared.items():
+        where = f"[agents.mcp.{name}]"
+        if not AGENT_MCP_NAME.match(name):
+            raise AgentConfigError(f"{where}: server names may only use letters, digits, '_' and '-'")
+        if not isinstance(entry, dict):
+            raise AgentConfigError(f"{where} is a {type(entry).__name__}; it must be a table")
+        unknown = sorted(set(entry) - _AGENT_MCP_KEYS)
+        if unknown:
+            raise AgentConfigError(
+                f"{where} has unknown key(s) {', '.join(unknown)}; allowed: "
+                f"{', '.join(sorted(_AGENT_MCP_KEYS))}"
+            )
+        command, url = entry.get("command"), entry.get("url")
+        if command is not None and url is not None:
+            raise AgentConfigError(f"{where} has both `command` and `url`; a server is one or the other")
+        if command is None and url is None:
+            raise AgentConfigError(f"{where} has neither `command` (stdio) nor `url` (http/sse)")
+        pm = entry.get("pm", False)
+        if not isinstance(pm, bool):
+            raise AgentConfigError(f"{where} `pm` = {pm!r}; it must be true or false")
+        env = _string_table(entry.get("env", {}), where, "env")
+        probe = _parse_probe(entry["probe"], where) if "probe" in entry else None
+        transport = entry.get("type")
+        if command is not None:
+            if not isinstance(command, str) or not command.strip():
+                raise AgentConfigError(f"{where} `command` must be a non-empty string")
+            if transport not in (None, "stdio"):
+                raise AgentConfigError(f"{where} has `command` with type = {transport!r}; a command is a stdio server")
+            args = entry.get("args", [])
+            if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+                raise AgentConfigError(f"{where} `args` = {args!r}; it must be an array of strings")
+            if "headers" in entry:
+                raise AgentConfigError(f"{where} has `headers` on a stdio server; headers are for url servers")
+            servers.append(AgentMcpServer(
+                name=name, transport="stdio", command=command.strip(), args=tuple(args), env=env, pm=pm,
+                probe=probe,
+            ))
+            continue
+        if not isinstance(url, str) or not url.strip():
+            raise AgentConfigError(f"{where} `url` must be a non-empty string")
+        transport = "http" if transport is None else transport
+        if transport not in ("http", "sse"):
+            raise AgentConfigError(f'{where} type = {transport!r}; a url server is "http" or "sse"')
+        if "args" in entry:
+            raise AgentConfigError(f"{where} has `args` on a url server; args are for command servers")
+        servers.append(AgentMcpServer(
+            name=name, transport=transport, url=url.strip(),
+            headers=_string_table(entry.get("headers", {}), where, "headers"), env=env, pm=pm,
+            probe=probe,
+        ))
+    return tuple(servers)
+
+
+def _parse_agents(raw: dict, config_path: Path) -> tuple[AgentMcpServer, ...]:
+    """The startup read of [agents]: same parser as the hot reload, but fatal."""
+    try:
+        return parse_agent_mcp(raw)
+    except AgentConfigError as exc:
+        _fatal(f"{config_path} {exc}")
+
+
+def _parse_local_env_settings(raw: dict, config_path: Path) -> LocalEnvSettings:
+    """Reads the optional top-level [local_env] table (LocalEnvSettings). Strict like
+    the per-system `local` tables: it bounds processes PM Studio actually runs."""
+    table = raw.get("local_env", {})
+    if not isinstance(table, dict):
+        _fatal(f"{config_path} has [local_env] as a {type(table).__name__}; it must be a table")
+    allowed = _LOCAL_SETTINGS_KEYS
+    unknown = sorted(set(table) - allowed)
+    if unknown:
+        _fatal(
+            f"{config_path} has [local_env] with unknown key(s) {', '.join(unknown)}; "
+            f"allowed: {', '.join(sorted(allowed))}"
+        )
+    limit = table.get("max_session_envs", DEFAULT_MAX_SESSION_ENVS)
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        _fatal(
+            f"{config_path} has [local_env] `max_session_envs` = {limit!r}; it must be "
+            "an integer >= 1"
+        )
+    idle = table.get("idle_stop_minutes", 0)
+    if isinstance(idle, bool) or not isinstance(idle, int) or idle < 0:
+        _fatal(
+            f"{config_path} has [local_env] `idle_stop_minutes` = {idle!r}; it must be "
+            "an integer >= 0 (0 = never)"
+        )
+    return LocalEnvSettings(max_session_envs=limit, idle_stop_minutes=idle)
 
 
 def _parse_products(
@@ -1337,6 +2298,14 @@ def load_config(repo_root: Path | None = None) -> Config:
     # new sessions start on. Empty table = use the package defaults (models.py).
     models_raw = dict(raw.get("models", {}))
     default_model = str(models_raw.pop("default", "")).strip() or None
+    # Reserved key "quick": the model QUICK dev tasks (look, don't build) run on instead
+    # of their session's - looking and screenshotting rarely needs the biggest model.
+    quick_model = str(models_raw.pop("quick", "")).strip() or None
+    if quick_model and models_raw and quick_model not in models_raw:
+        _fatal(
+            f"{config_path} has [models] quick = {quick_model!r}, which is not one of the "
+            f"models declared there ({', '.join(models_raw)})."
+        )
 
     # Systems first: a product declares which of them it touches, so they have to be
     # known before [products] can validate those references.
@@ -1389,6 +2358,7 @@ def load_config(repo_root: Path | None = None) -> Config:
         repo_layout=str(project.get("layout", "")).strip() or DEFAULT_REPO_LAYOUT,
         models={str(k): str(v) for k, v in models_raw.items()},
         default_model=default_model,
+        quick_model=quick_model,
         pm_instructions=_read_optional(local_dir / PM_INSTRUCTIONS_NAME),
         dev_instructions=_read_optional(local_dir / DEV_INSTRUCTIONS_NAME),
         knowledge_files=knowledge_files,
@@ -1396,6 +2366,8 @@ def load_config(repo_root: Path | None = None) -> Config:
         smtp=_parse_smtp(raw),
         costing=_parse_costing(raw),
         signals=_parse_signals(raw),
+        local_env=_parse_local_env_settings(raw, config_path),
+        agent_mcp=_parse_agents(raw, config_path),
         trackers=_parse_trackers(raw, config_path, products, product_systems, systems),
     )
 
